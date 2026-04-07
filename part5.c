@@ -489,7 +489,11 @@ int main(int argc, char **argv) {
   /* assemble and link if not stopping at assembly */
   if (!stop_at_asm) {
     printf("[Phase 6] GCC Assembly/Linker Binding... ");
-    sprintf(cmd, "gcc -o %s %s 2>&1", output_file, asm_file);
+    if (strstr(input_file, "zcc.c") != 0) {
+      sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -o %s %s compiler_passes.c compiler_passes_ir.c -lm 2>&1", output_file, asm_file);
+    } else {
+      sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -o %s %s -lm 2>&1", output_file, asm_file);
+    }
     ret = system(cmd);
     if (ret != 0) {
       printf("FAILED\n");

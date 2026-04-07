@@ -33,3 +33,11 @@ asan: zcc.c $(PASSES)
 
 clean:
 	rm -f zcc zcc2 zcc3 zcc_asan zcc.c zcc_pp.c *.s *.o
+
+ir-verify: zcc2
+	@echo "[IR-VERIFY] Stage 2 IR emission..."
+	ZCC_EMIT_IR=1 ./zcc2 zcc.c -o zcc_ir_stage2.s
+	@echo "[IR-VERIFY] Linking IR stage 2 binary..."
+	gcc zcc_ir_stage2.s compiler_passes.c compiler_passes_ir.c -o zcc_ir_stage2 -lm
+	@echo "[IR-VERIFY] Stage 3 via IR path..."
+	ZCC_EMIT_IR=1 ./zcc_ir_stage2 zcc.c -o zcc_ir_stage3.s

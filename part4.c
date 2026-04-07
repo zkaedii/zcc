@@ -771,6 +771,15 @@ void codegen_expr(Compiler *cc, Node *node) {
       }
     }
     fprintf(cc->out, "    movq %%r11, %%rax\n");
+    if (node->lhs->type && !node_type_unsigned(node->lhs)) {
+        if (node->lhs->type->size == 4) fprintf(cc->out, "    cltq\n");
+        else if (node->lhs->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
+        else if (node->lhs->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
+    } else if (node->lhs->type && node_type_unsigned(node->lhs)) {
+        if (node->lhs->type->size == 4) fprintf(cc->out, "    movl %%eax, %%eax\n");
+        else if (node->lhs->type->size == 1) fprintf(cc->out, "    movzbq %%al, %%rax\n");
+        else if (node->lhs->type->size == 2) fprintf(cc->out, "    movzwq %%ax, %%rax\n");
+    }
     return;
 
   case ND_ADD: {
@@ -825,6 +834,13 @@ void codegen_expr(Compiler *cc, Node *node) {
       }
     }
     fprintf(cc->out, "    addq %%r11, %%rax\n");
+    if (node->type && type_size(node->type) == 4) {
+      if (node_type_unsigned(node)) {
+        fprintf(cc->out, "    movl %%eax, %%eax\n");
+      } else {
+        fprintf(cc->out, "    cltq\n");
+      }
+    }
     ir_emit_binary_op(ND_ADD, node->type, lhs_ir, rhs_ir, node->line);
     return;
   }
@@ -882,6 +898,13 @@ void codegen_expr(Compiler *cc, Node *node) {
       }
     }
     fprintf(cc->out, "    subq %%r11, %%rax\n");
+    if (node->type && type_size(node->type) == 4) {
+      if (node_type_unsigned(node)) {
+        fprintf(cc->out, "    movl %%eax, %%eax\n");
+      } else {
+        fprintf(cc->out, "    cltq\n");
+      }
+    }
     ir_emit_binary_op(ND_SUB, node->type, lhs_ir, rhs_ir, node->line);
     return;
   }
@@ -956,6 +979,13 @@ void codegen_expr(Compiler *cc, Node *node) {
     ir_save_result(rhs_ir);
     pop_reg(cc, "r11");
     fprintf(cc->out, "    imulq %%r11, %%rax\n");
+    if (node->type && type_size(node->type) == 4) {
+      if (node_type_unsigned(node)) {
+        fprintf(cc->out, "    movl %%eax, %%eax\n");
+      } else {
+        fprintf(cc->out, "    cltq\n");
+      }
+    }
     ir_emit_binary_op(ND_MUL, node->type, lhs_ir, rhs_ir, node->line);
     return;
   }
@@ -1115,7 +1145,15 @@ void codegen_expr(Compiler *cc, Node *node) {
     }
     codegen_expr_checked(cc, node->lhs);
     ir_save_result(src_ir);
-    fprintf(cc->out, "    notq %%rax\n");
+    if (node->type && type_size(node->type) == 4) {
+      if (node_type_unsigned(node)) {
+        fprintf(cc->out, "    notl %%eax\n");
+      } else {
+        fprintf(cc->out, "    notl %%eax\n    cltq\n");
+      }
+    } else {
+      fprintf(cc->out, "    notq %%rax\n");
+    }
     {
       char *dst = ir_bridge_fresh_tmp();
       ZCC_EMIT_UNARY(IR_NOT, ir_map_type(node->type), dst, src_ir, node->line);
@@ -1165,7 +1203,15 @@ void codegen_expr(Compiler *cc, Node *node) {
     }
     codegen_expr_checked(cc, node->lhs);
     ir_save_result(src_ir);
-    fprintf(cc->out, "    negq %%rax\n");
+    if (node->type && type_size(node->type) == 4) {
+      if (node_type_unsigned(node)) {
+        fprintf(cc->out, "    negl %%eax\n");
+      } else {
+        fprintf(cc->out, "    negl %%eax\n    cltq\n");
+      }
+    } else {
+      fprintf(cc->out, "    negq %%rax\n");
+    }
     {
       char *dst = ir_bridge_fresh_tmp();
       ZCC_EMIT_UNARY(IR_NEG, ir_map_type(node->type), dst, src_ir, node->line);
@@ -1211,7 +1257,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     char rhs_ir[32];
     uns = (node->lhs && node->lhs->type && is_unsigned_type(node->lhs->type)) ||
           (node->rhs && node->rhs->type && is_unsigned_type(node->rhs->type));
-    use32 = uns && node->lhs && node->lhs->type && node->rhs &&
+    use32 = node->lhs && node->lhs->type && node->rhs &&
             node->rhs->type && type_size(node->lhs->type) == 4 &&
             type_size(node->rhs->type) == 4;
     codegen_expr_checked(cc, node->lhs);
@@ -1362,6 +1408,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     ir_save_result(src_ir);
     /* truncate/extend based on target type */
     if (node->cast_type) {
+      int src_size = node->lhs && node->lhs->type ? type_size(node->lhs->type) : 4;
       switch (node->cast_type->size) {
       case 1:
         if (node->cast_type->kind == TY_UCHAR)
@@ -1380,6 +1427,14 @@ void codegen_expr(Compiler *cc, Node *node) {
             fprintf(cc->out, "    movl %%eax, %%eax\n");
         else
             fprintf(cc->out, "    cltq\n");
+        break;
+      case 8:
+        if (src_size == 4) {
+            if (node->lhs && node->lhs->type && is_unsigned_type(node->lhs->type))
+                fprintf(cc->out, "    movl %%eax, %%eax\n");
+            else
+                fprintf(cc->out, "    cltq\n");
+        }
         break;
       default:
         break;
@@ -2245,10 +2300,13 @@ static int allocate_registers(Node *func) {
   return used_regs_bitmask;
 }
 
+extern struct ZCCNode *zcc_node_from(struct Node *ast);
+extern int zcc_run_passes_emit_body_pgo(struct ZCCNode *body, const char *profile, const char *name, void *out, int stack_size, int num_params, int end_label1, int end_label2);
+
 #pragma weak zcc_run_passes_emit_body_pgo
 #pragma weak zcc_node_from
 
-static int ir_whitelisted(const char *name) {
+static int ir_blacklisted(const char *name) {
   if (!name)
     return 0;
   static const char *blacklist[] = {
@@ -2258,7 +2316,7 @@ static int ir_whitelisted(const char *name) {
   for (i = 0; blacklist[i]; i++) {
     if (strcmp(name, blacklist[i]) == 0) {
       fprintf(stderr, "[ZCC-BLACKLIST] HIT (skipping IR): %s\n", name);
-      return 0;
+      return 1;
     }
   }
   return 0;
@@ -2338,8 +2396,8 @@ void codegen_func(Compiler *cc, Node *func) {
   }
 
   int ir_ok = 0;
-  if (getenv("ZCC_IR_BACKEND") || getenv("ZCC_IR_LOWER") ||
-      ir_whitelisted(func->func_def_name)) {
+  if ((getenv("ZCC_IR_BACKEND") || getenv("ZCC_IR_LOWER")) &&
+      !ir_blacklisted(func->func_def_name)) {
     if (zcc_run_passes_emit_body_pgo && zcc_node_from) {
       void *ir_ast = zcc_node_from((void *)func->body);
       if (ir_ast) {
@@ -2420,11 +2478,61 @@ static void emit_global_var(Compiler *cc, Node *gvar) {
         fprintf(cc->out, "    .long %s\n", gvar->initializer->lhs->name);
       else
         fprintf(cc->out, "    .quad %s\n", gvar->initializer->lhs->name);
+    } else if (gvar->initializer->kind == ND_STR) {
+      if (gvar->type && gvar->type->kind == TY_ARRAY) {
+          int j;
+          int str_id = gvar->initializer->str_id;
+          int len = cc->strings[str_id].len;
+          fprintf(cc->out, "    .ascii \"");
+          for (j = 0; j < len; j++) {
+              char c = cc->strings[str_id].data[j];
+              if (c == '\n') fprintf(cc->out, "\\n");
+              else if (c == '\t') fprintf(cc->out, "\\t");
+              else if (c == '\r') fprintf(cc->out, "\\r");
+              else if (c == '\\') fprintf(cc->out, "\\\\");
+              else if (c == '"') fprintf(cc->out, "\\\"");
+              else if (c >= 32 && c < 127) fprintf(cc->out, "%c", c);
+              else fprintf(cc->out, "\\%03o", (unsigned char)c);
+          }
+          fprintf(cc->out, "\\0\"\n");
+          if (size > len + 1) fprintf(cc->out, "    .zero %d\n", size - (len + 1));
+      } else {
+          if (size == 4) fprintf(cc->out, "    .long .Lstr_%d\n", gvar->initializer->str_id);
+          else fprintf(cc->out, "    .quad .Lstr_%d\n", gvar->initializer->str_id);
+      }
+    } else if (gvar->initializer->kind == ND_INIT_LIST) {
+        int i;
+        int emitted = 0;
+        int elem_size = 1;
+        if (gvar->type && gvar->type->base) elem_size = type_size(gvar->type->base);
+        for (i = 0; i < gvar->initializer->num_args; i++) {
+            Node *elem = gvar->initializer->args[i];
+            if (!elem) {
+                fprintf(cc->out, "    .zero %d\n", elem_size);
+            } else if (elem->kind == ND_NUM) {
+                if (elem_size == 1) fprintf(cc->out, "    .byte %lld\n", elem->int_val);
+                else if (elem_size == 2) fprintf(cc->out, "    .short %lld\n", elem->int_val);
+                else if (elem_size == 4) fprintf(cc->out, "    .long %lld\n", elem->int_val);
+                else fprintf(cc->out, "    .quad %lld\n", elem->int_val);
+            } else if (elem->kind == ND_STR) {
+                if (elem_size == 4) fprintf(cc->out, "    .long .Lstr_%d\n", elem->str_id);
+                else fprintf(cc->out, "    .quad .Lstr_%d\n", elem->str_id);
+            } else if (elem->kind == ND_ADDR && elem->lhs && elem->lhs->kind == ND_VAR) {
+                if (elem_size == 4) fprintf(cc->out, "    .long %s\n", elem->lhs->name);
+                else fprintf(cc->out, "    .quad %s\n", elem->lhs->name);
+            } else {
+                fprintf(cc->out, "    .zero %d\n", elem_size);
+            }
+            emitted += elem_size;
+        }
+        if (emitted < size) {
+            fprintf(cc->out, "    .zero %d\n", size - emitted);
+        }
     } else {
       if (gvar->initializer->kind) {
           fprintf(stderr, "GLOBAL %s init kind: %d\n", gvar->name, gvar->initializer->kind);
           if (gvar->initializer->kind == 12) { /* ND_ADDR */
-             fprintf(stderr, "  lhs ptr: %p, lhs kind: %d\n", gvar->initializer->lhs, gvar->initializer->lhs ? gvar->initializer->lhs->kind : -1);
+             fprintf(stderr, "  lhs ptr: %p, lhs kind: %d\n", (void *)gvar->initializer->lhs, gvar->initializer->lhs ? gvar->initializer->lhs->kind : -1);
           }
       }
       fprintf(cc->out, "    .zero %d\n", size);
@@ -2512,11 +2620,44 @@ static void fold_constants(Compiler *cc, Node *node) {
     fold_constants(cc, node->default_case);
   }
 
+  if (node->kind == ND_NEG || node->kind == ND_BNOT || node->kind == ND_LNOT) {
+    if (node->lhs && node->lhs->kind == ND_NUM) {
+      long long v1 = node->lhs->int_val, res = 0;
+      if (node->kind == ND_NEG)
+        res = -v1;
+      else if (node->kind == ND_BNOT)
+        res = ~v1;
+      else if (node->kind == ND_LNOT)
+        res = !v1;
+
+      if (node->type && !node_type_unsigned(node)) {
+          if (node->type->size == 4) res = (long long)(int)res;
+          else if (node->type->size == 1) res = (long long)(char)res;
+          else if (node->type->size == 2) res = (long long)(short)res;
+      } else if (node->type && node_type_unsigned(node)) {
+          if (node->type->size == 4) res = (long long)(unsigned int)res;
+          else if (node->type->size == 1) res = (long long)(unsigned char)res;
+          else if (node->type->size == 2) res = (long long)(unsigned short)res;
+      }
+      node->kind = ND_NUM;
+      node->int_val = res;
+      node->lhs = 0;
+    }
+  }
+
   if (node->kind == ND_ADD || node->kind == ND_SUB || node->kind == ND_MUL ||
       node->kind == ND_DIV || node->kind == ND_MOD) {
     if (node->lhs && node->rhs && node->lhs->kind == ND_NUM &&
         node->rhs->kind == ND_NUM) {
       long long v1 = node->lhs->int_val, v2 = node->rhs->int_val, res = 0;
+      int is_unsigned = node->lhs->type && node_type_unsigned(node->lhs);
+      unsigned long long u1 = v1, u2 = v2;
+      if (is_unsigned && node->lhs->type) {
+          if (node->lhs->type->size == 4) { u1 = (unsigned int)v1; u2 = (unsigned int)v2; }
+          else if (node->lhs->type->size == 1) { u1 = (unsigned char)v1; u2 = (unsigned char)v2; }
+          else if (node->lhs->type->size == 2) { u1 = (unsigned short)v1; u2 = (unsigned short)v2; }
+      }
+
       if (node->kind == ND_ADD)
         res = v1 + v2;
       else if (node->kind == ND_SUB)
@@ -2524,9 +2665,9 @@ static void fold_constants(Compiler *cc, Node *node) {
       else if (node->kind == ND_MUL)
         res = v1 * v2;
       else if (node->kind == ND_DIV && v2 != 0)
-        res = v1 / v2;
+        res = is_unsigned ? u1 / u2 : v1 / v2;
       else if (node->kind == ND_MOD && v2 != 0)
-        res = v1 % v2;
+        res = is_unsigned ? u1 % u2 : v1 % v2;
       else
         return;
       if (node->type && !node_type_unsigned(node)) {
@@ -2552,10 +2693,18 @@ static void fold_constants(Compiler *cc, Node *node) {
     if (node->lhs && node->rhs && node->lhs->kind == ND_NUM &&
         node->rhs->kind == ND_NUM) {
       long long v1 = node->lhs->int_val, v2 = node->rhs->int_val, res = 0;
+      int is_unsigned = node->lhs->type && node_type_unsigned(node->lhs);
+      unsigned long long u1 = v1, u2 = v2;
+      if (is_unsigned && node->lhs->type) {
+          if (node->lhs->type->size == 4) { u1 = (unsigned int)v1; u2 = (unsigned int)v2; }
+          else if (node->lhs->type->size == 1) { u1 = (unsigned char)v1; u2 = (unsigned char)v2; }
+          else if (node->lhs->type->size == 2) { u1 = (unsigned short)v1; u2 = (unsigned short)v2; }
+      }
+
       if (node->kind == ND_SHL)
         res = v1 << v2;
       else if (node->kind == ND_SHR)
-        res = v1 >> v2;
+        res = is_unsigned ? u1 >> u2 : v1 >> v2;
       else if (node->kind == ND_BAND)
         res = v1 & v2;
       else if (node->kind == ND_BOR)
@@ -2563,13 +2712,13 @@ static void fold_constants(Compiler *cc, Node *node) {
       else if (node->kind == ND_BXOR)
         res = v1 ^ v2;
       else if (node->kind == ND_LT)
-        res = v1 < v2;
+        res = is_unsigned ? u1 < u2 : v1 < v2;
       else if (node->kind == ND_LE)
-        res = v1 <= v2;
+        res = is_unsigned ? u1 <= u2 : v1 <= v2;
       else if (node->kind == ND_GT)
-        res = v1 > v2;
+        res = is_unsigned ? u1 > u2 : v1 > v2;
       else if (node->kind == ND_GE)
-        res = v1 >= v2;
+        res = is_unsigned ? u1 >= u2 : v1 >= v2;
       else if (node->kind == ND_EQ)
         res = v1 == v2;
       else if (node->kind == ND_NE)
@@ -2597,17 +2746,11 @@ static void fold_constants(Compiler *cc, Node *node) {
         /* condition is false: replace with else body or empty block */
         if (node->else_body) {
           Node *tgt = node->else_body;
-          node->kind = tgt->kind;
-          node->int_val = tgt->int_val;
-          node->type = tgt->type;
-          node->cond = tgt->cond;
-          node->then_body = tgt->then_body;
-          node->else_body = tgt->else_body;
-          node->num_stmts = tgt->num_stmts;
-          node->stmts = tgt->stmts;
-          node->lhs = tgt->lhs;
-          node->rhs = tgt->rhs;
-          node->body = tgt->body;
+          unsigned long long save_magic = node->magic;
+          unsigned long long save_alloc_id = node->alloc_id;
+          *node = *tgt;
+          node->magic = save_magic;
+          node->alloc_id = save_alloc_id;
         } else {
           node->kind = ND_BLOCK;
           node->num_stmts = 0;
@@ -2617,17 +2760,15 @@ static void fold_constants(Compiler *cc, Node *node) {
         /* condition is true: replace with then body */
         if (node->then_body) {
           Node *tgt = node->then_body;
-          node->kind = tgt->kind;
-          node->int_val = tgt->int_val;
-          node->type = tgt->type;
-          node->cond = tgt->cond;
-          node->then_body = tgt->then_body;
-          node->else_body = tgt->else_body;
-          node->num_stmts = tgt->num_stmts;
-          node->stmts = tgt->stmts;
-          node->lhs = tgt->lhs;
-          node->rhs = tgt->rhs;
-          node->body = tgt->body;
+          unsigned long long save_magic = node->magic;
+          unsigned long long save_alloc_id = node->alloc_id;
+          *node = *tgt;
+          node->magic = save_magic;
+          node->alloc_id = save_alloc_id;
+        } else {
+          node->kind = ND_BLOCK;
+          node->num_stmts = 0;
+          node->stmts = (Node **)cc_alloc(cc, sizeof(Node *));
         }
       }
     }
@@ -2643,30 +2784,20 @@ static void fold_constants(Compiler *cc, Node *node) {
       if (node->cond->int_val == 0) {
         if (node->else_body) {
           Node *tgt = node->else_body;
-          node->kind = tgt->kind;
-          node->int_val = tgt->int_val;
-          node->type = tgt->type;
-          node->cond = tgt->cond;
-          node->then_body = tgt->then_body;
-          node->else_body = tgt->else_body;
-          node->num_stmts = tgt->num_stmts;
-          node->stmts = tgt->stmts;
-          node->lhs = tgt->lhs;
-          node->rhs = tgt->rhs;
+          unsigned long long save_magic = node->magic;
+          unsigned long long save_alloc_id = node->alloc_id;
+          *node = *tgt;
+          node->magic = save_magic;
+          node->alloc_id = save_alloc_id;
         }
       } else {
         if (node->then_body) {
           Node *tgt = node->then_body;
-          node->kind = tgt->kind;
-          node->int_val = tgt->int_val;
-          node->type = tgt->type;
-          node->cond = tgt->cond;
-          node->then_body = tgt->then_body;
-          node->else_body = tgt->else_body;
-          node->num_stmts = tgt->num_stmts;
-          node->stmts = tgt->stmts;
-          node->lhs = tgt->lhs;
-          node->rhs = tgt->rhs;
+          unsigned long long save_magic = node->magic;
+          unsigned long long save_alloc_id = node->alloc_id;
+          *node = *tgt;
+          node->magic = save_magic;
+          node->alloc_id = save_alloc_id;
         }
       }
     }

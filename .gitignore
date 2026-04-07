@@ -1,0 +1,54 @@
+# Binaries
+zcc
+zcc2
+zcc3
+zcc_asan
+*.o
+
+# Generated source
+zcc.c
+zcc_pp.c
+
+# Assembly output
+*.s
+
+# Logs
+ir_full.log
+ir_pass_log.txt
+ir_stderr.log
+
+# Test artifacts
+/tmp/t_*.c
+/tmp/t_*_ast
+/tmp/t_*_ir
+
+# Training data and models
+*.gguf
+*.json
+*.jsonl
+*.parquet
+zcc_mini_training*
+zcc-compiler-bug-corpus/
+
+# Python
+__pycache__/
+*.pyc
+bisect_zcc.py
+
+# llama.cpp
+llama.cpp/
+
+# Tools and scripts
+forge_*.sh
+test_*.sh
+gen_*.py
+fix_*.py
+diag_*.sh
+zcc_ir_forge*.py
+*.skill
+
+# Editor
+.vscode/
+*.swp
+*~
+node_modules

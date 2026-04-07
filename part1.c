@@ -296,9 +296,9 @@ struct Node {
 int node_kind(struct Node *n) { return n ? n->kind : 0; }
 long long node_int_val(struct Node *n) { return n ? (long long)n->int_val : 0; }
 int node_str_id(struct Node *n) { return n ? n->str_id : 0; }
-void node_name(struct Node *n, char *buf, unsigned len) {
+void node_name(struct Node *n, char *buf, int len) {
     if (!n || !buf || len == 0) return;
-    unsigned i = 0;
+    int i; i = 0;
     while (i < len - 1 && n->name[i]) { buf[i] = n->name[i]; i++; }
     buf[i] = '\0';
 }

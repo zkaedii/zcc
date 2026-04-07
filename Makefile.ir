@@ -1,0 +1,49 @@
+# Makefile.ir — ZCC IR Bridge Build
+#
+# Targets:
+#   make -f Makefile.ir zcc_ir       build ZCC with IR bridge linked in
+#   make -f Makefile.ir test_ir      compile test_ir_target.c, run swarm
+#   make -f Makefile.ir selfhost_ir  verify Golden Rule unaffected by bridge
+#   make -f Makefile.ir clean_ir     remove build artifacts
+
+CC      = gcc
+CFLAGS  = -O0 -g -Wall -Wextra
+ZCC_SRC = part1.c part2.c part3.c part4.c part5.c
+
+# ─── Build ZCC with IR bridge ────────────────────────────────────────
+zcc_ir: $(ZCC_SRC) compiler_passes.c compiler_passes_ir.c
+	cat $(ZCC_SRC) > zcc.c
+	$(CC) $(CFLAGS) -o zcc_ir zcc.c compiler_passes.c compiler_passes_ir.c -lm
+	@echo "Built zcc_ir OK"
+
+# ─── Compile test target and run swarm ───────────────────────────────
+test_ir: zcc_ir test_ir_target.c ir_energy_bridge.py
+	ZCC_IR_BRIDGE=1 ./zcc_ir test_ir_target.c -o test_ir_target.s
+	@echo "IR dumped to zcc_ir_dump.json"
+	python3 ir_energy_bridge.py zcc_ir_dump.json --energy
+	@echo "Swarm ingestion complete"
+
+# ─── Golden Rule verification (bridge must not break selfhost) ────────
+selfhost_ir: zcc_ir
+	# Preprocess for ZCC self-hosting (substitute IR bridge header)
+	sed 's/#include "zcc_ir_bridge.h"/#include "zcc_ir_bridge_zcc.h"/;/#include <stdint.h>/d' zcc.c | \
+	grep -v '_Static_assert' > zcc_pp_ir.c
+	# Stage 2 — ZCC_IR_BRIDGE=0 (default off for self-hosting)
+	./zcc_ir zcc_pp_ir.c -o zcc2_ir.s
+	$(CC) -o zcc2_ir zcc2_ir.s
+	./zcc2_ir zcc_pp_ir.c -o zcc3_ir.s
+	@echo "=== cmp zcc2_ir.s zcc3_ir.s ==="
+	@cmp zcc2_ir.s zcc3_ir.s && echo "SELF-HOST OK (IR bridge orthogonal)" || \
+	  (echo "SELF-HOST FAILED — IR bridge introduced divergence" && exit 1)
+
+# ─── Verify ASAN sandbox unaffected ──────────────────────────────────
+verify_asan_ir: zcc_ir
+	@echo "Running verify_invariants.sh with IR bridge binary..."
+	ZCC_IR_BRIDGE=0 ./verify_invariants.sh 2>&1 | tail -5
+
+clean_ir:
+	rm -f zcc_ir zcc.c zcc_pp_ir.c zcc2_ir.s zcc3_ir.s zcc_ir_dump.json
+	rm -f test_ir_target.s
+	@echo "Cleaned IR bridge artifacts"
+
+.PHONY: zcc_ir test_ir selfhost_ir verify_asan_ir clean_ir

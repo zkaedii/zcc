@@ -455,12 +455,18 @@ Node *parse_primary(Compiler *cc) {
     if (cc->tk == TK_NUM) {
         n = node_num(cc, cc->tk_val, line);
         if (cc->tk_text[0] == 'U') {
-             if (n->type == cc->ty_int) n->type = cc->ty_uint;
-             else if (n->type == cc->ty_long) n->type = cc->ty_ulong;
+             if (cc->tk_val <= 4294967295ULL) {
+                 n->type = cc->ty_uint;
+             } else {
+                 n->type = cc->ty_ulong;
+             }
         }
         if (cc->tk_text[1] == 'L') {
-             if (n->type == cc->ty_int) n->type = cc->ty_long;
-             else if (n->type == cc->ty_uint) n->type = cc->ty_ulong;
+             if (cc->tk_text[0] == 'U') {
+                 n->type = cc->ty_ulong;
+             } else {
+                 n->type = cc->ty_long;
+             }
         }
         next_token(cc);
         return n;
@@ -507,8 +513,14 @@ Node *parse_primary(Compiler *cc) {
                 n->type = cc->ty_int;
             }
         } else {
-            /* implicit function declaration */
-            n->type = cc->ty_int;
+            /* stdio global pointers: stdin, stdout, stderr are FILE* (size 8) */
+            if (strcmp(n->name, "stdin") == 0 || strcmp(n->name, "stdout") == 0 || strcmp(n->name, "stderr") == 0) {
+                n->type = type_ptr(cc, cc->ty_char);
+            } else {
+                n->type = cc->ty_int;
+            }
+
+
         }
         next_token(cc);
         return n;
@@ -867,6 +879,27 @@ Node *parse_unary(Compiler *cc) {
 
 /* --- binary operators: mul, add, shift, relational, equality, bit, logical --- */
 
+static Type *promote_type(Compiler *cc, Type *t1, Type *t2) {
+    if (!t1) return t2;
+    if (!t2) return t1;
+    if (type_size(t1) >= 8 || type_size(t2) >= 8) {
+        if (is_unsigned_type(t1) || is_unsigned_type(t2)) return cc->ty_ulong;
+        return cc->ty_long;
+    }
+    if (is_unsigned_type(t1) || is_unsigned_type(t2)) return cc->ty_uint;
+    return cc->ty_int;
+}
+
+static Node *ensure_type(Compiler *cc, Node *n, Type *ty) {
+    if (!n || !n->type || !ty) return n;
+    if (n->type == ty) return n;
+    Node *c = node_new(cc, ND_CAST, n->line);
+    c->lhs = n;
+    c->cast_type = ty;
+    c->type = ty;
+    return c;
+}
+
 Node *parse_mul(Compiler *cc) {
     Node *n;
     n = parse_unary(cc);
@@ -875,16 +908,20 @@ Node *parse_mul(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         if (cc->tk == TK_STAR) op = ND_MUL;
         else if (cc->tk == TK_SLASH) op = ND_DIV;
         else op = ND_MOD;
         next_token(cc);
         rhs = parse_unary(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, op, line);
         binop->lhs = n;
         binop->rhs = rhs;
-        binop->type = n->type;
+        binop->type = pt;
         n = binop;
     }
     return n;
@@ -892,12 +929,14 @@ Node *parse_mul(Compiler *cc) {
 
 Node *parse_add(Compiler *cc) {
     Node *n;
+    Type *pt;
     n = parse_mul(cc);
     while (cc->tk == TK_PLUS || cc->tk == TK_MINUS) {
         int op;
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         if (cc->tk == TK_PLUS) op = ND_ADD;
         else op = ND_SUB;
@@ -912,7 +951,12 @@ Node *parse_add(Compiler *cc) {
         } else if (is_pointer(rhs->type)) {
             binop->type = rhs->type;
         } else {
-            binop->type = n->type;
+            pt = promote_type(cc, n->type, rhs->type);
+            n = ensure_type(cc, n, pt);
+            rhs = ensure_type(cc, rhs, pt);
+            binop->lhs = n;
+            binop->rhs = rhs;
+            binop->type = pt;
         }
         n = binop;
     }
@@ -949,6 +993,7 @@ Node *parse_relational(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         if (cc->tk == TK_LT) op = ND_LT;
         else if (cc->tk == TK_GT) op = ND_GT;
@@ -956,6 +1001,9 @@ Node *parse_relational(Compiler *cc) {
         else op = ND_GE;
         next_token(cc);
         rhs = parse_shift(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, op, line);
         binop->lhs = n;
         binop->rhs = rhs;
@@ -973,11 +1021,15 @@ Node *parse_equality(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         if (cc->tk == TK_EQ) op = ND_EQ;
         else op = ND_NE;
         next_token(cc);
         rhs = parse_relational(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, op, line);
         binop->lhs = n;
         binop->rhs = rhs;
@@ -994,13 +1046,17 @@ Node *parse_bitand(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         next_token(cc);
         rhs = parse_equality(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, ND_BAND, line);
         binop->lhs = n;
         binop->rhs = rhs;
-        binop->type = n->type;
+        binop->type = pt;
         n = binop;
     }
     return n;
@@ -1013,13 +1069,17 @@ Node *parse_bitxor(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         next_token(cc);
         rhs = parse_bitand(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, ND_BXOR, line);
         binop->lhs = n;
         binop->rhs = rhs;
-        binop->type = n->type;
+        binop->type = pt;
         n = binop;
     }
     return n;
@@ -1027,18 +1087,23 @@ Node *parse_bitxor(Compiler *cc) {
 
 Node *parse_bitor(Compiler *cc) {
     Node *n;
+    Type *pt;
     n = parse_bitxor(cc);
     while (cc->tk == TK_PIPE) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         next_token(cc);
         rhs = parse_bitxor(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, ND_BOR, line);
         binop->lhs = n;
         binop->rhs = rhs;
-        binop->type = n->type;
+        binop->type = pt;
         n = binop;
     }
     return n;
@@ -1095,7 +1160,9 @@ Node *parse_ternary(Compiler *cc) {
         tern->then_body = parse_expr(cc);
         expect(cc, TK_COLON);
         tern->else_body = parse_ternary(cc);
-        tern->type = tern->then_body->type;
+        tern->type = promote_type(cc, tern->then_body->type, tern->else_body->type);
+        tern->then_body = ensure_type(cc, tern->then_body, tern->type);
+        tern->else_body = ensure_type(cc, tern->else_body, tern->type);
         n = tern;
     }
     return n;
@@ -1112,7 +1179,7 @@ Node *parse_assign(Compiler *cc) {
         next_token(cc);
         asgn = node_new(cc, ND_ASSIGN, line);
         asgn->lhs = n;
-        asgn->rhs = parse_assign(cc);
+        asgn->rhs = ensure_type(cc, parse_assign(cc), n->type);
         asgn->type = n->type;
         return asgn;
     }
@@ -1943,17 +2010,50 @@ Node *parse_program(Compiler *cc) {
             if (cc->tk == TK_ASSIGN) {
                 next_token(cc);
                 if (cc->tk == TK_LBRACE) {
-                    /* initializer list — skip for now */
-                    int depth;
-                    depth = 1;
-                    next_token(cc);
-                    while (depth > 0) {
-                        if (cc->tk == TK_EOF) break;
-                        if (cc->tk == TK_LBRACE) depth = depth + 1;
-                        if (cc->tk == TK_RBRACE) depth = depth - 1;
-                        if (depth > 0) next_token(cc);
+                    /* Parse array initializer list */
+                    Node *init_list;
+                    Node **inits;
+                    int count;
+                    init_list = node_new(cc, ND_INIT_LIST, line);
+                    inits = (Node **)cc_alloc(cc, sizeof(Node *) * MAX_INIT);
+                    count = 0;
+                    next_token(cc); /* skip { */
+                    while (cc->tk != TK_RBRACE && cc->tk != TK_EOF) {
+                        if (cc->tk == TK_LBRACE) {
+                            int depth = 0;
+                            while (cc->tk != TK_EOF) {
+                                if (cc->tk == TK_LBRACE) depth++;
+                                else if (cc->tk == TK_RBRACE) {
+                                    depth--;
+                                    if (depth == 0) { next_token(cc); break; }
+                                }
+                                next_token(cc);
+                            }
+                            if (count < MAX_INIT) inits[count++] = 0;
+                        } else {
+                            if (count < MAX_INIT) {
+                                inits[count] = parse_assign(cc);
+                                count++;
+                            } else {
+                                parse_assign(cc); /* discard if over limit */
+                            }
+                        }
+                        if (cc->tk == TK_COMMA) next_token(cc);
                     }
-                    next_token(cc);
+                    next_token(cc); /* skip } */
+                    init_list->args = inits;
+                    init_list->num_args = count;
+                    gvar->initializer = init_list;
+                    
+                    /* adjust array size if omitted */
+                    if (gvar->type->kind == TY_ARRAY && gvar->type->array_len == 0) {
+                        gvar->type->array_len = count;
+                        gvar->type->size = type_size(gvar->type->base) * count;
+                        if (gvar->sym) {
+                            gvar->sym->type->array_len = count;
+                            gvar->sym->type->size = gvar->type->size;
+                        }
+                    }
                 } else {
                     gvar->initializer = parse_assign(cc);
                 }

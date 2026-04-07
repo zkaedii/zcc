@@ -2440,7 +2440,7 @@ static int is_main_func(const char *func_name) {
  * conditional/loop body, the alloca was emitted there and never runs on other
  * paths → uninitialized slot → null deref. Fix: always hoist OP_ALLOCA to the
  * entry block so it dominates all uses. */
-static RegID get_or_create_var(LowerCtx *ctx, const char *name) {
+static RegID get_or_create_var(LowerCtx *ctx, const char *name, int size) {
   if (!name || (uintptr_t)name < 4096 || name[0] == '\0') {
     fprintf(stderr, "[ZCC-IR] DEBUG: get_or_create_var EMPTY OR NULL\n");
     return 0;
@@ -2461,7 +2461,7 @@ static RegID get_or_create_var(LowerCtx *ctx, const char *name) {
   RegID r = ctx->next_reg++;
   ctx->slot_alloca_reg[slot] = r;
 
-  Instr *alloca = make_instr_imm(ctx->next_instr_id++, OP_ALLOCA, r, 8, 0);
+  Instr *alloca = make_instr_imm(ctx->next_instr_id++, OP_ALLOCA, r, size > 0 ? size : 8, 0);
 
   /* Hoist OP_ALLOCA to the entry block so it dominates all uses. */
   Block *entry = ctx->fn->blocks[ctx->fn->entry];
@@ -2509,7 +2509,7 @@ static RegID lower_expr(LowerCtx *ctx, ASTNode *ast) {
     break;
   }
   case AST_VAR: {
-    RegID alloca_r = get_or_create_var(ctx, ast->var_name);
+    RegID alloca_r = get_or_create_var(ctx, ast->var_name, 8);
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_LOAD;
@@ -2574,7 +2574,7 @@ static void lower_stmt(LowerCtx *ctx, ASTNode *ast) {
   Function *fn = ctx->fn;
   switch (ast->kind) {
   case AST_ASSIGN: {
-    RegID alloca_r = get_or_create_var(ctx, ast->lhs->var_name);
+    RegID alloca_r = get_or_create_var(ctx, ast->lhs->var_name, 8);
     RegID val_r = lower_expr(ctx, ast->rhs);
     Instr *st = calloc(1, sizeof(Instr));
     st->id = ctx->next_instr_id++;
@@ -3695,7 +3695,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
       emit_instr(ctx, load_ins);
       return val_r;
     } else {
-      RegID alloca_r = get_or_create_var(ctx, node->name);
+      RegID alloca_r = get_or_create_var(ctx, node->name, node->member_size > 0 ? node->member_size : 8);
       if (ctx->want_address || node->is_array || node->is_func)
         return alloca_r;
       ins = calloc(1, sizeof(Instr));
@@ -3937,7 +3937,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     break;
   }
   case ZND_POST_INC: {
-    RegID alloca_r = get_or_create_var(ctx, node->lhs->name);
+    RegID alloca_r = get_or_create_var(ctx, node->lhs->name, 8);
     if (!alloca_r)
       return 0;
     Instr *load_ins = calloc(1, sizeof(Instr));
@@ -3983,7 +3983,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     return r; /* return value before increment */
   }
   case ZND_POST_DEC: {
-    RegID alloca_r = get_or_create_var(ctx, node->lhs->name);
+    RegID alloca_r = get_or_create_var(ctx, node->lhs->name, 8);
     if (!alloca_r)
       return 0;
     Instr *load_ins = calloc(1, sizeof(Instr));
@@ -4029,7 +4029,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     return r; /* return value before decrement */
   }
   case ZND_PRE_INC: {
-    RegID alloca_r = get_or_create_var(ctx, node->lhs->name);
+    RegID alloca_r = get_or_create_var(ctx, node->lhs->name, 8);
     if (!alloca_r)
       return 0;
     Instr *load_ins = calloc(1, sizeof(Instr));
@@ -4075,7 +4075,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     return r_new; /* return value after increment */
   }
   case ZND_PRE_DEC: {
-    RegID alloca_r = get_or_create_var(ctx, node->lhs->name);
+    RegID alloca_r = get_or_create_var(ctx, node->lhs->name, 8);
     if (!alloca_r)
       return 0;
     Instr *load_ins = calloc(1, sizeof(Instr));
@@ -4832,8 +4832,8 @@ Function *zcc_ast_to_ir(ZCCNode *body_ast, const char *func_name) {
    * slots -8, -16. Prologue stores argc→-8, argv→-16; later uses (e.g. argv in
    * for.body) then load the value. */
   if (is_main_func(func_name)) {
-    (void)get_or_create_var(&ctx, "argc");
-    (void)get_or_create_var(&ctx, "argv");
+    (void)get_or_create_var(&ctx, "argc", 8);
+    (void)get_or_create_var(&ctx, "argv", 8);
   } else {
     const char *params_env = getenv("ZCC_IR_PARAM_NAMES");
     fprintf(stderr, "[ZCC-IR] DEBUG: params_env=%s\n",
@@ -4848,7 +4848,7 @@ Function *zcc_ast_to_ir(ZCCNode *body_ast, const char *func_name) {
         char *comma = strchr(spt, ',');
         if (comma)
           *comma = '\0';
-        (void)get_or_create_var(&ctx, spt);
+        (void)get_or_create_var(&ctx, spt, 8);
         if (!comma)
           break;
         spt = comma + 1;
@@ -5568,8 +5568,11 @@ void run_all_passes(Function *fn, PassResult *result, const char *profile_path,
 
   /* ── Pass 1: SSA-form DCE ── */
   uint32_t dce_removed = ssa_dce_pass(fn);
+  uint32_t dce_total   = dce_removed;
+#ifdef ZCC_DCE_VERBOSE
   fprintf(stderr, "[DCE->SSA]  instructions removed: %u  blocks removed: %u\n",
           dce_removed, fn->stats.dce_blocks_removed);
+#endif
 
   /* Recompute reachability after DCE */
   compute_reachability(fn);
@@ -5582,8 +5585,14 @@ void run_all_passes(Function *fn, PassResult *result, const char *profile_path,
   /* ── Pass 3: SSA-form DCE again (cleanup after LICM) ── */
   licm_build_def_block(fn);
   dce_removed = ssa_dce_pass(fn);
+  dce_total  += dce_removed;
+#ifdef ZCC_DCE_VERBOSE
   fprintf(stderr, "[DCE->SSA]  instructions removed: %u  blocks removed: %u\n",
           dce_removed, fn->stats.dce_blocks_removed);
+#endif
+  if (dce_total > 0)
+    fprintf(stderr, "[DCE]  eliminated=%4u  (%u pre-LICM + %u post)\n",
+            dce_total, dce_total - dce_removed, dce_removed);
 
   compute_reachability(fn);
 
@@ -5646,52 +5655,6 @@ void run_all_passes(Function *fn, PassResult *result, const char *profile_path,
     }
   }
   result->n_blocks = pgo_reorder_pass(fn, result->order);
-  /* Structural order for validation: entry first, then if blocks by name
-   * (then.0, else.0, merge.0, then.1, merge.1, ...), then exit. */
-  {
-    uint32_t k = 0;
-    result->order[k++] = fn->entry;
-    /* Find and add blocks by desired name order (if.then.N, if.else.N,
-     * if.merge.N for N=0,1,...). */
-    for (int n = 0; n < (int)fn->n_blocks; n++) {
-      char then_name[NAME_LEN], else_name[NAME_LEN], merge_name[NAME_LEN];
-      snprintf(then_name, sizeof(then_name), "if.then.%d", n);
-      snprintf(else_name, sizeof(else_name), "if.else.%d", n);
-      snprintf(merge_name, sizeof(merge_name), "if.merge.%d", n);
-      BlockID found = 0;
-      for (BlockID i = 0; i < fn->n_blocks; i++) {
-        if (i == fn->entry || i == fn->exit || !fn->blocks[i])
-          continue;
-        if (strcmp(fn->blocks[i]->name, then_name) == 0) {
-          result->order[k++] = i;
-          found++;
-          break;
-        }
-      }
-      for (BlockID i = 0; i < fn->n_blocks; i++) {
-        if (i == fn->entry || i == fn->exit || !fn->blocks[i])
-          continue;
-        if (strcmp(fn->blocks[i]->name, else_name) == 0) {
-          result->order[k++] = i;
-          found++;
-          break;
-        }
-      }
-      for (BlockID i = 0; i < fn->n_blocks; i++) {
-        if (i == fn->entry || i == fn->exit || !fn->blocks[i])
-          continue;
-        if (strcmp(fn->blocks[i]->name, merge_name) == 0) {
-          result->order[k++] = i;
-          found++;
-          break;
-        }
-      }
-      if (found == 0)
-        break; /* no more if blocks for this n */
-    }
-    result->order[k++] = fn->exit;
-    result->n_blocks = k;
-  }
   result->licm_hoisted = fn->stats.licm_hoisted;
   result->dce_instrs_removed = fn->stats.dce_instrs_removed;
   for (uint32_t i = 0; i < result->n_blocks; i++) {
@@ -6179,16 +6142,16 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
     ir_asm_load_to_rax(ctx, ins->src[0]);
     if (ins->ir_type == IR_TY_I32) {
       fprintf(f, "    cltd\n");              /* sign-extend eax → edx:eax    */
-      fprintf(f, "    movl ");
+      fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
-      fprintf(f, ", %%ecx\n");
+      fprintf(f, ", %%rcx\n");
       fprintf(f, "    idivl %%ecx\n");
     } else if (ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movl %%eax, %%eax\n"); /* zero upper 32 bits of rax    */
       fprintf(f, "    xorl %%edx, %%edx\n");
-      fprintf(f, "    movl ");
+      fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
-      fprintf(f, ", %%ecx\n");
+      fprintf(f, ", %%rcx\n");
       fprintf(f, "    divl %%ecx\n");
     } else if (ins->ir_type == IR_TY_U64) {
       fprintf(f, "    xorl %%edx, %%edx\n");
@@ -6213,17 +6176,17 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
     ir_asm_load_to_rax(ctx, ins->src[0]);
     if (ins->ir_type == IR_TY_I32) {
       fprintf(f, "    cltd\n");
-      fprintf(f, "    movl ");
+      fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
-      fprintf(f, ", %%ecx\n");
+      fprintf(f, ", %%rcx\n");
       fprintf(f, "    idivl %%ecx\n");
       fprintf(f, "    movl %%edx, %%eax\n");
     } else if (ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movl %%eax, %%eax\n");
       fprintf(f, "    xorl %%edx, %%edx\n");
-      fprintf(f, "    movl ");
+      fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
-      fprintf(f, ", %%ecx\n");
+      fprintf(f, ", %%rcx\n");
       fprintf(f, "    divl %%ecx\n");
       fprintf(f, "    movl %%edx, %%eax\n");
     } else if (ins->ir_type == IR_TY_U64) {

@@ -27,14 +27,14 @@
 enum {
     MAX_IDENT   = 128,
     MAX_STR     = 4096,
-    MAX_STRINGS = 2048,
-    MAX_GLOBALS = 1024,
-    MAX_STRUCTS = 256,
-    MAX_PARAMS  = 64,
+    MAX_STRINGS = 16384,
+    MAX_GLOBALS = 16384,
+    MAX_STRUCTS = 8192,
+    MAX_PARAMS  = 128,
     MAX_CALL_ARGS = 256,
-    MAX_CASES   = 256,
-    MAX_INIT    = 1024,
-    ARENA_SIZE  = 8388608
+    MAX_CASES   = 4096,
+    MAX_INIT    = 8192,
+    ARENA_SIZE  = 16777216
 };
 
 /* ================================================================ */
@@ -54,6 +54,7 @@ enum {
     /* type-related */
     TK_STRUCT, TK_UNION, TK_ENUM, TK_TYPEDEF,
     TK_SIZEOF, TK_STATIC, TK_EXTERN, TK_CONST,
+    TK_BUILTIN_VA_ARG,
     TK_VOLATILE, TK_AUTO, TK_REGISTER, TK_INLINE,
     /* operators */
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
@@ -94,7 +95,7 @@ enum {
     ND_IF, ND_WHILE, ND_FOR, ND_DO_WHILE,
     ND_BREAK, ND_CONTINUE, ND_GOTO, ND_LABEL,
     ND_SWITCH, ND_CASE, ND_DEFAULT,
-    ND_CAST, ND_SIZEOF,
+    ND_CAST, ND_SIZEOF, ND_VA_ARG,
     ND_MEMBER, ND_PRE_INC, ND_PRE_DEC,
     ND_POST_INC, ND_POST_DEC,
     ND_TERNARY,
@@ -181,6 +182,7 @@ struct Symbol {
     int is_enum_const;
     long long enum_val;
     int stack_offset;  /* for locals */
+    char asm_name[MAX_IDENT];
     /* Regalloc */
     char *assigned_reg;
     int live_start;
@@ -468,6 +470,8 @@ struct Compiler {
 
     /* local variable offset counter (for codegen) */
     int local_offset;
+
+    int current_is_static;
 };
 
 /* ================================================================ */

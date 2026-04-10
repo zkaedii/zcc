@@ -1347,7 +1347,7 @@ uint32_t ssa_dce_pass(Function *fn) {
     uint32_t def_n_seed = def->n_src;
     if (def->op == OP_BR)
       def_n_seed = 0;
-    if (def->op == OP_CONDBR)
+    if (def->op == OP_CONDBR || def->op == OP_COPY)
       def_n_seed = 1;
     for (uint32_t s = 0; s < def_n_seed; s++) {
       RegID src = def->src[s];
@@ -1795,6 +1795,9 @@ static uint32_t scalar_promotion_pass(Function *fn, EscapeCtx *ctx) {
       }
       if (ins->op == OP_STORE && ins->n_src >= 2 && ins->src[1] == base_reg) {
         current_val = ins->src[0];
+        while (current_val < MAX_INSTRS && repl_valid[current_val]) {
+          current_val = repl[current_val];
+        }
         current_val_set = true;
         if (n_stores < 256)
           stores_to_remove[n_stores++] = ins;
@@ -2370,6 +2373,7 @@ typedef struct {
   /* var name → slot index; slot_alloca_reg[slot] = reg holding alloca result */
   char var_names[AST_MAX_VARS][NAME_LEN];
   RegID slot_alloca_reg[AST_MAX_VARS];
+  Instr *slot_alloca_instr[AST_MAX_VARS];
   uint32_t n_vars;
   int want_address; /* 1 when lowering lhs of assign/compound_assign: return
                        address reg, no load */
@@ -2446,9 +2450,14 @@ static RegID get_or_create_var(LowerCtx *ctx, const char *name, int size) {
     return 0;
   }
   fprintf(stderr, "[ZCC-IR] DEBUG: get_or_create_var('%s')\n", name);
-  for (uint32_t i = 0; i < ctx->n_vars; i++)
-    if (strcmp(ctx->var_names[i], name) == 0)
+  for (uint32_t i = 0; i < ctx->n_vars; i++) {
+    if (strcmp(ctx->var_names[i], name) == 0) {
+      if (size > (int)ctx->slot_alloca_instr[i]->imm) {
+        ctx->slot_alloca_instr[i]->imm = size;
+      }
       return ctx->slot_alloca_reg[i];
+    }
+  }
 
   if (ctx->n_vars >= AST_MAX_VARS) {
     fprintf(stderr, "FATAL: AST_MAX_VARS exceeded\n");
@@ -2462,6 +2471,7 @@ static RegID get_or_create_var(LowerCtx *ctx, const char *name, int size) {
   ctx->slot_alloca_reg[slot] = r;
 
   Instr *alloca = make_instr_imm(ctx->next_instr_id++, OP_ALLOCA, r, size > 0 ? size : 8, 0);
+  ctx->slot_alloca_instr[slot] = alloca;
 
   /* Hoist OP_ALLOCA to the entry block so it dominates all uses. */
   Block *entry = ctx->fn->blocks[ctx->fn->entry];
@@ -5548,12 +5558,16 @@ void run_all_passes(Function *fn, PassResult *result, const char *profile_path,
   uint32_t opt_sr = opt_strength_reduction_pass(fn);
   uint32_t opt_cp = opt_copy_prop_pass(fn);
   uint32_t opt_p = opt_peephole_pass(fn);
+  uint32_t opt_cp2 = 0;
+  if (opt_p > 0) {
+    opt_cp2 = opt_copy_prop_pass(fn);
+  }
 
-  if (folded > 0 || opt_sr > 0 || opt_cp > 0 || opt_p > 0) {
+  if (folded > 0 || opt_sr > 0 || opt_cp > 0 || opt_p > 0 || opt_cp2 > 0) {
     fprintf(
         stderr,
-        "[IR-Opts] Folded: %u | S-Reduce: %u | Copy-Prop: %u | Peephole: %u\n",
-        folded, opt_sr, opt_cp, opt_p);
+        "[IR-Opts] Folded: %u | S-Reduce: %u | Copy-Prop: %u | Peephole: %u | Copy-Prop2: %u\n",
+        folded, opt_sr, opt_cp, opt_p, opt_cp2);
     licm_build_def_block(fn);
   }
 
@@ -5916,6 +5930,21 @@ static void ir_asm_load_to_rax(IRAsmCtx *ctx, RegID r) {
     fprintf(f, "    movq %d(%%rbp), %%rax\n", slot);
 }
 
+static void ir_asm_load_to_rax_typed(IRAsmCtx *ctx, RegID r, IRType t) {
+  FILE *f = ctx->out;
+  int slot;
+  int p = ir_asm_vreg_location(ctx, r, &slot);
+  if (p >= 0) {
+    fprintf(f, "    movq %%%s, %%rax\n", phys_reg_name[p]);
+    if (t == IR_TY_I32)      fprintf(f, "    movslq %%eax, %%rax\n");
+    else if (t == IR_TY_U32) fprintf(f, "    movl %%eax, %%eax\n");
+  } else {
+    if (t == IR_TY_I32)      fprintf(f, "    movslq %d(%%rbp), %%rax\n", slot);
+    else if (t == IR_TY_U32) fprintf(f, "    movl %d(%%rbp), %%eax\n", slot);
+    else                     fprintf(f, "    movq %d(%%rbp), %%rax\n", slot);
+  }
+}
+
 static void ir_asm_store_rax_to(IRAsmCtx *ctx, RegID r) {
   FILE *f = ctx->out;
   int slot;
@@ -6091,7 +6120,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_ADD: {
     /* CG-IR-017: addl for I32/U32, addq for I64/U64 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6107,7 +6136,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_SUB: {
     /* CG-IR-017: subl for I32/U32, subq for I64/U64 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6123,7 +6152,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_MUL: {
     /* CG-IR-017: imull for I32/U32, imulq for I64/U64 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     fprintf(f, "    movq ");
     ir_asm_emit_src_operand(ctx, ins->src[1]);
     fprintf(f, ", %%rcx\n");
@@ -6139,7 +6168,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
      * Bug: cqo sign-extends rax→rdx:rax in 64-bit; for 32-bit int operands
      * that corrupts the dividend.  Fix: use cltd/idivl for I32, plain
      * xor+divl for U32, xor+divq for U64, cqo/idivq for I64 (default). */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32) {
       fprintf(f, "    cltd\n");              /* sign-extend eax → edx:eax    */
       fprintf(f, "    movq ");
@@ -6173,7 +6202,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
     /* CG-IR-015: same width/sign selection as OP_DIV; remainder is in
      * edx (32-bit) or rdx (64-bit) after the div instruction, so move it
      * into eax/rax before the generic ir_asm_store_rax_to. */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32) {
       fprintf(f, "    cltd\n");
       fprintf(f, "    movq ");
@@ -6209,7 +6238,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_BAND: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6228,7 +6257,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
      * For the immediate path: shlq is always correct for ADD/SUB lower-bits
      * (upper bits discarded anyway), but use shll for I32/U32 to stay clean.
      * For the reg-count path: was referencing undefined `n->type` — fixed. */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     int shl_is32 = (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32);
     if (ins->src[1] < MAX_INSTRS && fn->def_of[ins->src[1]] &&
         fn->def_of[ins->src[1]]->op == OP_CONST) {
@@ -6251,7 +6280,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
      *  Bug B: sarq used for unsigned right-shift propagates sign bit.
      *  Fix: select {shr,sar}{l,q} based on ir_type width + signedness.
      *  Also fixes the undefined sz_suffix(ir_type_bytes(n->type)) reference. */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     int shr_is32  = (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32);
     int shr_unsig = (ins->ir_type == IR_TY_U32 || ins->ir_type == IR_TY_U64);
     if (ins->src[1] < MAX_INSTRS && fn->def_of[ins->src[1]] &&
@@ -6375,7 +6404,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
     break;
   case OP_LT: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6395,7 +6424,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_EQ: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6415,7 +6444,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_NE: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6435,7 +6464,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_GT: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6455,7 +6484,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_GE: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6475,7 +6504,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_LE: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6495,7 +6524,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_BOR: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6511,7 +6540,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_BXOR: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
@@ -6527,7 +6556,7 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   }
   case OP_BNOT: {
     /* CG-IR-017 */
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32)
       fprintf(f, "    notl %%eax\n");
     else

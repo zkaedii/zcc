@@ -263,11 +263,11 @@ static char *read_file(char *path, int *out_len) {
 /* PEEPHOLE OPTIMIZER                                                */
 /* ================================================================ */
 
-#define MAX_PEEP_LINES 300000
+#define MAX_PEEP_LINES 3000000
 #define MAX_PEEP_LEN 128
 
 static char *line_buffer = 0;
-static char *line_ptrs[300000];
+static char **line_ptrs = 0;
 
 static void peephole_optimize(char *filename) {
   FILE *fp;
@@ -284,13 +284,16 @@ static void peephole_optimize(char *filename) {
   file_size = ftell(fp);
   fseek(fp, 0, 0);
 
-  line_buffer = (char *)malloc(file_size + 300000 * 128);
-  if (!line_buffer) {
+  if (!line_ptrs) {
+    line_ptrs = (char **)malloc(MAX_PEEP_LINES * sizeof(char *));
+  }
+  line_buffer = (char *)malloc(file_size + MAX_PEEP_LINES * 128);
+  if (!line_buffer || !line_ptrs) {
     fclose(fp);
     return;
   }
 
-  while (nlines < 300000 && fgets(line_buffer + nlines * 128, 128, fp)) {
+  while (nlines < MAX_PEEP_LINES && fgets(line_buffer + nlines * 128, 128, fp)) {
     line_ptrs[nlines] = line_buffer + nlines * 128;
     nlines++;
   }
@@ -387,15 +390,31 @@ int main(int argc, char **argv) {
   input_file = 0;
   output_file = 0;
 
+  int pp_only = 0;
+
+  int zcc_verbose_flag = 0;
+
   /* parse arguments */
   for (i = 1; i < argc; i++) {
     if (strcmp(argv[i], "-o") == 0) {
       i++;
       if (i < argc)
         output_file = argv[i];
+    } else if (strcmp(argv[i], "--pp-only") == 0) {
+      pp_only = 1;
+    } else if (strcmp(argv[i], "-v") == 0) {
+      zcc_verbose_flag = 1;
     } else {
       input_file = argv[i];
     }
+  }
+
+  if (!zcc_verbose_flag) {
+#ifdef _WIN32
+    freopen("nul", "w", stderr);
+#else
+    freopen("/dev/null", "w", stderr);
+#endif
   }
 
   if (!input_file) {
@@ -413,6 +432,25 @@ int main(int argc, char **argv) {
   if (!source) {
     printf("zcc: cannot read '%s'\n", input_file);
     return 1;
+  }
+
+  /* PREPROCESSOR HOOK */
+  {
+    int pp_len;
+    char *pp_source = zcc_preprocess(source, source_len, input_file, ".:./include", &pp_len);
+    if (!pp_source) {
+      fprintf(stderr, "zcc: preprocessing failed\n");
+      return 1;
+    }
+    /* We leak original `source` here because we replaced it.
+       ZCC doesn't care much about leaking in main string allocations anyway. */
+    source = pp_source;
+    source_len = pp_len;
+  }
+
+  if (pp_only) {
+    printf("%s", source);
+    return 0;
   }
 
   /* heap-allocate compiler state (too large for stack) */
@@ -490,9 +528,9 @@ int main(int argc, char **argv) {
   if (!stop_at_asm) {
     printf("[Phase 6] GCC Assembly/Linker Binding... ");
     if (strstr(input_file, "zcc.c") != 0) {
-      sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -o %s %s compiler_passes.c compiler_passes_ir.c -lm 2>&1", output_file, asm_file);
+      sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -o %s %s compiler_passes.c compiler_passes_ir.c -lm 2>&1", output_file, asm_file);
     } else {
-      sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -o %s %s -lm 2>&1", output_file, asm_file);
+      sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -o %s %s -lm -lpthread -ldl 2>&1", output_file, asm_file);
     }
     ret = system(cmd);
     if (ret != 0) {

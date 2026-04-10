@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ============================================================================
-🔱 ZCC Differential Fuzzer v1.0
+ZCC Differential Fuzzer v1.0
 ============================================================================
 Generates random valid C programs within ZCC's supported subset,
 compiles with both GCC and ZCC, and compares outputs.
@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Optional
 
 
-# ── ZCC-safe C subset ──
+# ——— ZCC-safe C subset ———
 # No system headers, no compound literals, no designated initializers,
 # no _Bool, no inline, no restrict, no VLAs, no _Static_assert.
 
@@ -293,7 +293,7 @@ class CGenerator:
         parts: list[str] = []
 
         # Header (ZCC-safe declarations)
-        parts.append('/* 🔱 ZCC Fuzz Program — seed=%d */' % self.seed)
+        parts.append('/* ZCC Fuzz Program — seed=%d */' % self.seed)
         parts.append('int printf(const char *fmt, ...);')
         parts.append('')
 
@@ -516,7 +516,7 @@ def minimize_crash(result: FuzzResult, zcc_path: str, tmpdir: str,
 
 
 def main():
-    parser = argparse.ArgumentParser(description='🔱 ZCC Differential Fuzzer')
+    parser = argparse.ArgumentParser(description='ZCC Differential Fuzzer')
     parser.add_argument('--zcc', required=True, help='Path to ZCC binary')
     parser.add_argument('--count', type=int, default=200, help='Number of fuzz programs')
     parser.add_argument('--timeout', type=int, default=10, help='Per-program timeout (seconds)')
@@ -535,7 +535,7 @@ def main():
     stats = {'pass': 0, 'fail': 0, 'crash': 0, 'timeout': 0,
              'gcc_fail': 0, 'zcc_fail': 0, 'mismatch': 0}
 
-    print(f'🔱 ZCC Differential Fuzzer — {args.count} programs, seed={args.seed}')
+    print(f'ZCC Differential Fuzzer — {args.count} programs, seed={args.seed}')
     print(f'   ZCC: {args.zcc}')
     print(f'   Output: {out_dir}')
     print()
@@ -585,11 +585,11 @@ def main():
 
             # Progress
             if args.verbose or result.status in ('crash', 'mismatch'):
-                emoji = {'pass': '✓', 'crash': '💥', 'mismatch': '≠',
-                          'zcc_fail': '✗', 'gcc_fail': '⊘', 'timeout': '⏱'}
+                emoji = {'pass': 'âœ“', 'crash': 'ðŸ’¥', 'mismatch': 'â‰ ',
+                          'zcc_fail': 'âœ—', 'gcc_fail': 'âŠ˜', 'timeout': 'â±'}
                 sym = emoji.get(result.status, '?')
                 print(f'  [{i+1:4d}/{args.count}] seed={seed:6d}  {sym} {result.status}'
-                      f'{" — " + result.error_msg if result.error_msg else ""}')
+                      f'{" â€” " + result.error_msg if result.error_msg else ""}')
             elif (i + 1) % 25 == 0:
                 elapsed = time.time() - start_time
                 rate = (i + 1) / elapsed if elapsed > 0 else 0
@@ -601,7 +601,7 @@ def main():
 
     # Summary
     print()
-    print(f'═══ FUZZ SUMMARY ═══')
+    print(f'â•â•â• FUZZ SUMMARY â•â•â•')
     print(f'  Programs:    {args.count}')
     print(f'  Pass:        {stats["pass"]}')
     print(f'  Mismatch:    {stats["mismatch"]}')
@@ -613,9 +613,9 @@ def main():
     print()
 
     if stats['crash'] > 0:
-        print(f'  💥 {stats["crash"]} CRASHES saved to {crashes_dir}/')
+        print(f'  ðŸ’¥ {stats["crash"]} CRASHES saved to {crashes_dir}/')
     if stats['mismatch'] > 0:
-        print(f'  ≠  {stats["mismatch"]} MISMATCHES saved to {mismatches_dir}/')
+        print(f'  â‰   {stats["mismatch"]} MISMATCHES saved to {mismatches_dir}/')
 
     # Write machine-readable summary
     summary = {

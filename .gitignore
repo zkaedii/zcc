@@ -1,54 +1,123 @@
-# Binaries
-zcc
-zcc2
-zcc3
-zcc_asan
+# Binaries & test outputs
 *.o
+*.exe
+*.so
+*.out
+*.prof
+*.pt
+*.dump
+*.objdump
+zcc1
+zcc2
+zcc2_*
+zcc3_*
+zcc_*[!.cph]
+gcc_*
+seed*_gcc
+seed*_zcc
+tmp_gcc
+tmp_zcc
 
-# Generated source
-zcc.c
-zcc_pp.c
-
-# Assembly output
+# Build artifacts
 *.s
+!run_tests.sh
+!ztest*.sh
+!run_sqlite_test.sh
+!run_selfhost.sh
+!bootstrap_verify.sh
+*.log
+*.txt
+!README*.txt
+!BUILD.txt
+!COMMANDS.md
 
-# Logs
-ir_full.log
-ir_pass_log.txt
-ir_stderr.log
-
-# Test artifacts
-/tmp/t_*.c
-/tmp/t_*_ast
-/tmp/t_*_ir
-
-# Training data and models
-*.gguf
-*.json
-*.jsonl
-*.parquet
-zcc_mini_training*
-zcc-compiler-bug-corpus/
+# Test binaries (no extension)
+test_*[!.cshpy]
+alloc
+alloc2
+bf
+bst
+bubble
+bubble_ref
+expr
+fib
+hash
+hello
+hello_out
+ic
+ind
+indirect
+linked
+mincc
+mincc2
+p2
+passes
+probe
+qsort
+rotate
+rotate_ref
+sc
+sf
+sr
+struct
+vm
+ztest
+ztest_lit
 
 # Python
-__pycache__/
 *.pyc
-bisect_zcc.py
+__pycache__/
+.hypothesis/
+.pytest_cache/
+venv*/
+*.egg-info/
 
-# llama.cpp
-llama.cpp/
+# IDE & tools
+.cursor/
+.agents/
+.env
+.env.example
+.antigravityignore
 
-# Tools and scripts
-forge_*.sh
-test_*.sh
-gen_*.py
-fix_*.py
-diag_*.sh
-zcc_ir_forge*.py
-*.skill
+# Large data
+*.zip
+*.pdf
+*.png
+*.sarif
+data/
+assets/
+docs/
+vault/
+contracts/
+mainnet_contracts/
+UltimateFullStackApp/
+VectCutAPI/
+IR_ZCC_temp/
+__tritonv5/
+_experiment_tmp.dist/
+sqlite-amalgamation-*/
+hardening_results/
+fuzz_*/
+failures/
+harness/
+scripts/
+audit/
+diag_*/
 
-# Editor
-.vscode/
-*.swp
-*~
-node_modules
+# SQLite build artifacts
+sqlite3_zcc*.c
+sqlite3_zcc*.s
+sqlite3_pp.c
+sqlite3_gcc
+sqlite3_test
+sqlite_functest
+sqlite3_bt.log
+
+# Backup files
+*.bak
+*.bak_*
+*.bak.*
+*_SAVE.c
+*_BROKEN.c
+*_PATCHED.c
+*.IR_VERIFIED

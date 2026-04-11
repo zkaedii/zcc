@@ -544,16 +544,23 @@ Type *parse_declarator(Compiler *cc, Type *base, char *name_out) {
     }
 
     /* array dimensions */
-    while (cc->tk == TK_LBRACKET) {
-        int len;
-        next_token(cc);
-        len = 0;
-        if (cc->tk != TK_RBRACKET) {
-            Node *expr = parse_assign(cc);
-            len = eval_const_expr(expr);
+    if (cc->tk == TK_LBRACKET) {
+        int arr_lens[16];
+        int arr_num = 0;
+        while (cc->tk == TK_LBRACKET) {
+            int len = 0;
+            next_token(cc);
+            if (cc->tk != TK_RBRACKET) {
+                Node *expr = parse_assign(cc);
+                len = eval_const_expr(expr);
+            }
+            expect(cc, TK_RBRACKET);
+            if (arr_num < 16) arr_lens[arr_num++] = len;
         }
-        expect(cc, TK_RBRACKET);
-        type = type_array(cc, type, len);
+        while (arr_num > 0) {
+            arr_num--;
+            type = type_array(cc, type, arr_lens[arr_num]);
+        }
     }
 
     /* function parameters */

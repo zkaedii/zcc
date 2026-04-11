@@ -2441,7 +2441,8 @@ static int ir_blacklisted(const char *name) {
     return 0;
   static const char *blacklist[] = {
       /* Add explicitly dangerous functions here to fallback to AST backend */
-      "main", "read_file", "init_compiler", NULL};
+      "main", "read_file", "init_compiler", 
+      "lookup_keyword_fallback", "parse_stmt", "next_token", NULL};
   int i;
   for (i = 0; blacklist[i]; i++) {
     if (strcmp(name, blacklist[i]) == 0) {

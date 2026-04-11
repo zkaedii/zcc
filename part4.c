@@ -1404,13 +1404,11 @@ void codegen_expr(Compiler *cc, Node *node) {
     fprintf(cc->out, "    cmpl $48, %%edx\n");
     fprintf(cc->out, "    jae .L%d\n", lbl_overflow);
 
-    /* Fast path: fetch from reg_save_area (accounting for reverse stack allocation layout) */
+    /* Fast path: fetch from reg_save_area */
     fprintf(cc->out, "    movq 16(%%rcx), %%rsi\n");
     fprintf(cc->out, "    movslq %%edx, %%rax\n");
-    fprintf(cc->out, "    movq $40, %%r11\n");
-    fprintf(cc->out, "    subq %%rax, %%r11\n");
-    fprintf(cc->out, "    addq %%rsi, %%r11\n");
-    fprintf(cc->out, "    movq (%%r11), %%rax\n");
+    fprintf(cc->out, "    subq %%rax, %%rsi\n");
+    fprintf(cc->out, "    movq (%%rsi), %%rax\n");
 
     /* Increment gp_offset by 8 */
     fprintf(cc->out, "    addl $8, %%edx\n");
@@ -1873,7 +1871,7 @@ void codegen_expr(Compiler *cc, Node *node) {
       fprintf(cc->out, "    movl $48, 4(%%rdi)\n");
       fprintf(cc->out, "    leaq 16(%%rbp), %%rax\n");
       fprintf(cc->out, "    movq %%rax, 8(%%rdi)\n");
-      fprintf(cc->out, "    leaq -48(%%rbp), %%rax\n");
+      fprintf(cc->out, "    leaq -8(%%rbp), %%rax\n");
       fprintf(cc->out, "    movq %%rax, 16(%%rdi)\n");
     } else if (strcmp(node->func_name, "__builtin_va_end") == 0) {
       /* va_end is a no-op on x86-64 SysV ABI */

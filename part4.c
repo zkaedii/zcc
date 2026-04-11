@@ -727,6 +727,11 @@ void codegen_expr(Compiler *cc, Node *node) {
       fprintf(cc->out, "    addq %%r11, %%rax\n");
       break;
     case ND_SUB:
+      if (is_pointer(node->lhs->type)) {
+        int esz = ptr_elem_size(node->lhs->type);
+        if (esz > 1)
+          fprintf(cc->out, "    imulq $%d, %%r11\n", esz);
+      }
       fprintf(cc->out, "    subq %%r11, %%rax\n");
       break;
     case ND_MUL:
@@ -1818,12 +1823,11 @@ void codegen_expr(Compiler *cc, Node *node) {
      * cc->stack_depth + args_on_stack. */
     alignment_pad = 0;
     {
-      int extra_pushes;
-      extra_pushes = (node->func_name[0] == 0 && node->lhs) ? 1 : 0;
-      if ((cc->stack_depth + args_on_stack + extra_pushes) % 2 != 0) {
+      if ((cc->stack_depth + args_on_stack) % 2 != 0) {
         alignment_pad = 8;
       }
     }
+
 
     if (alignment_pad > 0) {
       fprintf(cc->out, "    subq $%d, %%rsp\n", alignment_pad);

@@ -3,12 +3,12 @@
 /* ================================================================ */
 
 static int is_type_token(Compiler *cc) {
-    if (cc->tk >= TK_INT) {
-        if (cc->tk <= TK_INLINE) return 1;
-    }
+    if (cc->tk >= TK_INT && cc->tk <= TK_DOUBLE) return 1;
+    if (cc->tk >= TK_STATIC && cc->tk <= TK_INLINE) return 1;
     if (cc->tk == TK_STRUCT) return 1;
     if (cc->tk == TK_UNION) return 1;
     if (cc->tk == TK_ENUM) return 1;
+    if (cc->tk == TK_TYPEDEF) return 1;
     if (cc->tk == TK_IDENT) {
         Symbol *sym;
         sym = scope_find(cc, cc->tk_text);
@@ -37,6 +37,182 @@ static void register_struct(Compiler *cc, Type *t) {
 /* ---------------------------------------------------------------- */
 /* Parse struct/union body                                           */
 /* ---------------------------------------------------------------- */
+
+Type *parse_type(Compiler *cc);
+Type *parse_declarator(Compiler *cc, Type *base, char *name_out);
+static long long parse_const_expr_ternary(Compiler *cc);
+static long long parse_const_expr_lor(Compiler *cc);
+static long long parse_const_expr_land(Compiler *cc);
+static long long parse_const_expr_bor(Compiler *cc);
+static long long parse_const_expr_bxor(Compiler *cc);
+static long long parse_const_expr_band(Compiler *cc);
+static long long parse_const_expr_eq(Compiler *cc);
+static long long parse_const_expr_rel(Compiler *cc);
+static long long parse_const_expr_shift(Compiler *cc);
+static long long parse_const_expr_add(Compiler *cc);
+static long long parse_const_expr_mul(Compiler *cc);
+static long long parse_const_expr_unary(Compiler *cc);
+static long long parse_const_expr_primary(Compiler *cc);
+
+static long long parse_const_expr(Compiler *cc) { return parse_const_expr_ternary(cc); }
+
+static long long parse_const_expr_ternary(Compiler *cc) {
+    long long val = parse_const_expr_lor(cc);
+    if (cc->tk == TK_QUESTION) {
+        next_token(cc);
+        long long t_val = parse_const_expr(cc);
+        expect(cc, TK_COLON);
+        long long f_val = parse_const_expr_ternary(cc);
+        return val ? t_val : f_val;
+    }
+    return val;
+}
+static long long parse_const_expr_lor(Compiler *cc) {
+    long long val = parse_const_expr_land(cc);
+    while (cc->tk == TK_LOR) { next_token(cc); long long rhs = parse_const_expr_land(cc); val = val || rhs; }
+    return val;
+}
+static long long parse_const_expr_land(Compiler *cc) {
+    long long val = parse_const_expr_bor(cc);
+    while (cc->tk == TK_LAND) { next_token(cc); long long rhs = parse_const_expr_bor(cc); val = val && rhs; }
+    return val;
+}
+static long long parse_const_expr_bor(Compiler *cc) {
+    long long val = parse_const_expr_bxor(cc);
+    while (cc->tk == TK_PIPE) { next_token(cc); val |= parse_const_expr_bxor(cc); }
+    return val;
+}
+static long long parse_const_expr_bxor(Compiler *cc) {
+    long long val = parse_const_expr_band(cc);
+    while (cc->tk == TK_CARET) { next_token(cc); val ^= parse_const_expr_band(cc); }
+    return val;
+}
+static long long parse_const_expr_band(Compiler *cc) {
+    long long val = parse_const_expr_eq(cc);
+    while (cc->tk == TK_AMP) { next_token(cc); val &= parse_const_expr_eq(cc); }
+    return val;
+}
+static long long parse_const_expr_eq(Compiler *cc) {
+    long long val = parse_const_expr_rel(cc);
+    while (cc->tk == TK_EQ || cc->tk == TK_NE) {
+        int tk = cc->tk; next_token(cc);
+        if (tk == TK_EQ) val = (val == parse_const_expr_rel(cc));
+        else val = (val != parse_const_expr_rel(cc));
+    }
+    return val;
+}
+static long long parse_const_expr_rel(Compiler *cc) {
+    long long val = parse_const_expr_shift(cc);
+    while (cc->tk == TK_LT || cc->tk == TK_GT || cc->tk == TK_LE || cc->tk == TK_GE) {
+        int tk = cc->tk; next_token(cc);
+        if (tk == TK_LT) val = (val < parse_const_expr_shift(cc));
+        else if (tk == TK_GT) val = (val > parse_const_expr_shift(cc));
+        else if (tk == TK_LE) val = (val <= parse_const_expr_shift(cc));
+        else val = (val >= parse_const_expr_shift(cc));
+    }
+    return val;
+}
+static long long parse_const_expr_shift(Compiler *cc) {
+    long long val = parse_const_expr_add(cc);
+    while (cc->tk == TK_SHL || cc->tk == TK_SHR) {
+        int tk = cc->tk; next_token(cc);
+        if (tk == TK_SHL) val <<= parse_const_expr_add(cc);
+        else val >>= parse_const_expr_add(cc);
+    }
+    return val;
+}
+static long long parse_const_expr_add(Compiler *cc) {
+    long long val = parse_const_expr_mul(cc);
+    while (cc->tk == TK_PLUS || cc->tk == TK_MINUS) {
+        int tk = cc->tk; next_token(cc);
+        if (tk == TK_PLUS) val += parse_const_expr_mul(cc);
+        else val -= parse_const_expr_mul(cc);
+    }
+    return val;
+}
+static long long parse_const_expr_mul(Compiler *cc) {
+    long long val = parse_const_expr_unary(cc);
+    while (cc->tk == TK_STAR || cc->tk == TK_SLASH || cc->tk == TK_PERCENT) {
+        int tk = cc->tk; next_token(cc);
+        long long rhs = parse_const_expr_unary(cc);
+        if (tk == TK_STAR) val *= rhs;
+        else if (tk == TK_SLASH) { if (rhs) val /= rhs; }
+        else if (tk == TK_PERCENT) { if (rhs) val %= rhs; }
+    }
+    return val;
+}
+static long long parse_const_expr_unary(Compiler *cc) {
+    if (cc->tk == TK_LPAREN) {
+        int is_cast = 0;
+        int ptk = peek_token(cc);
+        int curr_tk = cc->tk;
+        char curr_txt[MAX_IDENT];
+        strncpy(curr_txt, cc->tk_text, MAX_IDENT - 1);
+        cc->tk = ptk;
+        strncpy(cc->tk_text, cc->peek_text, MAX_IDENT - 1);
+        if (is_type_token(cc)) is_cast = 1;
+        cc->tk = curr_tk;
+        strncpy(cc->tk_text, curr_txt, MAX_IDENT - 1);
+        
+        if (is_cast) {
+            next_token(cc); /* consume ( */
+            Type *st = parse_type(cc);
+            char dummy[128];
+            st = parse_declarator(cc, st, dummy);
+            expect(cc, TK_RPAREN);
+            return parse_const_expr_unary(cc);
+        }
+    }
+    if (cc->tk == TK_MINUS) { next_token(cc); return -parse_const_expr_unary(cc); }
+    if (cc->tk == TK_PLUS) { next_token(cc); return parse_const_expr_unary(cc); }
+    if (cc->tk == TK_TILDE) { next_token(cc); return ~parse_const_expr_unary(cc); }
+    if (cc->tk == TK_BANG) { next_token(cc); return !parse_const_expr_unary(cc); }
+    if (cc->tk == TK_SIZEOF) {
+        next_token(cc);
+        if (cc->tk == TK_LPAREN) {
+            next_token(cc);
+            if (is_type_token(cc)) {
+                Type *st = parse_type(cc);
+                char dummy[128];
+                st = parse_declarator(cc, st, dummy);
+                expect(cc, TK_RPAREN);
+                return type_size(st);
+            }
+            long long v = parse_const_expr(cc);
+            expect(cc, TK_RPAREN);
+            return v;
+        } else {
+            return 8;
+        }
+    }
+    return parse_const_expr_primary(cc);
+}
+static long long parse_const_expr_primary(Compiler *cc) {
+    if (cc->tk == TK_LPAREN) {
+        long long val;
+        next_token(cc);
+        val = parse_const_expr(cc);
+        expect(cc, TK_RPAREN);
+        return val;
+    }
+    if (cc->tk == TK_NUM) {
+        long long val = cc->tk_val;
+        next_token(cc);
+        return val;
+    }
+    if (cc->tk == TK_IDENT) {
+        Symbol *sym = scope_find(cc, cc->tk_text);
+        if (sym && sym->is_enum_const) {
+            long long val = sym->enum_val;
+            next_token(cc);
+            return val;
+        }
+        next_token(cc);
+        return 0;
+    }
+    next_token(cc);
+    return 0;
+}
 
 static Type *parse_struct_or_union(Compiler *cc, int is_union) {
     Type *stype;
@@ -96,14 +272,21 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
 
         while (cc->tk != TK_RBRACE) {
             Type *ftype;
+            Type *base_ftype;
             char fname[MAX_IDENT];
             StructField *field;
             int falign;
 
             if (cc->tk == TK_EOF) break;
 
-            ftype = parse_type(cc);
-            ftype = parse_declarator(cc, ftype, fname);
+            base_ftype = parse_type(cc);
+            ftype = parse_declarator(cc, base_ftype, fname);
+
+            /* Ignore bitfield size since ZCC allocates full integers for them */
+            if (cc->tk == TK_COLON) {
+                next_token(cc);
+                parse_const_expr(cc);
+            }
 
             field = (StructField *)cc_alloc(cc, sizeof(StructField));
             strncpy(field->name, fname, MAX_IDENT - 1);
@@ -132,6 +315,41 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
             }
             last_field = field;
 
+            /* handle multiple declarators: int *next, *prev; */
+            while (cc->tk == TK_COMMA) {
+                Type *ftype2;
+                char fname2[MAX_IDENT];
+                StructField *field2;
+                int falign2;
+                next_token(cc);
+                ftype2 = parse_declarator(cc, base_ftype, fname2);
+
+                /* Ignore bitfield size since ZCC allocates full integers */
+                if (cc->tk == TK_COLON) {
+                    next_token(cc);
+                    parse_const_expr(cc);
+                }
+
+                field2 = (StructField *)cc_alloc(cc, sizeof(StructField));
+                strncpy(field2->name, fname2, MAX_IDENT - 1);
+                field2->type = ftype2;
+                falign2 = type_align(ftype2);
+                if (falign2 > max_align) max_align = falign2;
+                if (is_union) {
+                    field2->offset = 0;
+                    if (type_size(ftype2) > max_size) max_size = type_size(ftype2);
+                } else {
+                    if (falign2 > 1) {
+                        offset = (offset + falign2 - 1) & ~(falign2 - 1);
+                    }
+                    field2->offset = offset;
+                    offset = offset + type_size(ftype2);
+                }
+                field2->next = 0;
+                last_field->next = field2;
+                last_field = field2;
+            }
+
             expect(cc, TK_SEMI);
         }
 
@@ -149,6 +367,13 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
     }
 
     expect(cc, TK_RBRACE);
+    if (stype->tag[0] && (strcmp(stype->tag, "yyStackEntry") == 0 || strcmp(stype->tag, "yyParser") == 0 || strcmp(stype->tag, "Walker") == 0)) {
+        int n = 0;
+        StructField *f = stype->fields;
+        while(f) { n++; printf("FIELD: %s\n", f->name); f = f->next; }
+        printf("DEBUG: Parsed %s with %d fields (Type=%p, fields=%p)\n", stype->tag, n, (void*)stype, (void*)stype->fields);
+        fflush(stdout);
+    }
     return stype;
 }
 
@@ -187,15 +412,7 @@ static Type *parse_enum_def(Compiler *cc) {
 
             if (cc->tk == TK_ASSIGN) {
                 next_token(cc);
-                /* parse constant expression — simplified: just numbers and unary minus */
-                if (cc->tk == TK_MINUS) {
-                    next_token(cc);
-                    val = -cc->tk_val;
-                    next_token(cc);
-                } else {
-                    val = cc->tk_val;
-                    next_token(cc);
-                }
+                val = parse_const_expr(cc);
             }
 
             sym = scope_add(cc, name, etype);
@@ -219,19 +436,21 @@ static Type *parse_enum_def(Compiler *cc) {
 /* ---------------------------------------------------------------- */
 
 Type *parse_type(Compiler *cc) {
-    int is_unsigned;
-    int is_typedef_kw;
-    int is_static;
-    int is_extern;
-    Type *type;
+    Type *type = 0;
+    int is_unsigned = 0;
+    int is_signed = 0;
+    int is_long = 0;
+    int is_short = 0;
+    int is_int = 0;
+    int is_char = 0;
+    int is_double = 0;
+    int is_float = 0;
+    int is_void = 0;
+    int is_typedef_kw = 0;
+    int is_static = 0;
+    int is_extern = 0;
 
-    is_unsigned = 0;
-    is_typedef_kw = 0;
-    is_static = 0;
-    is_extern = 0;
-    type = 0;
-
-    /* storage class / qualifiers */
+    /* storage class / qualifiers / basic types */
     for (;;) {
         if (cc->tk == TK_STATIC) { is_static = 1; next_token(cc); }
         else if (cc->tk == TK_EXTERN) { is_extern = 1; next_token(cc); }
@@ -241,89 +460,132 @@ Type *parse_type(Compiler *cc) {
         else if (cc->tk == TK_AUTO) { next_token(cc); }
         else if (cc->tk == TK_REGISTER) { next_token(cc); }
         else if (cc->tk == TK_TYPEDEF) { is_typedef_kw = 1; next_token(cc); }
+        else if (cc->tk == TK_UNSIGNED) { is_unsigned = 1; next_token(cc); }
+        else if (cc->tk == TK_SIGNED) { is_signed = 1; next_token(cc); }
+        else if (cc->tk == TK_LONG) { is_long++; next_token(cc); }
+        else if (cc->tk == TK_SHORT) { is_short = 1; next_token(cc); }
+        else if (cc->tk == TK_INT) { is_int = 1; next_token(cc); }
+        else if (cc->tk == TK_CHAR) { is_char = 1; next_token(cc); }
+        else if (cc->tk == TK_DOUBLE) { is_double = 1; next_token(cc); }
+        else if (cc->tk == TK_FLOAT) { is_float = 1; next_token(cc); }
+        else if (cc->tk == TK_VOID) { is_void = 1; next_token(cc); }
         else break;
     }
 
-    if (cc->tk == TK_UNSIGNED) { is_unsigned = 1; next_token(cc); }
-    else if (cc->tk == TK_SIGNED) { next_token(cc); }
-
-    if (cc->tk == TK_VOID) { type = cc->ty_void; next_token(cc); }
-    else if (cc->tk == TK_CHAR) {
+    if (is_void) { type = cc->ty_void; }
+    else if (is_float) { type = cc->ty_float; }
+    else if (is_double) { type = cc->ty_double; }
+    else if (is_char) {
         if (is_unsigned) { type = cc->ty_uchar; } else { type = cc->ty_char; }
-        next_token(cc);
     }
-    else if (cc->tk == TK_SHORT) {
+    else if (is_short) {
         if (is_unsigned) { type = cc->ty_ushort; } else { type = cc->ty_short; }
-        next_token(cc);
-        if (cc->tk == TK_INT) next_token(cc);
     }
-    else if (cc->tk == TK_INT) {
+    else if (is_long >= 2) {
+        if (is_unsigned) { type = cc->ty_ulonglong; } else { type = cc->ty_longlong; }
+    }
+    else if (is_long == 1) {
+        if (is_unsigned) { type = cc->ty_ulong; } else { type = cc->ty_long; }
+    }
+    else if (is_int || is_unsigned || is_signed) {
         if (is_unsigned) { type = cc->ty_uint; } else { type = cc->ty_int; }
-        next_token(cc);
     }
-    else if (cc->tk == TK_LONG) {
-        next_token(cc);
-        if (cc->tk == TK_LONG) {
+
+    if (!type) {
+        if (cc->tk == TK_STRUCT) {
             next_token(cc);
-            if (cc->tk == TK_INT) next_token(cc);
-            if (is_unsigned) { type = cc->ty_ulonglong; } else { type = cc->ty_longlong; }
-        } else {
-            if (cc->tk == TK_INT) next_token(cc);
-            if (is_unsigned) { type = cc->ty_ulong; } else { type = cc->ty_long; }
+            type = parse_struct_or_union(cc, 0);
         }
-    }
-    else if (cc->tk == TK_FLOAT || cc->tk == TK_DOUBLE) {
-        /* treat float/double as long for now */
-        type = cc->ty_long;
-        next_token(cc);
-    }
-    else if (cc->tk == TK_STRUCT) {
-        next_token(cc);
-        type = parse_struct_or_union(cc, 0);
-    }
-    else if (cc->tk == TK_UNION) {
-        next_token(cc);
-        type = parse_struct_or_union(cc, 1);
-    }
-    else if (cc->tk == TK_ENUM) {
-        next_token(cc);
-        type = parse_enum_def(cc);
-    }
-    else if (cc->tk == TK_IDENT) {
-        /* could be a typedef name */
-        Symbol *sym;
-        sym = scope_find(cc, cc->tk_text);
-        if (sym) {
-            if (sym->is_typedef) {
+        else if (cc->tk == TK_UNION) {
+            next_token(cc);
+            type = parse_struct_or_union(cc, 1);
+        }
+        else if (cc->tk == TK_ENUM) {
+            next_token(cc);
+            type = parse_enum_def(cc);
+        }
+        else if (cc->tk == TK_IDENT) {
+            /* could be a typedef name */
+            Symbol *sym;
+            sym = scope_find(cc, cc->tk_text);
+            if (strcmp(cc->tk_text, "yyParser") == 0) {
+                printf("DEBUG: parse_type lookup 'yyParser'. sym=%p\n", (void*)sym);
+            }
+            if (sym && sym->is_typedef) {
                 type = sym->type;
                 next_token(cc);
             }
         }
-        if (!type) {
-            /* bare unsigned means unsigned int */
-            if (is_unsigned) {
-                type = cc->ty_uint;
-            } else {
-                error(cc, "expected type");
-                type = cc->ty_int;
-            }
-        }
-    }
-    else {
-        if (is_unsigned) {
-            type = cc->ty_uint;
-        } else {
-            error(cc, "expected type");
-            type = cc->ty_int;
-        }
     }
 
+    if (!type) {
+        type = cc->ty_int;
+    }
+
+    /* skip trailing const/volatile (e.g. 'char const *') */
+    while (cc->tk == TK_CONST || cc->tk == TK_VOLATILE) {
+        next_token(cc);
+    }
+
+    cc->current_is_static = is_static;
     return type;
 }
 
 /* ---------------------------------------------------------------- */
 /* Parse declarator (pointers, arrays, function params)              */
 /* ---------------------------------------------------------------- */
+
+Node *parse_assign(Compiler *cc);
+
+static int eval_const_expr(Node *n) {
+    if (!n) return 0;
+    if (n->kind == ND_NUM) return (int)n->int_val;
+    if (n->kind == ND_ADD) return eval_const_expr(n->lhs) + eval_const_expr(n->rhs);
+    if (n->kind == ND_SUB) return eval_const_expr(n->lhs) - eval_const_expr(n->rhs);
+    if (n->kind == ND_MUL) return eval_const_expr(n->lhs) * eval_const_expr(n->rhs);
+    if (n->kind == ND_DIV) {
+        int r = eval_const_expr(n->rhs);
+        return r ? eval_const_expr(n->lhs) / r : 0;
+    }
+    if (n->kind == ND_MOD) {
+        int r = eval_const_expr(n->rhs);
+        return r ? eval_const_expr(n->lhs) % r : 0;
+    }
+    if (n->kind == ND_SHL) return eval_const_expr(n->lhs) << eval_const_expr(n->rhs);
+    if (n->kind == ND_SHR) return eval_const_expr(n->lhs) >> eval_const_expr(n->rhs);
+    if (n->kind == ND_BAND) return eval_const_expr(n->lhs) & eval_const_expr(n->rhs);
+    if (n->kind == ND_BOR) return eval_const_expr(n->lhs) | eval_const_expr(n->rhs);
+    if (n->kind == ND_BXOR) return eval_const_expr(n->lhs) ^ eval_const_expr(n->rhs);
+    if (n->kind == ND_CAST) return eval_const_expr(n->lhs);
+    /* Unary operators — critical for negative switch cases like case (-15): */
+    if (n->kind == ND_NEG)  return -eval_const_expr(n->lhs);
+    if (n->kind == ND_BNOT) return ~eval_const_expr(n->lhs);
+    if (n->kind == ND_LNOT) return !eval_const_expr(n->lhs);
+    /* Enum constants (global only — local vars are NOT constants) */
+    if (n->kind == ND_VAR && n->sym && n->sym->is_enum_const && !n->sym->is_local)
+        return n->sym->enum_val;
+    return 0; /* Fallback for unsupported complex compile-time bounds */
+}
+
+
+
+static Type *inject_base_type(Compiler *cc, Type *t, Type *base) {
+    if (!t || t == cc->ty_int) return base;
+    if (t->kind == TY_PTR) {
+        return type_ptr(cc, inject_base_type(cc, t->base, base));
+    }
+    if (t->kind == TY_ARRAY) {
+        return type_array(cc, inject_base_type(cc, t->base, base), t->array_len);
+    }
+    if (t->kind == TY_FUNC) {
+        Type *n = type_func(cc, inject_base_type(cc, t->ret, base));
+        n->params = t->params;
+        n->num_params = t->num_params;
+        n->is_variadic = t->is_variadic;
+        return n;
+    }
+    return base;
+}
 
 Type *parse_declarator(Compiler *cc, Type *base, char *name_out) {
     Type *type;
@@ -347,43 +609,94 @@ Type *parse_declarator(Compiler *cc, Type *base, char *name_out) {
         next_token(cc);
     }
     else if (cc->tk == TK_LPAREN) {
-        /* could be grouped declarator like (*name) — skip for self-hosting */
-        /* just leave name empty */
+        /* grouped declarator: (*name)(params) or (*name)[N] */
+        int pk;
+        pk = peek_token(cc);
+        if (pk == TK_STAR || pk == TK_IDENT || pk == TK_LPAREN) {
+            Type *inner;
+            next_token(cc); /* consume ( */
+            inner = parse_declarator(cc, cc->ty_int, name_out);
+            expect(cc, TK_RPAREN);
+            /* process outer dimensions and function args first! */
+            if (cc->tk == TK_LBRACKET) {
+                int arr_lens[16];
+                int arr_num = 0;
+                while (cc->tk == TK_LBRACKET) {
+                    int len = 0;
+                    next_token(cc);
+                    if (cc->tk != TK_RBRACKET) len = (int)parse_const_expr(cc);
+                    expect(cc, TK_RBRACKET);
+                    if (arr_num < 16) arr_lens[arr_num++] = len;
+                }
+                while (arr_num > 0) {
+                    arr_num--;
+                    type = type_array(cc, type, arr_lens[arr_num]);
+                }
+            }
+            if (cc->tk == TK_LPAREN) {
+                Type *ftype;
+                next_token(cc);
+                ftype = type_func(cc, type);
+                ftype->params = (Type **)cc_alloc(cc, sizeof(Type *) * MAX_PARAMS);
+                ftype->num_params = 0;
+                ftype->is_variadic = 0;
+                if (cc->tk != TK_RPAREN) {
+                    if (cc->tk == TK_VOID) {
+                        int vpk;
+                        vpk = peek_token(cc);
+                        if (vpk == TK_RPAREN) {
+                            next_token(cc);
+                        } else {
+                            goto parse_params_inner;
+                        }
+                    } else {
+                        parse_params_inner:
+                        while (cc->tk != TK_RPAREN) {
+                            Type *ptype;
+                            char pname[MAX_IDENT];
+                            if (cc->tk == TK_ELLIPSIS) {
+                                ftype->is_variadic = 1;
+                                next_token(cc);
+                                break;
+                            }
+                            if (cc->tk == TK_EOF) break;
+                            ptype = parse_type(cc);
+                            ptype = parse_declarator(cc, ptype, pname);
+                            if (ptype->kind == TY_ARRAY) ptype = type_ptr(cc, ptype->base);
+                            if (ftype->num_params < MAX_PARAMS) {
+                                ftype->params[ftype->num_params] = ptype;
+                                ftype->num_params++;
+                            }
+                            if (cc->tk == TK_COMMA) {
+                                next_token(cc);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                }
+                expect(cc, TK_RPAREN);
+                type = ftype;
+            }
+            return inject_base_type(cc, inner, type);
+        }
     }
 
     /* array dimensions */
-    while (cc->tk == TK_LBRACKET) {
-        int len;
-        next_token(cc);
-        len = 0;
-        if (cc->tk == TK_NUM) {
-            len = cc->tk_val;
+    if (cc->tk == TK_LBRACKET) {
+        int arr_lens[16];
+        int arr_num = 0;
+        while (cc->tk == TK_LBRACKET) {
+            int len = 0;
             next_token(cc);
-        } else if (cc->tk == TK_IDENT) {
-            Symbol *sym;
-            sym = scope_find(cc, cc->tk_text);
-            if (sym) {
-                if (sym->is_enum_const) {
-                    len = (int)sym->enum_val;
-                }
-            }
-            next_token(cc);
-        } else if (cc->tk == TK_SIZEOF) {
-            next_token(cc);
-            if (cc->tk == TK_LPAREN) {
-                next_token(cc);
-                if (is_type_token(cc)) {
-                    Type *st;
-                    char dummy[128];
-                    st = parse_type(cc);
-                    st = parse_declarator(cc, st, dummy);
-                    len = type_size(st);
-                }
-                expect(cc, TK_RPAREN);
-            }
+            if (cc->tk != TK_RBRACKET) len = (int)parse_const_expr(cc);
+            expect(cc, TK_RBRACKET);
+            if (arr_num < 16) arr_lens[arr_num++] = len;
         }
-        expect(cc, TK_RBRACKET);
-        type = type_array(cc, type, len);
+        while (arr_num > 0) {
+            arr_num--;
+            type = type_array(cc, type, arr_lens[arr_num]);
+        }
     }
 
     /* function parameters */
@@ -420,6 +733,8 @@ Type *parse_declarator(Compiler *cc, Type *base, char *name_out) {
                     ptype = parse_type(cc);
                     ptype = parse_declarator(cc, ptype, pname);
 
+                    if (ptype->kind == TY_ARRAY) ptype = type_ptr(cc, ptype->base);
+
                     if (ftype->num_params < MAX_PARAMS) {
                         ftype->params[ftype->num_params] = ptype;
                         ftype->num_params++;
@@ -454,6 +769,26 @@ Node *parse_primary(Compiler *cc) {
 
     if (cc->tk == TK_NUM) {
         n = node_num(cc, cc->tk_val, line);
+        if (cc->tk_text[0] == 'U') {
+             if (cc->tk_val <= 4294967295ULL) {
+                 n->type = cc->ty_uint;
+             } else {
+                 n->type = cc->ty_ulong;
+             }
+        }
+        if (cc->tk_text[1] == 'L') {
+             if (cc->tk_text[0] == 'U') {
+                 n->type = cc->ty_ulong;
+             } else {
+                 n->type = cc->ty_long;
+             }
+        }
+        next_token(cc);
+        return n;
+    }
+
+    if (cc->tk == TK_FLIT) {
+        n = node_flit(cc, cc->tk_fval, line);
         next_token(cc);
         return n;
     }
@@ -490,17 +825,43 @@ Node *parse_primary(Compiler *cc) {
         n = node_new(cc, ND_VAR, line);
         strncpy(n->name, cc->tk_text, MAX_IDENT - 1);
         sym = scope_find(cc, cc->tk_text);
+        
+        if (strcmp(cc->tk_text, "yypParser") == 0 || strcmp(cc->tk_text, "pParser") == 0) {
+            printf("DEBUG: parse_primary lookup '%s'. sym=%p, sym->type=%p, base=%p, base_tag='%s'\n", 
+                   cc->tk_text,
+                   (void*)sym, sym ? (void*)sym->type : NULL, 
+                   (sym && sym->type) ? (void*)sym->type->base : NULL, 
+                   (sym && sym->type && sym->type->base && sym->type->base->tag[0]) ? sym->type->base->tag : "<none>");
+            fflush(stdout);
+        }
+        
         if (sym) {
             n->sym = sym;
             n->type = sym->type;
-            if (sym->is_enum_const) {
+            if (sym->asm_name[0]) {
+                strncpy(n->name, sym->asm_name, MAX_IDENT - 1);
+            }
+            if (sym->is_enum_const && !sym->is_local) {
+                /* Only fold to ND_NUM if this is truly a global enum constant.
+                 * A local variable (is_local=1) with the same name as an outer
+                 * enum constant must NOT be constant-folded — it is a live
+                 * stack variable that must be loaded at runtime. */
                 n->kind = ND_NUM;
                 n->int_val = sym->enum_val;
                 n->type = cc->ty_int;
             }
         } else {
-            /* implicit function declaration */
-            n->type = cc->ty_int;
+            /* Two-pass: prescan should have registered all file-scope symbols.
+             * An unknown ident here is likely an undeclared identifier.
+             * Emit warning (not error) for C89 compat; upgrade to error later. */
+            if (strcmp(n->name, "stdin") == 0 || strcmp(n->name, "stdout") == 0 || strcmp(n->name, "stderr") == 0) {
+                n->type = type_ptr(cc, cc->ty_char);
+            } else {
+                char wbuf[256];
+                sprintf(wbuf, "warning: implicit declaration of '%s' (decays to int)", n->name);
+                printf("%s:%d: %s\n", cc->filename ? cc->filename : "<input>", cc->tk_line, wbuf);
+                n->type = cc->ty_int;
+            }
         }
         next_token(cc);
         return n;
@@ -525,6 +886,28 @@ Node *parse_primary(Compiler *cc) {
 
         n = parse_expr(cc);
         expect(cc, TK_RPAREN);
+        return n;
+    }
+
+    if (cc->tk == TK_BUILTIN_VA_ARG) {
+        Node *n;
+        Node *ap_node;
+        Type *ret_type;
+        char dummy[MAX_IDENT];
+        int line;
+        
+        line = cc->tk_line;
+        next_token(cc); /* skip va_arg */
+        expect(cc, TK_LPAREN);
+        ap_node = parse_assign(cc);
+        expect(cc, TK_COMMA);
+        ret_type = parse_type(cc);
+        ret_type = parse_declarator(cc, ret_type, dummy);
+        expect(cc, TK_RPAREN);
+
+        n = node_new(cc, ND_VA_ARG, line);
+        n->lhs = ap_node;
+        n->type = ret_type;
         return n;
     }
 
@@ -587,6 +970,30 @@ Node *parse_primary(Compiler *cc) {
 /* --- postfix: [], ., ->, (), ++, -- --- */
 /* Bug fix: call handler inlined, && replaced with nested if */
 
+static StructField *find_struct_member(Type *type, const char *name, int *out_offset) {
+    StructField *f;
+    if (!type) {
+        return 0;
+    }
+
+    for (f = type->fields; f; f = f->next) {
+        if (f->name[0]) {
+            if (strcmp(f->name, name) == 0) {
+                *out_offset = f->offset;
+                return f;
+            }
+        } else if (f->type && (f->type->kind == TY_STRUCT || f->type->kind == TY_UNION)) {
+            int sub_offset = 0;
+            StructField *sub = find_struct_member(f->type, name, &sub_offset);
+            if (sub) {
+                *out_offset = f->offset + sub_offset;
+                return sub;
+            }
+        }
+    }
+    return 0;
+}
+
 Node *parse_postfix(Compiler *cc) {
     Node *n;
     n = parse_primary(cc);
@@ -627,6 +1034,7 @@ Node *parse_postfix(Compiler *cc) {
 
         /* struct member access */
         if (cc->tk == TK_DOT) {
+            int accumulated_offset = 0;
             StructField *f;
             Node *member;
             next_token(cc);
@@ -639,18 +1047,15 @@ Node *parse_postfix(Compiler *cc) {
             strncpy(member->member_name, cc->tk_text, MAX_IDENT - 1);
             /* find field */
             if (n->type) {
-                f = n->type->fields;
-                while (f) {
-                    if (strcmp(f->name, cc->tk_text) == 0) {
-                        member->member_offset = f->offset;
-                        member->type = f->type;
-                        member->member_size = type_size(f->type);
-                        break;
-                    }
-                    f = f->next;
-                }
-                if (!f) {
-                    error(cc, "unknown struct member");
+                f = find_struct_member(n->type, cc->tk_text, &accumulated_offset);
+                if (f) {
+                    member->member_offset = accumulated_offset;
+                    member->type = f->type;
+                    member->member_size = type_size(f->type);
+                } else {
+                    char buf[256];
+                    sprintf(buf, "unknown struct member '%s' in struct '%s' (type=%p, fields=%p)", cc->tk_text, (n->type && n->type->tag[0]) ? n->type->tag : "<anon>", (void*)n->type, n->type ? (void*)n->type->fields : NULL);
+                    error(cc, buf);
                     member->type = cc->ty_int;
                 }
             } else {
@@ -663,6 +1068,7 @@ Node *parse_postfix(Compiler *cc) {
 
         /* arrow member access */
         if (cc->tk == TK_ARROW) {
+            int accumulated_offset = 0;
             StructField *f;
             Node *deref;
             next_token(cc);
@@ -686,18 +1092,15 @@ Node *parse_postfix(Compiler *cc) {
             n->lhs = deref;
             strncpy(n->member_name, cc->tk_text, MAX_IDENT - 1);
             if (deref->type) {
-                f = deref->type->fields;
-                while (f) {
-                    if (strcmp(f->name, cc->tk_text) == 0) {
-                        n->member_offset = f->offset;
-                        n->type = f->type;
-                        n->member_size = type_size(f->type);
-                        break;
-                    }
-                    f = f->next;
-                }
-                if (!f) {
-                    error(cc, "unknown struct member after ->");
+                f = find_struct_member(deref->type, cc->tk_text, &accumulated_offset);
+                if (f) {
+                    n->member_offset = accumulated_offset;
+                    n->type = f->type;
+                    n->member_size = type_size(f->type);
+                } else {
+                    char buf[256];
+                    sprintf(buf, "unknown struct member '%s' after -> in struct '%s' (type=%p, fields=%p)", cc->tk_text, (deref->type && deref->type->tag[0]) ? deref->type->tag : "<anon>", (void*)deref->type, deref->type ? (void*)deref->type->fields : NULL);
+                    error(cc, buf);
                     n->type = cc->ty_int;
                 }
             } else {
@@ -709,7 +1112,12 @@ Node *parse_postfix(Compiler *cc) {
 
         /* function call — inlined handler, nested ifs instead of && */
         if (cc->tk == TK_LPAREN) {
+            int is_direct = 0;
             if (n->kind == ND_VAR) {
+                if (!n->sym) is_direct = 1;
+                else if (n->sym->type && n->sym->type->kind == TY_FUNC) is_direct = 1;
+            }
+            if (is_direct) {
                 /* function call */
                 Node *call;
                 Symbol *sym;
@@ -745,6 +1153,47 @@ Node *parse_postfix(Compiler *cc) {
                         } else {
                             call->type = cc->ty_int;
                         }
+                    } else {
+                        call->type = cc->ty_int;
+                    }
+                } else {
+                    printf("%s:%d: warning: implicit declaration of function '%s'\n",
+                           cc->filename ? cc->filename : "<input>", line, call->func_name);
+                    call->type = cc->ty_int;
+                }
+                n = call;
+                continue;
+            }
+            if (n->kind == ND_MEMBER || n->kind == ND_DEREF || n->kind == ND_CAST || (n->kind == ND_VAR && !is_direct)) {
+                /* indirect call through function pointer member, deref, or cast */
+                Node *call;
+                next_token(cc);
+                call = node_new(cc, ND_CALL, line);
+                call->func_name[0] = 0; /* empty = indirect */
+                call->lhs = n; /* callee expression */
+                call->args = (Node **)cc_alloc(cc, sizeof(Node *) * MAX_CALL_ARGS);
+                call->num_args = 0;
+                while (cc->tk != TK_RPAREN) {
+                    if (cc->tk == TK_EOF) break;
+                    if (call->num_args < MAX_CALL_ARGS) {
+                        call->args[call->num_args] = parse_assign(cc);
+                        call->num_args = call->num_args + 1;
+                    } else {
+                        parse_assign(cc);
+                    }
+                    if (cc->tk == TK_COMMA) {
+                        next_token(cc);
+                    } else {
+                        break;
+                    }
+                }
+                expect(cc, TK_RPAREN);
+                /* derive return type from function pointer type */
+                if (n->type) {
+                    if (n->type->kind == TY_FUNC) {
+                        call->type = n->type->ret ? n->type->ret : cc->ty_int;
+                    } else if (n->type->kind == TY_PTR && n->type->base && n->type->base->kind == TY_FUNC) {
+                        call->type = n->type->base->ret ? n->type->base->ret : cc->ty_int;
                     } else {
                         call->type = cc->ty_int;
                     }
@@ -791,6 +1240,185 @@ Node *parse_unary(Compiler *cc) {
     Node *n;
 
     line = cc->tk_line;
+
+    if (cc->tk == TK_SIZEOF) {
+        Type *t = 0;
+        int sz = 0;
+        int is_type = 0;
+        next_token(cc);
+        if (cc->tk == TK_LPAREN) {
+            int pk = peek_token(cc);
+            if ((pk >= TK_INT && pk <= TK_DOUBLE) || (pk >= TK_STATIC && pk <= TK_INLINE) || pk == TK_STRUCT || pk == TK_UNION || pk == TK_ENUM || pk == TK_TYPEDEF) {
+                is_type = 1;
+            } else if (pk == TK_IDENT) {
+                Symbol *sym = scope_find(cc, cc->peek_text);
+                if (sym && sym->is_typedef) is_type = 1;
+            }
+        }
+        
+        if (is_type) {
+            char dummy[MAX_IDENT];
+            next_token(cc);
+            t = parse_type(cc);
+            t = parse_declarator(cc, t, dummy);
+            expect(cc, TK_RPAREN);
+        } else {
+            Node *expr_n;
+            if (cc->tk == TK_LPAREN) {
+                next_token(cc);
+                expr_n = parse_expr(cc);
+                expect(cc, TK_RPAREN);
+            } else {
+                expr_n = parse_unary(cc);
+            }
+            if (expr_n && expr_n->type) {
+                t = expr_n->type;
+            }
+        }
+        if (t) sz = type_size(t);
+        if (sz == 0) sz = 8;
+        n = node_num(cc, sz, line);
+        n->type = cc->ty_ulong;
+        return n;
+    }
+
+    if (cc->tk == TK_LPAREN) {
+        int pk = peek_token(cc);
+        int is_cast = 0;
+        if (pk == TK_INT || pk == TK_CHAR || pk == TK_VOID || pk == TK_STRUCT || pk == TK_UNION || pk == TK_ENUM || pk == TK_LONG || pk == TK_SHORT || pk == TK_UNSIGNED || pk == TK_SIGNED || pk == TK_FLOAT || pk == TK_DOUBLE) {
+            is_cast = 1;
+        } else if (pk == TK_IDENT) {
+            Symbol *sym = scope_find(cc, cc->peek_text);
+            if (sym && sym->is_typedef) is_cast = 1;
+        }
+        
+        if (is_cast) {
+            char dummy[MAX_IDENT];
+            Type *cast_type;
+            next_token(cc); /* consume LPAREN */
+            cast_type = parse_type(cc);
+            cast_type = parse_declarator(cc, cast_type, dummy);
+            expect(cc, TK_RPAREN);
+            if (cc->tk == TK_LBRACE) {
+                Symbol *sym;
+                char tmp_name[32];
+                sprintf(tmp_name, ".L_comp_%d", cc->label_count++);
+                sym = scope_add_local(cc, tmp_name, cast_type);
+
+                Node *var_n_final = node_new(cc, ND_VAR, line);
+                strncpy(var_n_final->name, tmp_name, MAX_IDENT - 1);
+                var_n_final->sym = sym;
+                var_n_final->type = cast_type;
+
+                Node *expr = 0;
+                next_token(cc); /* skip { */
+
+                if (cast_type->kind == TY_STRUCT) {
+                    StructField *sf = cast_type->fields;
+                    while (cc->tk != TK_RBRACE && cc->tk != TK_EOF && sf) {
+                        Node *var_n = node_new(cc, ND_VAR, line);
+                        strncpy(var_n->name, tmp_name, MAX_IDENT - 1);
+                        var_n->sym = sym;
+                        var_n->type = cast_type;
+
+                        Node *mem_n = node_new(cc, ND_MEMBER, line);
+                        mem_n->lhs = var_n;
+                        strncpy(mem_n->member_name, sf->name, MAX_IDENT - 1);
+                        mem_n->member_offset = sf->offset;
+                        mem_n->type = sf->type;
+                        mem_n->member_size = type_size(sf->type);
+
+                        Node *asgn_v = parse_assign(cc);
+                        Node *asgn_n = node_new(cc, ND_ASSIGN, line);
+                        asgn_n->lhs = mem_n;
+                        asgn_n->rhs = asgn_v;
+                        asgn_n->type = mem_n->type;
+
+                        if (expr) {
+                            Node *cma = node_new(cc, ND_COMMA_EXPR, line);
+                            cma->lhs = expr;
+                            cma->rhs = asgn_n;
+                            cma->type = asgn_n->type;
+                            expr = cma;
+                        } else {
+                            expr = asgn_n;
+                        }
+
+                        sf = sf->next;
+                        if (cc->tk == TK_COMMA) next_token(cc);
+                    }
+                } else if (cast_type->kind == TY_ARRAY) {
+                    int idx = 0;
+                    while (cc->tk != TK_RBRACE && cc->tk != TK_EOF) {
+                        Node *var_n = node_new(cc, ND_VAR, line);
+                        strncpy(var_n->name, tmp_name, MAX_IDENT - 1);
+                        var_n->sym = sym;
+                        var_n->type = cast_type;
+
+                        Node *add_n = node_new(cc, ND_ADD, line);
+                        add_n->lhs = var_n;
+                        add_n->rhs = node_num(cc, (long long)idx, line);
+                        add_n->type = cast_type;
+
+                        Node *deref_n = node_new(cc, ND_DEREF, line);
+                        deref_n->lhs = add_n;
+                        deref_n->type = cast_type->base;
+
+                        Node *asgn_v = parse_assign(cc);
+                        Node *asgn_n = node_new(cc, ND_ASSIGN, line);
+                        asgn_n->lhs = deref_n;
+                        asgn_n->rhs = asgn_v;
+                        asgn_n->type = cast_type->base;
+
+                        if (expr) {
+                            Node *cma = node_new(cc, ND_COMMA_EXPR, line);
+                            cma->lhs = expr;
+                            cma->rhs = asgn_n;
+                            cma->type = asgn_n->type;
+                            expr = cma;
+                        } else {
+                            expr = asgn_n;
+                        }
+
+                        idx++;
+                        if (cc->tk == TK_COMMA) next_token(cc);
+                    }
+                } else {
+                    Node *var_n = node_new(cc, ND_VAR, line);
+                    strncpy(var_n->name, tmp_name, MAX_IDENT - 1);
+                    var_n->sym = sym;
+                    var_n->type = cast_type;
+
+                    Node *asgn_v = parse_assign(cc);
+                    Node *asgn_n = node_new(cc, ND_ASSIGN, line);
+                    asgn_n->lhs = var_n;
+                    asgn_n->rhs = asgn_v;
+                    asgn_n->type = cast_type;
+                    expr = asgn_n;
+                    if (cc->tk == TK_COMMA) next_token(cc);
+                }
+
+                while (cc->tk != TK_RBRACE && cc->tk != TK_EOF) next_token(cc);
+                expect(cc, TK_RBRACE);
+
+                if (!expr) expr = var_n_final;
+                else {
+                    Node *cma = node_new(cc, ND_COMMA_EXPR, line);
+                    cma->lhs = expr;
+                    cma->rhs = var_n_final;
+                    cma->type = cast_type;
+                    expr = cma;
+                }
+                return expr;
+            }
+
+            n = node_new(cc, ND_CAST, line);
+            n->lhs = parse_unary(cc);
+            n->type = cast_type;
+            n->cast_type = cast_type;
+            return n;
+        }
+    }
 
     if (cc->tk == TK_MINUS) {
         next_token(cc);
@@ -859,6 +1487,31 @@ Node *parse_unary(Compiler *cc) {
 
 /* --- binary operators: mul, add, shift, relational, equality, bit, logical --- */
 
+static Type *promote_type(Compiler *cc, Type *t1, Type *t2) {
+    if (!t1) return t2;
+    if (!t2) return t1;
+    if (t1->kind == TY_DOUBLE || t2->kind == TY_DOUBLE) return cc->ty_double;
+    if (t1->kind == TY_FLOAT || t2->kind == TY_FLOAT) return cc->ty_float;
+    if (t1->kind == TY_PTR) return t1;
+    if (t2->kind == TY_PTR) return t2;
+    if (type_size(t1) >= 8 || type_size(t2) >= 8) {
+        if (is_unsigned_type(t1) || is_unsigned_type(t2)) return cc->ty_ulong;
+        return cc->ty_long;
+    }
+    if (is_unsigned_type(t1) || is_unsigned_type(t2)) return cc->ty_uint;
+    return cc->ty_int;
+}
+
+static Node *ensure_type(Compiler *cc, Node *n, Type *ty) {
+    if (!n || !n->type || !ty) return n;
+    if (n->type == ty) return n;
+    Node *c = node_new(cc, ND_CAST, n->line);
+    c->lhs = n;
+    c->cast_type = ty;
+    c->type = ty;
+    return c;
+}
+
 Node *parse_mul(Compiler *cc) {
     Node *n;
     n = parse_unary(cc);
@@ -867,16 +1520,20 @@ Node *parse_mul(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         if (cc->tk == TK_STAR) op = ND_MUL;
         else if (cc->tk == TK_SLASH) op = ND_DIV;
         else op = ND_MOD;
         next_token(cc);
         rhs = parse_unary(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, op, line);
         binop->lhs = n;
         binop->rhs = rhs;
-        binop->type = n->type;
+        binop->type = pt;
         n = binop;
     }
     return n;
@@ -884,12 +1541,14 @@ Node *parse_mul(Compiler *cc) {
 
 Node *parse_add(Compiler *cc) {
     Node *n;
+    Type *pt;
     n = parse_mul(cc);
     while (cc->tk == TK_PLUS || cc->tk == TK_MINUS) {
         int op;
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         if (cc->tk == TK_PLUS) op = ND_ADD;
         else op = ND_SUB;
@@ -904,7 +1563,12 @@ Node *parse_add(Compiler *cc) {
         } else if (is_pointer(rhs->type)) {
             binop->type = rhs->type;
         } else {
-            binop->type = n->type;
+            pt = promote_type(cc, n->type, rhs->type);
+            n = ensure_type(cc, n, pt);
+            rhs = ensure_type(cc, rhs, pt);
+            binop->lhs = n;
+            binop->rhs = rhs;
+            binop->type = pt;
         }
         n = binop;
     }
@@ -941,6 +1605,7 @@ Node *parse_relational(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         if (cc->tk == TK_LT) op = ND_LT;
         else if (cc->tk == TK_GT) op = ND_GT;
@@ -948,6 +1613,9 @@ Node *parse_relational(Compiler *cc) {
         else op = ND_GE;
         next_token(cc);
         rhs = parse_shift(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, op, line);
         binop->lhs = n;
         binop->rhs = rhs;
@@ -965,11 +1633,15 @@ Node *parse_equality(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         if (cc->tk == TK_EQ) op = ND_EQ;
         else op = ND_NE;
         next_token(cc);
         rhs = parse_relational(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, op, line);
         binop->lhs = n;
         binop->rhs = rhs;
@@ -986,13 +1658,17 @@ Node *parse_bitand(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         next_token(cc);
         rhs = parse_equality(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, ND_BAND, line);
         binop->lhs = n;
         binop->rhs = rhs;
-        binop->type = n->type;
+        binop->type = pt;
         n = binop;
     }
     return n;
@@ -1005,13 +1681,17 @@ Node *parse_bitxor(Compiler *cc) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         next_token(cc);
         rhs = parse_bitand(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, ND_BXOR, line);
         binop->lhs = n;
         binop->rhs = rhs;
-        binop->type = n->type;
+        binop->type = pt;
         n = binop;
     }
     return n;
@@ -1019,18 +1699,23 @@ Node *parse_bitxor(Compiler *cc) {
 
 Node *parse_bitor(Compiler *cc) {
     Node *n;
+    Type *pt;
     n = parse_bitxor(cc);
     while (cc->tk == TK_PIPE) {
         int line;
         Node *rhs;
         Node *binop;
+        Type *pt;
         line = cc->tk_line;
         next_token(cc);
         rhs = parse_bitxor(cc);
+        pt = promote_type(cc, n->type, rhs->type);
+        n = ensure_type(cc, n, pt);
+        rhs = ensure_type(cc, rhs, pt);
         binop = node_new(cc, ND_BOR, line);
         binop->lhs = n;
         binop->rhs = rhs;
-        binop->type = n->type;
+        binop->type = pt;
         n = binop;
     }
     return n;
@@ -1087,7 +1772,9 @@ Node *parse_ternary(Compiler *cc) {
         tern->then_body = parse_expr(cc);
         expect(cc, TK_COLON);
         tern->else_body = parse_ternary(cc);
-        tern->type = tern->then_body->type;
+        tern->type = promote_type(cc, tern->then_body->type, tern->else_body->type);
+        tern->then_body = ensure_type(cc, tern->then_body, tern->type);
+        tern->else_body = ensure_type(cc, tern->else_body, tern->type);
         n = tern;
     }
     return n;
@@ -1104,7 +1791,7 @@ Node *parse_assign(Compiler *cc) {
         next_token(cc);
         asgn = node_new(cc, ND_ASSIGN, line);
         asgn->lhs = n;
-        asgn->rhs = parse_assign(cc);
+        asgn->rhs = ensure_type(cc, parse_assign(cc), n->type);
         asgn->type = n->type;
         return asgn;
     }
@@ -1162,6 +1849,8 @@ Node *parse_expr(Compiler *cc) {
 /* ================================================================ */
 /* STATEMENT PARSING                                                 */
 /* ================================================================ */
+
+static Node *current_sw = 0;
 
 Node *parse_stmt(Compiler *cc) {
     int line;
@@ -1329,112 +2018,59 @@ Node *parse_stmt(Compiler *cc) {
         sw->cases = (Node **)cc_alloc(cc, sizeof(Node *) * MAX_CASES);
         sw->num_cases = 0;
         sw->default_case = 0;
-        /* parse the block manually */
-    expect(cc, TK_LBRACE);
-        while (cc->tk != TK_RBRACE) {
-            if (cc->tk == TK_EOF) break;
-            if (cc->tk == TK_CASE) {
-                Node *cn;
-                next_token(cc);
-                cn = node_new(cc, ND_CASE, cc->tk_line);
-                if (cc->tk == TK_MINUS) {
-                    next_token(cc);
-                    cn->case_val = -cc->tk_val;
-                    next_token(cc);
-                } else if (cc->tk == TK_CHAR_LIT) {
-                    cn->case_val = cc->tk_val;
-                    next_token(cc);
-                } else {
-                    /* could be enum constant */
-                    if (cc->tk == TK_IDENT) {
-                        Symbol *sym;
-                        sym = scope_find(cc, cc->tk_text);
-                        if (sym) {
-                            if (sym->is_enum_const) {
-                                cn->case_val = sym->enum_val;
-                            }
-                        }
-                        next_token(cc);
-                    } else {
-                        cn->case_val = cc->tk_val;
-                        next_token(cc);
-                    }
-                }
-                expect(cc, TK_COLON);
-                /* parse statements until next case/default/rbrace */
-                {
-                    Node *block;
-                    int cap;
-                    int cnt;
-                    block = node_new(cc, ND_BLOCK, line);
-                    cap = 16;
-                    block->stmts = (Node **)cc_alloc(cc, sizeof(Node *) * cap);
-                    cnt = 0;
-                    while (cc->tk != TK_CASE && cc->tk != TK_DEFAULT && cc->tk != TK_RBRACE) {
-                        if (cc->tk == TK_EOF) break;
-                        if (cnt >= cap) {
-                            Node **old;
-                            int newcap;
-                            int i;
-                            old = block->stmts;
-                            newcap = cap * 2;
-                            if (newcap > 4096) newcap = 4096;
-                            block->stmts = (Node **)cc_alloc(cc, sizeof(Node *) * newcap);
-                            for (i = 0; i < cnt; i++) block->stmts[i] = old[i];
-                            cap = newcap;
-                        }
-                        block->stmts[cnt] = parse_stmt(cc);
-                        cnt++;
-                    }
-                    block->num_stmts = cnt;
-                    cn->case_body = block;
-                }
-                if (sw->num_cases < MAX_CASES) {
-                    sw->cases[sw->num_cases] = cn;
-                    sw->num_cases++;
-                }
-            }
-            else if (cc->tk == TK_DEFAULT) {
-                Node *dn;
-                next_token(cc);
-                expect(cc, TK_COLON);
-                dn = node_new(cc, ND_DEFAULT, cc->tk_line);
-                {
-                    Node *block;
-                    int cap;
-                    int cnt;
-                    block = node_new(cc, ND_BLOCK, line);
-                    cap = 16;
-                    block->stmts = (Node **)cc_alloc(cc, sizeof(Node *) * cap);
-                    cnt = 0;
-                    while (cc->tk != TK_CASE && cc->tk != TK_DEFAULT && cc->tk != TK_RBRACE) {
-                        if (cc->tk == TK_EOF) break;
-                        if (cnt >= cap) {
-                            Node **old;
-                            int newcap;
-                            int i;
-                            old = block->stmts;
-                            newcap = cap * 2;
-                            if (newcap > 4096) newcap = 4096;
-                            block->stmts = (Node **)cc_alloc(cc, sizeof(Node *) * newcap);
-                            for (i = 0; i < cnt; i++) block->stmts[i] = old[i];
-                            cap = newcap;
-                        }
-                        block->stmts[cnt] = parse_stmt(cc);
-                        cnt++;
-                    }
-                    block->num_stmts = cnt;
-                    dn->case_body = block;
-                }
-                sw->default_case = dn;
-            }
-            else {
-                /* stray statement in switch body before first case */
-                parse_stmt(cc);
-            }
-        }
-        expect(cc, TK_RBRACE);
+        
+        Node *old_sw = current_sw;
+        current_sw = sw;
+
+        sw->body = parse_stmt(cc);
+
+        current_sw = old_sw;
         return sw;
+    }
+
+    if (cc->tk == TK_CASE) {
+        Node *cn;
+        Node *cnode;
+        Node *gto;
+        long long val;
+        next_token(cc);
+        val = eval_const_expr(parse_assign(cc));
+        expect(cc, TK_COLON);
+
+        cn = node_new(cc, ND_LABEL, line);
+        sprintf(cn->label_name, "__zc_%llx_%d", (unsigned long long)val, line);
+        cn->lhs = parse_stmt(cc);
+
+        if (current_sw && current_sw->num_cases < MAX_CASES) {
+            cnode = node_new(cc, ND_CASE, line);
+            cnode->case_val = val;
+            gto = node_new(cc, ND_GOTO, line);
+            strncpy(gto->label_name, cn->label_name, MAX_IDENT - 1);
+            cnode->case_body = gto;
+            current_sw->cases[current_sw->num_cases++] = cnode;
+        }
+        return cn;
+    }
+
+    if (cc->tk == TK_DEFAULT) {
+        Node *dn;
+        Node *dnode;
+        Node *gto;
+        next_token(cc);
+        expect(cc, TK_COLON);
+
+        dn = node_new(cc, ND_LABEL, line);
+        sprintf(dn->label_name, "__zc_def_%d", line);
+        dn->lhs = parse_stmt(cc);
+
+        if (current_sw) {
+            dnode = node_new(cc, ND_DEFAULT, line);
+            gto = node_new(cc, ND_GOTO, line);
+            strncpy(gto->label_name, dn->label_name, MAX_IDENT - 1);
+            dnode->case_body = gto;
+            current_sw->default_case = dnode;
+        }
+        return dn;
     }
 
     /* break */
@@ -1484,7 +2120,10 @@ Node *parse_stmt(Compiler *cc) {
     /* local variable declaration */
     if (is_type_token(cc)) {
         Type *base;
+        int is_typedef = 0;
+        if (cc->tk == TK_TYPEDEF) is_typedef = 1;
         base = parse_type(cc);
+        int is_static_local = cc->current_is_static;
 
         /* handle multiple declarators: int a, b, c; */
         {
@@ -1505,13 +2144,108 @@ Node *parse_stmt(Compiler *cc) {
                 vtype = parse_declarator(cc, base, vname);
 
                 if (vname[0]) {
-                    sym = scope_add_local(cc, vname, vtype);
+                    if (is_typedef) {
+                        sym = scope_add(cc, vname, vtype);
+                        sym->is_typedef = 1;
+                    } else if (is_static_local) {
+                        char mangled[MAX_IDENT];
+                        sprintf(mangled, "%s__%s__%d", cc->current_func, vname, cc->label_count++);
+                        sym = scope_add_local(cc, vname, vtype);
+                        sym->is_local = 0;
+                        sym->is_global = 1;
+                        strncpy(sym->asm_name, mangled, MAX_IDENT - 1);
 
-                    /* initializer? */
-                    if (cc->tk == TK_ASSIGN) {
-                        Node *asgn;
-                        Node *var;
-                        next_token(cc);
+                        Node *gvar = node_new(cc, ND_GLOBAL_VAR, line);
+                        strncpy(gvar->name, mangled, MAX_IDENT - 1);
+                        gvar->type = vtype;
+                        gvar->is_static = 1;
+                        gvar->is_extern = 0;
+
+                        if (cc->tk == TK_ASSIGN) {
+                            next_token(cc);
+                            if (cc->tk == TK_LBRACE) {
+                                Node *init_list;
+                                Node **inits;
+                                int count;
+                                init_list = node_new(cc, ND_INIT_LIST, line);
+                                inits = (Node **)cc_alloc(cc, sizeof(Node *) * MAX_INIT);
+                                count = 0;
+                                next_token(cc); /* skip { */
+                                int depth = 1;
+                                int skip_tk;
+                                int prev_pos;
+                                int no_progress_count = 0;
+                                int top_elems = 0;
+                                int last_comma = 1;
+                                while (depth > 0 && cc->tk != TK_EOF) {
+                                    if (depth == 1 && cc->tk != TK_RBRACE && cc->tk != TK_COMMA && last_comma) {
+                                        top_elems++;
+                                        last_comma = 0;
+                                    }
+                                    prev_pos = cc->pos;
+                                    if (cc->tk == TK_LBRACE) {
+                                        depth++;
+                                        next_token(cc);
+                                    } else if (cc->tk == TK_RBRACE) {
+                                        depth--;
+                                        if (depth == 0) break;
+                                        next_token(cc);
+                                    } else if (cc->tk == TK_COMMA) {
+                                        if (depth == 1) last_comma = 1;
+                                        next_token(cc);
+                                    } else {
+                                        skip_tk = cc->tk;
+                                        if (count < MAX_INIT) {
+                                            inits[count++] = parse_assign(cc);
+                                        } else {
+                                            parse_assign(cc);
+                                        }
+                                        if (cc->tk == skip_tk) {
+                                            if (cc->tk != TK_EOF) next_token(cc);
+                                        }
+                                        if (cc->pos == prev_pos) {
+                                            no_progress_count++;
+                                            if (no_progress_count > 100) { break; }
+                                        } else {
+                                            no_progress_count = 0;
+                                        }
+                                    }
+                                }
+                                if (cc->tk == TK_RBRACE) next_token(cc);
+                                init_list->args = inits;
+                                init_list->num_args = count;
+                                gvar->initializer = init_list;
+                                
+                                if (gvar->type->kind == TY_ARRAY && gvar->type->array_len == 0) {
+                                    gvar->type->array_len = top_elems;
+                                    gvar->type->size = type_size(gvar->type->base) * top_elems;
+                                    sym->type->array_len = top_elems;
+                                    sym->type->size = gvar->type->size;
+                                }
+                            } else {
+                                Node *init_node2 = parse_assign(cc);
+                                gvar->initializer = init_node2;
+                                /* Fix: if char[] initialized with string literal, update size */
+                                if (init_node2 && init_node2->kind == ND_STR &&
+                                    gvar->type->kind == TY_ARRAY && gvar->type->array_len == 0) {
+                                    int slen2 = cc->strings[init_node2->str_id].len + 1;
+                                    gvar->type->array_len = slen2;
+                                    gvar->type->size = type_size(gvar->type->base) * slen2;
+                                    sym->type->array_len = slen2;
+                                    sym->type->size = gvar->type->size;
+                                }
+                            }
+                        }
+
+                        if (cc->num_globals < MAX_GLOBALS) cc->globals[cc->num_globals++] = gvar;
+                    } else {
+                        sym = scope_add_local(cc, vname, vtype);
+
+                        /* initializer? */
+                        if (cc->tk == TK_ASSIGN) {
+                            Node *asgn;
+                            Node *var;
+                            next_token(cc);
 
                         /* check for array/struct initializer list */
                         if (cc->tk == TK_LBRACE) {
@@ -1524,30 +2258,51 @@ Node *parse_stmt(Compiler *cc) {
                                 Type *elem_type;
                                 Type *arr_type;
                                 int sz;
+                                int skip_tk;
+                                int prev_pos;
+                                int no_progress_count = 0;
                                 next_token(cc); /* skip { */
                                 init_count = 0;
                                 init_cap = 16;
                                 inits = (Node **)cc_alloc(cc, sizeof(Node *) * init_cap);
                                 depth = 1;
                                 while (depth > 0 && cc->tk != TK_EOF) {
-                                    if (cc->tk == TK_LBRACE) { depth++; next_token(cc); continue; }
-                                    if (cc->tk == TK_RBRACE) { depth--; if (depth > 0) next_token(cc); continue; }
-                                    if (depth == 1 && cc->tk != TK_RBRACE) {
+                                    prev_pos = cc->pos;
+                                    if (cc->tk == TK_LBRACE) {
+                                        depth++;
+                                        next_token(cc);
+                                    } else if (cc->tk == TK_RBRACE) {
+                                        depth--;
+                                        if (depth == 0) break;
+                                        next_token(cc);
+                                    } else if (cc->tk == TK_COMMA) {
+                                        next_token(cc);
+                                    } else {
+                                        skip_tk = cc->tk;
+                                        Node *expr = parse_assign(cc);
+                                        if (cc->tk == skip_tk) {
+                                            if (cc->tk != TK_EOF) next_token(cc);
+                                        }
+                                        if (cc->pos == prev_pos) {
+                                            no_progress_count++;
+                                            if (no_progress_count > 100) {
+                                                error(cc, "array parser stuck (possible infinite loop)");
+                                                break;
+                                            }
+                                        } else {
+                                            no_progress_count = 0;
+                                        }
                                         if (init_count >= init_cap) {
-                                            Node **old_inits;
+                                            Node **old_inits = inits;
                                             int j;
-                                            old_inits = inits;
                                             init_cap *= 2;
                                             inits = (Node **)cc_alloc(cc, sizeof(Node *) * init_cap);
                                             for (j = 0; j < init_count; j++) inits[j] = old_inits[j];
                                         }
-                                        inits[init_count++] = parse_assign(cc);
-                                        if (cc->tk == TK_COMMA) next_token(cc);
-                                        continue;
+                                        inits[init_count++] = expr;
                                     }
-                                    next_token(cc);
                                 }
-                                next_token(cc); /* skip final } */
+                                if (cc->tk == TK_RBRACE) next_token(cc); /* skip final } */
                                 elem_type = vtype->base;
                                 if (vtype->array_len == 0) {
                                     arr_type = type_array(cc, elem_type, init_count);
@@ -1595,16 +2350,154 @@ Node *parse_stmt(Compiler *cc) {
                                         cnt++;
                                     }
                                 }
+                            } else if (vtype->kind == TY_STRUCT || vtype->kind == TY_UNION) {
+                                /* Local struct/union initializer: {v0, v1, ...}
+                                 * Walk StructField list, assign each field in order. */
+                                int init_count_s;
+                                int init_cap_s;
+                                Node **inits_s;
+                                int skip_tk_s;
+                                int prev_pos_s;
+                                int no_progress_s;
+                                int depth_s;
+                                init_count_s = 0;
+                                init_cap_s = 32;
+                                inits_s = (Node **)cc_alloc(cc, sizeof(Node *) * init_cap_s);
+                                depth_s = 1;
+                                no_progress_s = 0;
+                                next_token(cc); /* skip { */
+                                while (depth_s > 0 && cc->tk != TK_EOF) {
+                                    prev_pos_s = cc->pos;
+                                    if (cc->tk == TK_LBRACE) {
+                                        depth_s++;
+                                        next_token(cc);
+                                    } else if (cc->tk == TK_RBRACE) {
+                                        depth_s--;
+                                        if (depth_s == 0) break;
+                                        next_token(cc);
+                                    } else if (cc->tk == TK_COMMA) {
+                                        next_token(cc);
+                                    } else {
+                                        skip_tk_s = cc->tk;
+                                        if (init_count_s < init_cap_s) {
+                                            inits_s[init_count_s++] = parse_assign(cc);
+                                        } else {
+                                            parse_assign(cc);
+                                        }
+                                        if (cc->tk == skip_tk_s) {
+                                            if (cc->tk != TK_EOF) next_token(cc);
+                                        }
+                                        if (cc->pos == prev_pos_s) {
+                                            no_progress_s++;
+                                            if (no_progress_s > 100) break;
+                                        } else {
+                                            no_progress_s = 0;
+                                        }
+                                    }
+                                }
+                                if (cc->tk == TK_RBRACE) next_token(cc);
+                                /* Now emit field assignments */
+                                {
+                                    StructField *sf;
+                                    int fi;
+                                    fi = 0;
+                                    sf = vtype->fields;
+                                    while (sf && fi < init_count_s) {
+                                        /* Build: var.sf_name = inits_s[fi] */
+                                        Node *var_n;
+                                        Node *mem_n;
+                                        Node *asgn_n;
+                                        int acc_off;
+                                        StructField *found_f;
+                                        var_n = node_new(cc, ND_VAR, line);
+                                        strncpy(var_n->name, vname, MAX_IDENT - 1);
+                                        var_n->sym = sym;
+                                        var_n->type = vtype;
+                                        acc_off = 0;
+                                        found_f = find_struct_member(vtype, sf->name, &acc_off);
+                                        mem_n = node_new(cc, ND_MEMBER, line);
+                                        mem_n->lhs = var_n;
+                                        strncpy(mem_n->member_name, sf->name, MAX_IDENT - 1);
+                                        if (found_f) {
+                                            mem_n->member_offset = acc_off;
+                                            mem_n->type = found_f->type;
+                                            mem_n->member_size = type_size(found_f->type);
+                                        } else {
+                                            mem_n->member_offset = sf->offset;
+                                            mem_n->type = sf->type;
+                                            mem_n->member_size = type_size(sf->type);
+                                        }
+                                        asgn_n = node_new(cc, ND_ASSIGN, line);
+                                        asgn_n->lhs = mem_n;
+                                        asgn_n->rhs = inits_s[fi];
+                                        asgn_n->type = mem_n->type;
+                                        /* Grow block if needed */
+                                        if (cnt >= cap) {
+                                            Node **new_stmts;
+                                            int ji;
+                                            new_stmts = (Node **)cc_alloc(cc, sizeof(Node *) * cap * 2);
+                                            for (ji = 0; ji < cnt; ji++) new_stmts[ji] = block->stmts[ji];
+                                            block->stmts = new_stmts;
+                                            cap = cap * 2;
+                                        }
+                                        block->stmts[cnt] = asgn_n;
+                                        cnt++;
+                                        sf = sf->next;
+                                        fi++;
+                                        /* Skip nested struct fields for now — treat as flat */
+                                    }
+                                    /* Zero-initialize remaining fields if fewer inits provided */
+                                    while (sf) {
+                                        Node *var_n;
+                                        Node *mem_n;
+                                        Node *asgn_n;
+                                        int acc_off;
+                                        StructField *found_f;
+                                        var_n = node_new(cc, ND_VAR, line);
+                                        strncpy(var_n->name, vname, MAX_IDENT - 1);
+                                        var_n->sym = sym;
+                                        var_n->type = vtype;
+                                        acc_off = 0;
+                                        found_f = find_struct_member(vtype, sf->name, &acc_off);
+                                        mem_n = node_new(cc, ND_MEMBER, line);
+                                        mem_n->lhs = var_n;
+                                        strncpy(mem_n->member_name, sf->name, MAX_IDENT - 1);
+                                        if (found_f) {
+                                            mem_n->member_offset = acc_off;
+                                            mem_n->type = found_f->type;
+                                            mem_n->member_size = type_size(found_f->type);
+                                        } else {
+                                            mem_n->member_offset = sf->offset;
+                                            mem_n->type = sf->type;
+                                            mem_n->member_size = type_size(sf->type);
+                                        }
+                                        asgn_n = node_new(cc, ND_ASSIGN, line);
+                                        asgn_n->lhs = mem_n;
+                                        asgn_n->rhs = node_num(cc, 0LL, line);
+                                        asgn_n->type = mem_n->type;
+                                        if (cnt >= cap) {
+                                            Node **new_stmts;
+                                            int ji;
+                                            new_stmts = (Node **)cc_alloc(cc, sizeof(Node *) * cap * 2);
+                                            for (ji = 0; ji < cnt; ji++) new_stmts[ji] = block->stmts[ji];
+                                            block->stmts = new_stmts;
+                                            cap = cap * 2;
+                                        }
+                                        block->stmts[cnt] = asgn_n;
+                                        cnt++;
+                                        sf = sf->next;
+                                    }
+                                }
                             } else {
-                                /* non-array: skip initializer list for now */
-                                int skip_depth;
-                                skip_depth = 1;
+                                /* Other non-array, non-struct types: skip initializer list */
+                                int skip_depth_x;
+                                skip_depth_x = 1;
                                 next_token(cc);
-                                while (skip_depth > 0) {
+                                while (skip_depth_x > 0) {
                                     if (cc->tk == TK_EOF) break;
-                                    if (cc->tk == TK_LBRACE) skip_depth = skip_depth + 1;
-                                    if (cc->tk == TK_RBRACE) skip_depth = skip_depth - 1;
-                                    if (skip_depth > 0) next_token(cc);
+                                    if (cc->tk == TK_LBRACE) skip_depth_x = skip_depth_x + 1;
+                                    if (cc->tk == TK_RBRACE) skip_depth_x = skip_depth_x - 1;
+                                    if (skip_depth_x > 0) next_token(cc);
                                 }
                                 next_token(cc);
                             }
@@ -1622,6 +2515,7 @@ Node *parse_stmt(Compiler *cc) {
                                 cnt++;
                             }
                         }
+                    }
                     }
                 }
 
@@ -1661,6 +2555,393 @@ Node *parse_stmt(Compiler *cc) {
 }
 
 /* ================================================================ */
+/* PASS 1: FORWARD DECLARATION PRE-SCAN                              */
+/* Lightweight lexer-level scan that registers all file-scope        */
+/* symbols (functions, globals, typedefs, enum constants) into the   */
+/* scope BEFORE the real parse begins. Skips all brace-enclosed      */
+/* bodies by depth counting — no struct fields, no function bodies.  */
+/* ================================================================ */
+
+static void prescan_skip_braces(Compiler *cc) {
+    int depth = 1;
+    next_token(cc); /* consume opening { */
+    while (depth > 0 && cc->tk != TK_EOF) {
+        if (cc->tk == TK_LBRACE) depth++;
+        else if (cc->tk == TK_RBRACE) depth--;
+        if (depth > 0) next_token(cc);
+    }
+    if (cc->tk == TK_RBRACE) next_token(cc); /* consume closing } */
+}
+
+static void prescan_skip_parens(Compiler *cc) {
+    int depth = 1;
+    next_token(cc); /* consume opening ( */
+    while (depth > 0 && cc->tk != TK_EOF) {
+        if (cc->tk == TK_LPAREN) depth++;
+        else if (cc->tk == TK_RPAREN) depth--;
+        if (depth > 0) next_token(cc);
+    }
+    if (cc->tk == TK_RPAREN) next_token(cc); /* consume closing ) */
+}
+
+/* Prescan: skip a base type specifier sequence (int, unsigned long, etc).
+ * Also handles struct/union/enum tags (but skips their bodies).
+ * Returns 1 if a type was found, 0 otherwise. */
+static int prescan_skip_type(Compiler *cc) {
+    int found = 0;
+    for (;;) {
+        if (cc->tk >= TK_INT && cc->tk <= TK_DOUBLE) { found = 1; next_token(cc); continue; }
+        if (cc->tk >= TK_STATIC && cc->tk <= TK_INLINE) { next_token(cc); continue; }
+        if (cc->tk == TK_TYPEDEF) { next_token(cc); continue; }
+        if (cc->tk == TK_UNSIGNED || cc->tk == TK_SIGNED) { found = 1; next_token(cc); continue; }
+        if (cc->tk == TK_STRUCT || cc->tk == TK_UNION) {
+            found = 1;
+            next_token(cc);
+            if (cc->tk == TK_IDENT) next_token(cc); /* skip tag name */
+            if (cc->tk == TK_LBRACE) prescan_skip_braces(cc); /* skip body */
+            continue;
+        }
+        if (cc->tk == TK_ENUM) {
+            found = 1;
+            next_token(cc);
+            if (cc->tk == TK_IDENT) next_token(cc); /* skip tag name */
+            if (cc->tk == TK_LBRACE) {
+                /* Enum bodies ARE parsed in prescan — we need the constants */
+                next_token(cc); /* consume { */
+                {
+                    long eval = 0;
+                    while (cc->tk != TK_RBRACE && cc->tk != TK_EOF) {
+                        if (cc->tk == TK_IDENT) {
+                            char ename[MAX_IDENT];
+                            Symbol *esym;
+                            strncpy(ename, cc->tk_text, MAX_IDENT - 1);
+                            next_token(cc);
+                            if (cc->tk == TK_ASSIGN) {
+                                next_token(cc);
+                                /* simple constant parsing: just grab number */
+                                if (cc->tk == TK_NUM) {
+                                    eval = cc->tk_val;
+                                    next_token(cc);
+                                } else if (cc->tk == TK_MINUS && peek_token(cc) == TK_NUM) {
+                                    /* restore peek — peek_token consumed it */
+                                    next_token(cc); /* consume - */
+                                    eval = -cc->tk_val;
+                                    next_token(cc);
+                                } else {
+                                    /* complex const expr — skip to , or } */
+                                    while (cc->tk != TK_COMMA && cc->tk != TK_RBRACE && cc->tk != TK_EOF)
+                                        next_token(cc);
+                                }
+                            }
+                            /* Register enum constant if not already present */
+                            esym = scope_find(cc, ename);
+                            if (!esym) {
+                                esym = scope_add(cc, ename, cc->ty_int);
+                                esym->is_enum_const = 1;
+                                esym->enum_val = eval;
+                            }
+                            eval++;
+                        }
+                        if (cc->tk == TK_COMMA) {
+                            next_token(cc);
+                        } else if (cc->tk != TK_RBRACE) {
+                            next_token(cc); /* skip unexpected token */
+                        }
+                    }
+                }
+                if (cc->tk == TK_RBRACE) next_token(cc);
+            }
+            continue;
+        }
+        if (cc->tk == TK_IDENT) {
+            /* Possible typedef name — check if already registered */
+            Symbol *tsym = scope_find(cc, cc->tk_text);
+            if (tsym && tsym->is_typedef) {
+                found = 1;
+                next_token(cc);
+                continue;
+            }
+        }
+        break;
+    }
+    return found;
+}
+
+void prescan_declarations(Compiler *cc) {
+    /* Save complete lexer state */
+    int saved_pos = cc->pos;
+    int saved_line = cc->line;
+    int saved_col = cc->col;
+    int saved_tk = cc->tk;
+    long long saved_tk_val = cc->tk_val;
+    double saved_tk_fval = cc->tk_fval;
+    char saved_tk_text[MAX_IDENT];
+    char saved_tk_str[MAX_STR];
+    int saved_tk_str_len = cc->tk_str_len;
+    int saved_tk_line = cc->tk_line;
+    int saved_tk_col = cc->tk_col;
+    int saved_has_peek = cc->has_peek;
+    int saved_peek_tk = cc->peek_tk;
+    long long saved_peek_val = cc->peek_val;
+    double saved_peek_fval = cc->peek_fval;
+    char saved_peek_text[MAX_IDENT];
+    char saved_peek_str[MAX_STR];
+    int saved_peek_str_len = cc->peek_str_len;
+    int saved_peek_line = cc->peek_line;
+    int saved_peek_col = cc->peek_col;
+    int prescan_count = 0;
+    int prev_pos;
+    int registered = 0;
+
+    strncpy(saved_tk_text, cc->tk_text, MAX_IDENT - 1);
+    { int i; for (i = 0; i < saved_tk_str_len + 1 && i < MAX_STR; i++) saved_tk_str[i] = cc->tk_str[i]; }
+    strncpy(saved_peek_text, cc->peek_text, MAX_IDENT - 1);
+    { int i; for (i = 0; i < saved_peek_str_len + 1 && i < MAX_STR; i++) saved_peek_str[i] = cc->peek_str[i]; }
+
+    /* Reset lexer to beginning of source */
+    cc->pos = 0;
+    cc->line = 1;
+    cc->col = 1;
+    cc->has_peek = 0;
+    next_token(cc);
+
+    while (cc->tk != TK_EOF) {
+        char name[MAX_IDENT];
+        int is_typedef_kw = 0;
+        int found_type;
+
+        if (prescan_count >= 50000) break;
+        prev_pos = cc->pos;
+        prescan_count++;
+
+        name[0] = 0;
+
+        /* Detect typedef keyword */
+        if (cc->tk == TK_TYPEDEF) is_typedef_kw = 1;
+
+        /* Try to skip a type specifier */
+        found_type = prescan_skip_type(cc);
+
+        if (!found_type) {
+            /* Not a declaration — skip this token */
+            /* But first check: if we see { at top level, skip the block */
+            if (cc->tk == TK_LBRACE) {
+                prescan_skip_braces(cc);
+            } else {
+                next_token(cc);
+            }
+            /* Anti-loop guard */
+            if (cc->pos == prev_pos) next_token(cc);
+            continue;
+        }
+
+        /* Bare struct/enum definition — no name follows, just ; */
+        if (cc->tk == TK_SEMI) {
+            next_token(cc);
+            continue;
+        }
+
+        /* Skip pointer stars */
+        while (cc->tk == TK_STAR) {
+            next_token(cc);
+            while (cc->tk == TK_CONST || cc->tk == TK_VOLATILE) next_token(cc);
+        }
+
+        /* Handle grouped declarator: (*name)(...) */
+        if (cc->tk == TK_LPAREN) {
+            int pk = peek_token(cc);
+            if (pk == TK_STAR) {
+                /* function pointer typedef or global function pointer */
+                next_token(cc); /* consume ( */
+                while (cc->tk == TK_STAR) {
+                    next_token(cc);
+                    while (cc->tk == TK_CONST || cc->tk == TK_VOLATILE) next_token(cc);
+                }
+                if (cc->tk == TK_IDENT) {
+                    strncpy(name, cc->tk_text, MAX_IDENT - 1);
+                    next_token(cc);
+                }
+                /* Skip inner parens and rest of grouped declarator */
+                while (cc->tk != TK_RPAREN && cc->tk != TK_EOF) next_token(cc);
+                if (cc->tk == TK_RPAREN) next_token(cc);
+                /* Skip trailing parameter list */
+                if (cc->tk == TK_LPAREN) prescan_skip_parens(cc);
+                /* Register what we found */
+                if (name[0]) {
+                    Symbol *sym = scope_find(cc, name);
+                    if (!sym) {
+                        if (is_typedef_kw) {
+                            sym = scope_add(cc, name, cc->ty_int);
+                            sym->is_typedef = 1;
+                        } else {
+                            sym = scope_add(cc, name, cc->ty_int);
+                            sym->is_global = 1;
+                        }
+                        registered++;
+                    }
+                }
+                /* Skip to ; */
+                while (cc->tk != TK_SEMI && cc->tk != TK_EOF) {
+                    if (cc->tk == TK_LBRACE) { prescan_skip_braces(cc); break; }
+                    next_token(cc);
+                }
+                if (cc->tk == TK_SEMI) next_token(cc);
+                if (cc->pos == prev_pos) next_token(cc);
+                continue;
+            }
+        }
+
+        /* Get declarator name */
+        if (cc->tk == TK_IDENT) {
+            strncpy(name, cc->tk_text, MAX_IDENT - 1);
+            next_token(cc);
+        }
+
+        if (!name[0]) {
+            /* No name — skip to next ; or {} */
+            while (cc->tk != TK_SEMI && cc->tk != TK_EOF) {
+                if (cc->tk == TK_LBRACE) { prescan_skip_braces(cc); break; }
+                next_token(cc);
+            }
+            if (cc->tk == TK_SEMI) next_token(cc);
+            if (cc->pos == prev_pos) next_token(cc);
+            continue;
+        }
+
+        /* Classify: function def/decl, global var, or typedef */
+        if (cc->tk == TK_LPAREN && !is_typedef_kw) {
+            /* Function definition or forward declaration */
+            Symbol *sym = scope_find(cc, name);
+            if (!sym) {
+                /* Register as function returning int (placeholder) */
+                Type *ftype = type_func(cc, cc->ty_int);
+                sym = scope_add(cc, name, ftype);
+                sym->is_global = 1;
+                registered++;
+            }
+            /* Skip parameter list */
+            prescan_skip_parens(cc);
+            /* Function body or forward decl */
+            if (cc->tk == TK_LBRACE) {
+                prescan_skip_braces(cc);
+            } else if (cc->tk == TK_SEMI) {
+                next_token(cc);
+            }
+        } else if (is_typedef_kw) {
+            /* typedef — register name with placeholder type */
+            Symbol *sym = scope_find(cc, name);
+            if (!sym) {
+                sym = scope_add(cc, name, cc->ty_int);
+                sym->is_typedef = 1;
+                registered++;
+            }
+            /* Handle typedef with array dims, function params, etc — skip to ; */
+            while (cc->tk != TK_SEMI && cc->tk != TK_EOF) {
+                if (cc->tk == TK_COMMA) {
+                    /* Multiple typedef names: typedef int A, B; */
+                    next_token(cc);
+                    /* Skip pointer stars */
+                    while (cc->tk == TK_STAR) {
+                        next_token(cc);
+                        while (cc->tk == TK_CONST || cc->tk == TK_VOLATILE) next_token(cc);
+                    }
+                    if (cc->tk == TK_IDENT) {
+                        char name2[MAX_IDENT];
+                        strncpy(name2, cc->tk_text, MAX_IDENT - 1);
+                        next_token(cc);
+                        sym = scope_find(cc, name2);
+                        if (!sym) {
+                            sym = scope_add(cc, name2, cc->ty_int);
+                            sym->is_typedef = 1;
+                            registered++;
+                        }
+                    }
+                } else {
+                    next_token(cc);
+                }
+            }
+            if (cc->tk == TK_SEMI) next_token(cc);
+        } else {
+            /* Global variable — detect array brackets for proper placeholder type */
+            Type *gtype = cc->ty_int;
+            if (cc->tk == TK_LBRACKET) {
+                /* Array declaration: name[...] — register as array (not pointer!) */
+                gtype = type_array(cc, cc->ty_int, 0);
+            }
+            {
+                Symbol *sym = scope_find(cc, name);
+                if (!sym) {
+                    sym = scope_add(cc, name, gtype);
+                    sym->is_global = 1;
+                    registered++;
+                }
+            }
+            /* Skip initializer and rest — handle multiple declarators */
+            while (cc->tk != TK_SEMI && cc->tk != TK_EOF) {
+                if (cc->tk == TK_LBRACE) {
+                    prescan_skip_braces(cc);
+                } else if (cc->tk == TK_COMMA) {
+                    /* Multiple global names: int a, b, c; */
+                    next_token(cc);
+                    while (cc->tk == TK_STAR) {
+                        next_token(cc);
+                        while (cc->tk == TK_CONST || cc->tk == TK_VOLATILE) next_token(cc);
+                    }
+                    if (cc->tk == TK_IDENT) {
+                        char name2[MAX_IDENT];
+                        Symbol *sym2;
+                        strncpy(name2, cc->tk_text, MAX_IDENT - 1);
+                        next_token(cc);
+                        gtype = cc->ty_int;
+                        if (cc->tk == TK_LBRACKET) {
+                            gtype = type_array(cc, cc->ty_int, 0);
+                        }
+                        sym2 = scope_find(cc, name2);
+                        if (!sym2) {
+                            sym2 = scope_add(cc, name2, gtype);
+                            sym2->is_global = 1;
+                            registered++;
+                        }
+                    } else {
+                        next_token(cc);
+                    }
+                } else {
+                    next_token(cc);
+                }
+            }
+            if (cc->tk == TK_SEMI) next_token(cc);
+        }
+
+        /* Anti-loop guard */
+        if (cc->pos == prev_pos) next_token(cc);
+    }
+
+    /* Restore complete lexer state */
+    cc->pos = saved_pos;
+    cc->line = saved_line;
+    cc->col = saved_col;
+    cc->tk = saved_tk;
+    cc->tk_val = saved_tk_val;
+    cc->tk_fval = saved_tk_fval;
+    strncpy(cc->tk_text, saved_tk_text, MAX_IDENT - 1);
+    { int i; for (i = 0; i < saved_tk_str_len + 1 && i < MAX_STR; i++) cc->tk_str[i] = saved_tk_str[i]; }
+    cc->tk_str_len = saved_tk_str_len;
+    cc->tk_line = saved_tk_line;
+    cc->tk_col = saved_tk_col;
+    cc->has_peek = saved_has_peek;
+    cc->peek_tk = saved_peek_tk;
+    cc->peek_val = saved_peek_val;
+    cc->peek_fval = saved_peek_fval;
+    strncpy(cc->peek_text, saved_peek_text, MAX_IDENT - 1);
+    { int i; for (i = 0; i < saved_peek_str_len + 1 && i < MAX_STR; i++) cc->peek_str[i] = saved_peek_str[i]; }
+    cc->peek_str_len = saved_peek_str_len;
+    cc->peek_line = saved_peek_line;
+    cc->peek_col = saved_peek_col;
+
+    printf("[prescan] registered %d forward declarations\n", registered);
+}
+
+/* ================================================================ */
 /* TOP-LEVEL PARSING                                                 */
 /* ================================================================ */
 
@@ -1668,6 +2949,7 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
     Node *func;
     int line;
     int i;
+    int is_variadic = 0;
 
     line = cc->tk_line;
     func = node_new(cc, ND_FUNC_DEF, line);
@@ -1697,6 +2979,7 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
                 Symbol *psym;
 
                 if (cc->tk == TK_ELLIPSIS) {
+                    is_variadic = 1;
                     next_token(cc);
                     break;
                 }
@@ -1704,6 +2987,8 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
 
                 ptype = parse_type(cc);
                 ptype = parse_declarator(cc, ptype, pname);
+
+                if (ptype->kind == TY_ARRAY) ptype = type_ptr(cc, ptype->base);
 
                 if (func->num_params < MAX_PARAMS) {
                     func->param_types[func->num_params] = ptype;
@@ -1731,15 +3016,27 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
     }
     expect(cc, TK_RPAREN);
 
+    /* CG-IR-VARARGS: Reserve the first 48 bytes exclusively for reg_save_area */
+    if (is_variadic && cc->local_offset > -48) {
+        cc->local_offset = -48;
+    }
+
     /* register function in global scope (forward decl and definition) */
     {
         Type *ftype;
         Symbol *fsym;
         ftype = type_func(cc, ret_type);
         ftype->num_params = func->num_params;
+        ftype->is_variadic = is_variadic;
+        if (func->num_params > 0) {
+            ftype->params = (Type **)cc_alloc(cc, sizeof(Type *) * func->num_params);
+            for (int k = 0; k < func->num_params; k++) {
+                ftype->params[k] = func->param_types[k];
+            }
+        }
         func->func_type = ftype;
 
-        /* add to parent scope (global) */
+        /* add to parent scope (global) — always update type for prescan upgrade */
         fsym = scope_find(cc, name);
         if (!fsym) {
             /* temporarily pop to add to parent */
@@ -1749,6 +3046,9 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
             fsym = scope_add(cc, name, ftype);
             fsym->is_global = 1;
             cc->current_scope = cur;
+        } else {
+            /* Symbol exists (prescan placeholder or forward decl) — upgrade type */
+            fsym->type = ftype;
         }
     }
 
@@ -1827,13 +3127,116 @@ Node *parse_program(Compiler *cc) {
                 ptr_type = type_ptr(cc, ptr_type);
             }
 
-            /* get name */
+            /* get name — also handle grouped declarator (*name)(params) for function pointers */
             name[0] = 0;
+            if (cc->tk == TK_LPAREN) {
+                int gpk;
+                gpk = peek_token(cc);
+                if (gpk == TK_STAR) {
+                    /* function pointer: typedef int (*name)(params); or int (*fp)(int); */
+                    int gptr;
+                    int arr_lens[8];
+                    int arr_num;
+                    next_token(cc); /* consume ( */
+                    gptr = 0;
+                    arr_num = 0;
+                    while (cc->tk == TK_STAR) {
+                        next_token(cc);
+                        while (cc->tk == TK_CONST || cc->tk == TK_VOLATILE) next_token(cc);
+                        gptr++;
+                    }
+                    if (cc->tk == TK_IDENT) {
+                        strncpy(name, cc->tk_text, MAX_IDENT - 1);
+                        next_token(cc);
+                    }
+                    int is_inner_func = 0;
+                    if (cc->tk == TK_LPAREN) {
+                        is_inner_func = 1;
+                        next_token(cc);
+                        int pcnt = 1;
+                        while (pcnt > 0 && cc->tk != TK_EOF) {
+                            if (cc->tk == TK_LPAREN) pcnt++;
+                            else if (cc->tk == TK_RPAREN) pcnt--;
+                            next_token(cc);
+                        }
+                    }
+                    while (cc->tk == TK_LBRACKET) {
+                        int alen = 0;
+                        next_token(cc);
+                        if (cc->tk != TK_RBRACKET) alen = (int)parse_const_expr(cc);
+                        expect(cc, TK_RBRACKET);
+                        if (arr_num < 8) arr_lens[arr_num++] = alen;
+                    }
+                    expect(cc, TK_RPAREN);
+                    /* parse trailing (params) */
+                    if (cc->tk == TK_LPAREN) {
+                        Type *ftype;
+                        next_token(cc);
+                        ftype = type_func(cc, ptr_type);
+                        ftype->params = (Type **)cc_alloc(cc, sizeof(Type *) * MAX_PARAMS);
+                        ftype->num_params = 0;
+                        ftype->is_variadic = 0;
+                        if (cc->tk != TK_RPAREN) {
+                            if (cc->tk == TK_VOID) {
+                                int vpk2;
+                                vpk2 = peek_token(cc);
+                                if (vpk2 == TK_RPAREN) {
+                                    next_token(cc);
+                                } else {
+                                    goto parse_gd_params;
+                                }
+                            } else {
+                                parse_gd_params:
+                                while (cc->tk != TK_RPAREN) {
+                                    Type *ptype;
+                                    char pname[128];
+                                    if (cc->tk == TK_ELLIPSIS) {
+                                        ftype->is_variadic = 1;
+                                        next_token(cc);
+                                        break;
+                                    }
+                                    if (cc->tk == TK_EOF) break;
+                                    ptype = parse_type(cc);
+                                    ptype = parse_declarator(cc, ptype, pname);
+                                    if (ftype->num_params < MAX_PARAMS) {
+                                        ftype->params[ftype->num_params] = ptype;
+                                        ftype->num_params++;
+                                    }
+                                    if (cc->tk == TK_COMMA) {
+                                        next_token(cc);
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        expect(cc, TK_RPAREN);
+                        dtype = ftype;
+                    } else {
+                        dtype = ptr_type;
+                    }
+                    while (gptr > 0) {
+                        dtype = type_ptr(cc, dtype);
+                        gptr--;
+                    }
+                    while (arr_num > 0) {
+                        arr_num--;
+                        dtype = type_array(cc, dtype, arr_lens[arr_num]);
+                    }
+                    if (is_inner_func) {
+                        dtype = type_func(cc, dtype);
+                    }
+                    /* fall through to typedef / global var handling */
+                    goto after_name;
+                }
+            }
             if (cc->tk == TK_IDENT) {
                 strncpy(name, cc->tk_text, MAX_IDENT - 1);
                 next_token(cc);
             }
+            dtype = ptr_type;
 
+            after_name:
             /* handle bare struct/enum definitions (no name) */
             if (!name[0]) {
                 if (cc->tk == TK_SEMI) {
@@ -1850,49 +3253,37 @@ Node *parse_program(Compiler *cc) {
 
             /* function definition or forward declaration: name followed by ( */
             if (cc->tk == TK_LPAREN) {
-                Node *func;
-                func = parse_func_def(cc, ptr_type, name, is_static);
-                /* only link into list if definition (has body); forward decl has body == 0 */
-                if (func->body) {
-                    func->next = 0;
-                    if (!head) { head = func; tail = func; }
-                    else { tail->next = func; tail = func; }
+                if (!is_typedef_kw) {
+                    Node *func;
+                    func = parse_func_def(cc, ptr_type, name, is_static);
+                    /* only link into list if definition (has body); forward decl has body == 0 */
+                    if (func->body) {
+                        func->next = 0;
+                        if (!head) { head = func; tail = func; }
+                        else { tail->next = func; tail = func; }
+                    }
+                    continue;
+                } else {
+                    /* it's a typedef to a function type: typedef int func_t(int, int); */
+                    int depth;
+                    dtype = type_func(cc, ptr_type);
+                    next_token(cc); /* consume ( */
+                    depth = 1;
+                    while (depth > 0 && cc->tk != TK_EOF) {
+                        if (cc->tk == TK_LPAREN) depth++;
+                        else if (cc->tk == TK_RPAREN) depth--;
+                        next_token(cc);
+                    }
+                    /* falls through to array dimensional parsing or typedef registration */
                 }
-                continue;
             }
 
             /* array dimensions after name */
-            dtype = ptr_type;
             while (cc->tk == TK_LBRACKET) {
                 int alen;
                 next_token(cc);
                 alen = 0;
-                if (cc->tk == TK_NUM) {
-                    alen = cc->tk_val;
-                    next_token(cc);
-                } else if (cc->tk == TK_IDENT) {
-                    Symbol *sym;
-                    sym = scope_find(cc, cc->tk_text);
-                    if (sym) {
-                        if (sym->is_enum_const) {
-                            alen = (int)sym->enum_val;
-                        }
-                    }
-                    next_token(cc);
-                } else if (cc->tk == TK_SIZEOF) {
-                    next_token(cc);
-                    if (cc->tk == TK_LPAREN) {
-                        next_token(cc);
-                        if (is_type_token(cc)) {
-                            Type *st;
-                            char dummy[128];
-                            st = parse_type(cc);
-                            st = parse_declarator(cc, st, dummy);
-                            alen = type_size(st);
-                        }
-                        expect(cc, TK_RPAREN);
-                    }
-                }
+                if (cc->tk != TK_RBRACKET) alen = (int)parse_const_expr(cc);
                 expect(cc, TK_RBRACKET);
                 dtype = type_array(cc, dtype, alen);
             }
@@ -1935,19 +3326,81 @@ Node *parse_program(Compiler *cc) {
             if (cc->tk == TK_ASSIGN) {
                 next_token(cc);
                 if (cc->tk == TK_LBRACE) {
-                    /* initializer list — skip for now */
-                    int depth;
-                    depth = 1;
-                    next_token(cc);
-                    while (depth > 0) {
-                        if (cc->tk == TK_EOF) break;
-                        if (cc->tk == TK_LBRACE) depth = depth + 1;
-                        if (cc->tk == TK_RBRACE) depth = depth - 1;
-                        if (depth > 0) next_token(cc);
+                    /* Parse array initializer list */
+                    Node *init_list;
+                    Node **inits;
+                    int count;
+                    init_list = node_new(cc, ND_INIT_LIST, line);
+                    inits = (Node **)cc_alloc(cc, sizeof(Node *) * MAX_INIT);
+                    count = 0;
+                    next_token(cc); /* skip { */
+                    int depth = 1;
+                    int skip_tk;
+                    int prev_pos;
+                    int no_progress_count = 0;
+                    int top_elems = 0;
+                    int last_comma = 1;
+                    while (depth > 0 && cc->tk != TK_EOF) {
+                        if (depth == 1 && cc->tk != TK_RBRACE && cc->tk != TK_COMMA && last_comma) {
+                            top_elems++;
+                            last_comma = 0;
+                        }
+                        prev_pos = cc->pos;
+                        if (cc->tk == TK_LBRACE) {
+                            depth++;
+                            next_token(cc);
+                        } else if (cc->tk == TK_RBRACE) {
+                            depth--;
+                            if (depth == 0) break;
+                            next_token(cc);
+                        } else if (cc->tk == TK_COMMA) {
+                            if (depth == 1) last_comma = 1;
+                            next_token(cc);
+                        } else {
+                            skip_tk = cc->tk;
+                            if (count < MAX_INIT) {
+                                inits[count++] = parse_assign(cc);
+                            } else {
+                                parse_assign(cc); /* discard if over limit */
+                            }
+                            if (cc->tk == skip_tk) {
+                                if (cc->tk != TK_EOF) next_token(cc);
+                            }
+                            if (cc->pos == prev_pos) {
+                                no_progress_count++;
+                                if (no_progress_count > 100) {
+                                    error(cc, "global array parser stuck");
+                                    break;
+                                }
+                            } else {
+                                no_progress_count = 0;
+                            }
+                        }
                     }
-                    next_token(cc);
+                    if (cc->tk == TK_RBRACE) next_token(cc); /* skip } */
+                    init_list->args = inits;
+                    init_list->num_args = count;
+                    gvar->initializer = init_list;
+                    
+                    /* adjust array size if omitted */
+                    if (gvar->type->kind == TY_ARRAY && gvar->type->array_len == 0) {
+                        gvar->type->array_len = top_elems;
+                        gvar->type->size = type_size(gvar->type->base) * top_elems;
+                        if (gvar->sym) {
+                            gvar->sym->type->array_len = top_elems;
+                            gvar->sym->type->size = gvar->type->size;
+                        }
+                    }
                 } else {
-                    gvar->initializer = parse_assign(cc);
+                    Node *init_node = parse_assign(cc);
+                    gvar->initializer = init_node;
+                    /* Fix: if char[] initialized with string literal, update size */
+                    if (init_node && init_node->kind == ND_STR &&
+                        gvar->type->kind == TY_ARRAY && gvar->type->array_len == 0) {
+                        int slen = cc->strings[init_node->str_id].len + 1; /* +1 for null */
+                        gvar->type->array_len = slen;
+                        gvar->type->size = type_size(gvar->type->base) * slen;
+                    }
                 }
             }
 
@@ -1969,6 +3422,8 @@ Node *parse_program(Compiler *cc) {
                 gvar2 = node_new(cc, ND_GLOBAL_VAR, line);
                 strncpy(gvar2->name, name2, MAX_IDENT - 1);
                 gvar2->type = dtype2;
+                gvar2->is_extern = is_extern;
+                gvar2->is_static = is_static;
 
                 sym2 = scope_add(cc, name2, dtype2);
                 sym2->is_global = 1;

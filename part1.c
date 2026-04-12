@@ -27,14 +27,14 @@
 enum {
     MAX_IDENT   = 128,
     MAX_STR     = 4096,
-    MAX_STRINGS = 2048,
-    MAX_GLOBALS = 1024,
-    MAX_STRUCTS = 256,
-    MAX_PARAMS  = 64,
+    MAX_STRINGS = 16384,
+    MAX_GLOBALS = 16384,
+    MAX_STRUCTS = 8192,
+    MAX_PARAMS  = 128,
     MAX_CALL_ARGS = 256,
-    MAX_CASES   = 256,
-    MAX_INIT    = 1024,
-    ARENA_SIZE  = 8388608
+    MAX_CASES   = 4096,
+    MAX_INIT    = 8192,
+    ARENA_SIZE  = 16777216
 };
 
 /* ================================================================ */
@@ -55,6 +55,7 @@ enum {
     TK_STRUCT, TK_UNION, TK_ENUM, TK_TYPEDEF,
     TK_SIZEOF, TK_STATIC, TK_EXTERN, TK_CONST,
     TK_VOLATILE, TK_AUTO, TK_REGISTER, TK_INLINE,
+    TK_BUILTIN_VA_ARG,
     /* operators */
     TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH, TK_PERCENT,
     TK_AMP, TK_PIPE, TK_CARET, TK_TILDE, TK_BANG,
@@ -94,7 +95,7 @@ enum {
     ND_IF, ND_WHILE, ND_FOR, ND_DO_WHILE,
     ND_BREAK, ND_CONTINUE, ND_GOTO, ND_LABEL,
     ND_SWITCH, ND_CASE, ND_DEFAULT,
-    ND_CAST, ND_SIZEOF,
+    ND_CAST, ND_SIZEOF, ND_VA_ARG,
     ND_MEMBER, ND_PRE_INC, ND_PRE_DEC,
     ND_POST_INC, ND_POST_DEC,
     ND_TERNARY,
@@ -181,6 +182,7 @@ struct Symbol {
     int is_enum_const;
     long long enum_val;
     int stack_offset;  /* for locals */
+    char asm_name[MAX_IDENT];
     /* Regalloc */
     char *assigned_reg;
     int live_start;
@@ -296,9 +298,9 @@ struct Node {
 int node_kind(struct Node *n) { return n ? n->kind : 0; }
 long long node_int_val(struct Node *n) { return n ? (long long)n->int_val : 0; }
 int node_str_id(struct Node *n) { return n ? n->str_id : 0; }
-void node_name(struct Node *n, char *buf, unsigned len) {
+void node_name(struct Node *n, char *buf, int len) {
     if (!n || !buf || len == 0) return;
-    unsigned i = 0;
+    int i; i = 0;
     while (i < len - 1 && n->name[i]) { buf[i] = n->name[i]; i++; }
     buf[i] = '\0';
 }
@@ -362,6 +364,23 @@ int node_is_func(struct Node *n) {
     if (!n) return 0;
     /* Also handle implicit functions with no symbol/type properly if needed, but normally part3.c typed them as ty_int. Wait, if implicit, how do we know it's a function? Normally implicit functions are only in ND_CALL, and we only decay functions in ND_VAR/ND_MEMBER! */
     return (n->type && n->type->kind == TY_FUNC) ? 1 : 0;
+}
+
+/* CG-IR-015: Type-width accessors for IR instruction selection.
+ * Used by compiler_passes.c to pick 32-bit vs 64-bit lowering for
+ * OP_DIV / OP_MOD / OP_SHR so the IR backend matches GCC semantics. */
+int node_type_size(struct Node *n) {
+    /* Returns the result type size in bytes (4=int, 8=long/ptr).
+     * Returns 8 (safe default) when type is unknown or absent. */
+    if (!n || !n->type) return 8;
+    return (n->type->size > 0) ? (int)n->type->size : 8;
+}
+int node_type_unsigned(struct Node *n) {
+    /* Returns 1 if the node's result type is an unsigned integer kind. */
+    if (!n || !n->type) return 0;
+    int k = n->type->kind;
+    return (k == TY_UCHAR || k == TY_USHORT || k == TY_UINT ||
+            k == TY_ULONG || k == TY_ULONGLONG) ? 1 : 0;
 }
 
 struct Compiler {
@@ -451,6 +470,8 @@ struct Compiler {
 
     /* local variable offset counter (for codegen) */
     int local_offset;
+
+    int current_is_static;
 };
 
 /* ================================================================ */
@@ -508,5 +529,6 @@ static int is_type_token(Compiler *cc);
 int peek_token(Compiler *cc);
 void error(Compiler *cc, char *msg);
 void error_at(Compiler *cc, int line, char *msg);
+void prescan_declarations(Compiler *cc);
 
 /* ZKAEDI FORCE RENDER CACHE INVALIDATION */

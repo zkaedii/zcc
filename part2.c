@@ -32,14 +32,14 @@ void *cc_alloc(Compiler *cc, int size) {
             return p;
         }
         if (!a->next) {
-            if (block_count >= 64) {
+            if (block_count >= 512) {
                 printf("zcc: too many arena blocks (%d) — possible infinite loop or corrupt AST (last alloc size=%d)\n", block_count, size);
                 if (cc) {
                     printf("zcc: stuck near token kind=%d line=%d text=%.127s\n", cc->tk, cc->tk_line, cc->tk_text);
                 }
                 exit(1);
             }
-            if (block_count >= 60 && cc) {
+            if (block_count >= 500 && cc) {
                 printf("zcc: near block limit block_count=%d token=%d line=%d size=%d text=%.127s\n", block_count, cc->tk, cc->tk_line, size, cc->tk_text);
             }
             block_count++;
@@ -277,12 +277,37 @@ Symbol *scope_find_local(Compiler *cc, char *name) {
 
 Symbol *scope_add(Compiler *cc, char *name, Type *type) {
     Symbol *sym;
+    /* Dedup: if symbol already exists in current scope (e.g. from prescan),
+     * update its type (Pass 2 wins over Pass 1 placeholder) instead of
+     * creating a duplicate entry. */
+    Symbol *existing;
+    existing = 0;
+    if (cc->current_scope) {
+        existing = cc->current_scope->symbols;
+        while (existing) {
+            if (strcmp(existing->name, name) == 0) break;
+            existing = existing->next;
+        }
+    }
+    if (existing) {
+        /* Update type — Pass 2 has full context, always wins */
+        existing->type = type;
+        if (strcmp(name, "yyParser") == 0) {
+            printf("DEBUG: scope_add('yyParser') UPDATE type kind=%d tag='%s'\n", type ? type->kind : -1, (type && type->tag[0]) ? type->tag : "<none>");
+            fflush(stdout);
+        }
+        return existing;
+    }
     sym = (Symbol *)cc_alloc(cc, sizeof(Symbol));
     strncpy(sym->name, name, MAX_IDENT - 1);
     sym->type = type;
     sym->stack_offset = 0;
     sym->next = cc->current_scope->symbols;
     cc->current_scope->symbols = sym;
+    if (strcmp(name, "yyParser") == 0) {
+        printf("DEBUG: scope_add('yyParser') with type kind=%d tag='%s'\n", type ? type->kind : -1, (type && type->tag[0]) ? type->tag : "<none>");
+        fflush(stdout);
+    }
     return sym;
 }
 
@@ -335,6 +360,7 @@ static Keyword keywords[] = {
     {"enum",      TK_ENUM},
     {"typedef",   TK_TYPEDEF},
     {"sizeof",    TK_SIZEOF},
+    {"__builtin_va_arg", TK_BUILTIN_VA_ARG},
     {"static",    TK_STATIC},
     {"extern",    TK_EXTERN},
     {"const",     TK_CONST},
@@ -342,10 +368,23 @@ static Keyword keywords[] = {
     {"auto",      TK_AUTO},
     {"register",  TK_REGISTER},
     {"inline",    TK_INLINE},
+    {"__signed__", TK_SIGNED},
+    {"__signed",   TK_SIGNED},
+    {"__const__",  TK_CONST},
+    {"__const",    TK_CONST},
+    {"__inline__", TK_INLINE},
+    {"__inline",   TK_INLINE},
+    {"__volatile__", TK_VOLATILE},
+    {"__volatile", TK_VOLATILE},
+    {"__restrict__", TK_VOLATILE},
+    {"__restrict", TK_VOLATILE},
+    {"restrict",  TK_VOLATILE},
+    {"__int128",   TK_LONG},
+    {"__int128_t", TK_LONG},
     {0, 0}
 };
 
-static int kw_count = 33;
+static int kw_count = 47;
 
 static int lookup_keyword(char *name) {
     int i;
@@ -361,7 +400,7 @@ static int lookup_keyword(char *name) {
 
 /* stage2 fallback: match ident by length and bytes (no strcmp/keyword table). Bounds-safe. */
 static int lookup_keyword_fallback(char *buf, int len) {
-    if (!buf || len <= 0 || len > 8) return 0;  /* max keyword length 8 */
+    if (!buf || len <= 0 || len > 16) return 0;  /* max keyword length 16 */
     if (len==3 && buf[0]=='i'&&buf[1]=='n'&&buf[2]=='t') return TK_INT;
     if (len==4 && buf[0]=='c'&&buf[1]=='h'&&buf[2]=='a'&&buf[3]=='r') return TK_CHAR;
     if (len==4 && buf[0]=='v'&&buf[1]=='o'&&buf[2]=='i'&&buf[3]=='d') return TK_VOID;
@@ -396,6 +435,19 @@ static int lookup_keyword_fallback(char *buf, int len) {
     if (len==8 && buf[0]=='v'&&buf[1]=='o'&&buf[2]=='l'&&buf[3]=='a'&&buf[4]=='t'&&buf[5]=='i'&&buf[6]=='l'&&buf[7]=='e') return TK_VOLATILE;
     if (len==8 && buf[0]=='c'&&buf[1]=='o'&&buf[2]=='n'&&buf[3]=='t'&&buf[4]=='i'&&buf[5]=='n'&&buf[6]=='u'&&buf[7]=='e') return TK_CONTINUE;
     if (len==8 && buf[0]=='r'&&buf[1]=='e'&&buf[2]=='g'&&buf[3]=='i'&&buf[4]=='s'&&buf[5]=='t'&&buf[6]=='e'&&buf[7]=='r') return TK_REGISTER;
+    if (len==8 && buf[0]=='r'&&buf[1]=='e'&&buf[2]=='s'&&buf[3]=='t'&&buf[4]=='r'&&buf[5]=='i'&&buf[6]=='c'&&buf[7]=='t') return TK_VOLATILE;
+    if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='c'&&buf[3]=='o'&&buf[4]=='n'&&buf[5]=='s'&&buf[6]=='t') return TK_CONST;
+    if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='s'&&buf[3]=='i'&&buf[4]=='g'&&buf[5]=='n'&&buf[6]=='e'&&buf[7]=='d') return TK_SIGNED;
+    if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='i'&&buf[3]=='n'&&buf[4]=='l'&&buf[5]=='i'&&buf[6]=='n'&&buf[7]=='e') return TK_INLINE;
+    if (len==9 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='c'&&buf[3]=='o'&&buf[4]=='n'&&buf[5]=='s'&&buf[6]=='t'&&buf[7]=='_'&&buf[8]=='_') return TK_CONST;
+    if (len==10 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='s'&&buf[3]=='i'&&buf[4]=='g'&&buf[5]=='n'&&buf[6]=='e'&&buf[7]=='d'&&buf[8]=='_'&&buf[9]=='_') return TK_SIGNED;
+    if (len==10 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='i'&&buf[3]=='n'&&buf[4]=='l'&&buf[5]=='i'&&buf[6]=='n'&&buf[7]=='e'&&buf[8]=='_'&&buf[9]=='_') return TK_INLINE;
+    if (len==10 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='r'&&buf[3]=='e'&&buf[4]=='s'&&buf[5]=='t'&&buf[6]=='r'&&buf[7]=='i'&&buf[8]=='c'&&buf[9]=='t') return TK_VOLATILE;
+    if (len==12 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='r'&&buf[3]=='e'&&buf[4]=='s'&&buf[5]=='t'&&buf[6]=='r'&&buf[7]=='i'&&buf[8]=='c'&&buf[9]=='t'&&buf[10]=='_'&&buf[11]=='_') return TK_VOLATILE;
+    if (len==10 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='v'&&buf[3]=='o'&&buf[4]=='l'&&buf[5]=='a'&&buf[6]=='t'&&buf[7]=='i'&&buf[8]=='l'&&buf[9]=='e') return TK_VOLATILE;
+    if (len==12 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='v'&&buf[3]=='o'&&buf[4]=='l'&&buf[5]=='a'&&buf[6]=='t'&&buf[7]=='i'&&buf[8]=='l'&&buf[9]=='e'&&buf[10]=='_'&&buf[11]=='_') return TK_VOLATILE;
+    if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='i'&&buf[3]=='n'&&buf[4]=='t'&&buf[5]=='1'&&buf[6]=='2'&&buf[7]=='8') return TK_LONG;
+    if (len==10 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='i'&&buf[3]=='n'&&buf[4]=='t'&&buf[5]=='1'&&buf[6]=='2'&&buf[7]=='8'&&buf[8]=='_'&&buf[9]=='t') return TK_LONG;
     return 0;
 }
 
@@ -466,7 +518,23 @@ static int read_escape(Compiler *cc) {
         case '\\': return '\\';
         case '\'': return '\'';
         case '"': return '"';
-        case '0': return '\0';
+        case '0':
+        case '1':
+        case '2':
+        case '3':
+        case '4':
+        case '5':
+        case '6':
+        case '7': {
+            int val = c - '0';
+            if (peek_char(cc) >= '0' && peek_char(cc) <= '7') {
+                val = val * 8 + (read_char(cc) - '0');
+                if (peek_char(cc) >= '0' && peek_char(cc) <= '7') {
+                    val = val * 8 + (read_char(cc) - '0');
+                }
+            }
+            return val;
+        }
         case 'a': return '\a';
         case 'b': return '\b';
         case 'f': return '\f';
@@ -490,6 +558,7 @@ static int read_escape(Compiler *cc) {
 void next_token(Compiler *cc) {
     int c;
     int kw;
+    int entry_pos = cc->pos;
 
     /* if we have a peeked token, use it */
     if (cc->has_peek) {
@@ -609,10 +678,16 @@ again:
         if (is_float) {
             fval = strtod(cc->source + cc->pos, &end);
             len = end - (cc->source + cc->pos);
+            if (len <= 0) len = 1;
+            /* we peeked c, so real current index is cc->pos, 
+               but we need to advance cc->pos. */
             cc->pos = cc->pos + len;
             cc->col = cc->col + len;
-            if (cc->pos < cc->source_len && (cc->source[cc->pos] == 'f' || cc->source[cc->pos] == 'F')) {
-                cc->pos++; cc->col++;
+            if (cc->pos < cc->source_len) {
+                char sc = cc->source[cc->pos];
+                if (sc == 'f' || sc == 'F' || sc == 'l' || sc == 'L') {
+                    cc->pos++; cc->col++;
+                }
             }
             cc->tk = TK_FLIT;
             cc->tk_fval = fval;
@@ -649,14 +724,19 @@ again:
                 read_char(cc);
             }
         }
-        /* skip suffixes like L, U, UL, ULL, etc */
+        /* parse suffixes like L, U, UL, ULL, etc */
+        int is_uns = 0;
+        int is_lng = 0;
         while (peek_char(cc) == 'L' || peek_char(cc) == 'l' ||
                peek_char(cc) == 'U' || peek_char(cc) == 'u') {
-            read_char(cc);
+            int ch = read_char(cc);
+            if (ch == 'U' || ch == 'u') is_uns = 1;
+            if (ch == 'L' || ch == 'l') is_lng = 1;
         }
         cc->tk = TK_NUM;
         cc->tk_val = val;
-        cc->tk_text[0] = 0;
+        cc->tk_text[0] = is_uns ? 'U' : 0;
+        cc->tk_text[1] = is_lng ? 'L' : 0;
         return;
     }
 
@@ -699,7 +779,7 @@ again:
 
         /* handle adjacent string literals */
         /* skip whitespace and check for another " */
-        {
+        while (1) {
             int saved_pos;
             int saved_line;
             int saved_col;
@@ -740,11 +820,14 @@ again:
                     cc->tk_str[len] = 0;
                     cc->tk_str_len = len;
                 } else {
-                    /* no adjacent string — restore position */
+                    /* no adjacent string — restore position and exit loop */
                     cc->pos = saved_pos;
                     cc->line = saved_line;
                     cc->col = saved_col;
+                    break;
                 }
+            } else {
+                break;
             }
         }
         return;
@@ -767,6 +850,24 @@ again:
         if (kw) {
             cc->tk = kw;
         } else {
+            if (strcmp(ident_buf, "__attribute__") == 0 || strcmp(ident_buf, "__attribute") == 0) {
+                int pcount = 0;
+                int started = 0;
+                while (cc->pos < cc->source_len) {
+                    char ac = cc->source[cc->pos];
+                    if (ac == '(') { pcount++; started = 1; }
+                    else if (ac == ')') {
+                        pcount--;
+                        if (started && pcount == 0) { cc->pos++; cc->col++; break; }
+                    }
+                    cc->pos++; cc->col++;
+                }
+                goto again;
+            }
+            if (strcmp(ident_buf, "__extension__") == 0) {
+                goto again;
+            }
+            
             cc->tk = TK_IDENT;
         }
         strncpy(cc->tk_text, ident_buf, MAX_IDENT - 1);
@@ -850,6 +951,24 @@ again:
     if (c == ';') { cc->tk = TK_SEMI; return; }
     if (c == ',') { cc->tk = TK_COMMA; return; }
     if (c == '.') {
+        if (is_digit(peek_char(cc))) {
+            char *end;
+            double fval = strtod(cc->source + cc->pos - 1, &end);
+            int len = end - (cc->source + cc->pos - 1);
+            if (len <= 0) len = 1;
+            cc->pos = cc->pos - 1 + len;
+            cc->col = cc->col - 1 + len;
+            if (cc->pos < cc->source_len) {
+                char sc = cc->source[cc->pos];
+                if (sc == 'f' || sc == 'F' || sc == 'l' || sc == 'L') {
+                    cc->pos++; cc->col++;
+                }
+            }
+            cc->tk = TK_FLIT;
+            cc->tk_fval = fval;
+            cc->tk_text[0] = 0;
+            return;
+        }
         if (peek_char(cc) == '.') {
             read_char(cc);
             if (peek_char(cc) == '.') { read_char(cc); cc->tk = TK_ELLIPSIS; return; }
@@ -869,11 +988,12 @@ again:
 /* Human-readable token name for error messages (index = enum value from part1). */
 static const char *token_name(int t) {
     static const char *names[] = {
-        "EOF", "NUM", "STR", "CHAR_LIT", "IDENT",
+        "EOF", "NUM", "STR", "CHAR_LIT", "IDENT", "FLIT",
         "INT", "CHAR", "VOID", "LONG", "SHORT", "UNSIGNED", "SIGNED", "FLOAT", "DOUBLE",
         "IF", "ELSE", "WHILE", "FOR", "DO", "RETURN", "BREAK", "CONTINUE", "GOTO",
         "SWITCH", "CASE", "DEFAULT", "STRUCT", "UNION", "ENUM", "TYPEDEF",
         "SIZEOF", "STATIC", "EXTERN", "CONST", "VOLATILE", "AUTO", "REGISTER", "INLINE",
+        "BUILTIN_VA_ARG",
         "PLUS", "MINUS", "STAR", "SLASH", "PERCENT", "AMP", "PIPE", "CARET", "TILDE", "BANG",
         "ASSIGN", "EQ", "NE", "LT", "GT", "LE", "GE", "LAND", "LOR", "SHL", "SHR",
         "INC", "DEC", "ARROW", "DOT", "QUESTION", "COLON",

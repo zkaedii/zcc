@@ -25,6 +25,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Forward-declare struct Node (defined in zcc.c) so all uses of
+ * 'struct Node *' in this TU share the same incomplete-type tag.
+ * Without this, GCC 13 treats the tag as re-declared in each parameter
+ * list and reports spurious "conflicting types" on the static forward
+ * declarations of zcc_node_from_expr / zcc_node_from_stmt.           */
+struct Node;
+
 #include "zcc_ast_bridge.h"
 
 /* When set (ZCC_PGO_DEBUG_MAIN=1 and emitting main), OP_LOAD in
@@ -51,6 +58,18 @@ static int s_debug_main_emit = 0;
 
 #define NO_BLOCK 0xFFFFFFFFu /* sentinel: absent block ID    */
 #define NO_ALLOC 0xFFFFFFFFu /* sentinel: absent alloca ID   */
+
+/* ── CG-IR-015: IR value type for width-sensitive instruction lowering ────────
+ * Propagated from the AST (via member_size encoding) through zcc_lower_expr
+ * into Instr.ir_type.  Zero-value IR_TY_I64 is the safe 64-bit default so
+ * all existing calloc'd Instrs remain correct without explicit initialisation.
+ * Only I32/U32 need special treatment in ir_asm_lower_insn (div/mod/shr).   */
+typedef enum {
+    IR_TY_I64 = 0, /* signed 64-bit  — long, pointer; also "unknown" default  */
+    IR_TY_I32 = 1, /* signed 32-bit  — int                                    */
+    IR_TY_U32 = 2, /* unsigned 32-bit — unsigned int                          */
+    IR_TY_U64 = 3, /* unsigned 64-bit — unsigned long                         */
+} IRType;
 
 typedef uint32_t RegID;   /* virtual register identifier            */
 typedef uint32_t BlockID; /* basic block identifier                 */
@@ -153,6 +172,9 @@ typedef struct Instr {
   bool escape;      /* marked by escape analysis           */
   double exec_freq; /* from PGO profile                    */
   int line_no;      /* source line for DWARF .loc (0 = none) */
+  IRType ir_type;   /* CG-IR-015: value type for width-sensitive lowering     */
+                    /* (0 = IR_TY_I64 default; set for OP_DIV/MOD/SHR/SHL)   */
+  int lscan_seq;    /* Liveness sequence ID injected by ir_asm_number_and_liveness */
 
   struct Instr *next;
   struct Instr *prev;
@@ -1325,7 +1347,7 @@ uint32_t ssa_dce_pass(Function *fn) {
     uint32_t def_n_seed = def->n_src;
     if (def->op == OP_BR)
       def_n_seed = 0;
-    if (def->op == OP_CONDBR)
+    if (def->op == OP_CONDBR || def->op == OP_COPY)
       def_n_seed = 1;
     for (uint32_t s = 0; s < def_n_seed; s++) {
       RegID src = def->src[s];
@@ -1773,6 +1795,9 @@ static uint32_t scalar_promotion_pass(Function *fn, EscapeCtx *ctx) {
       }
       if (ins->op == OP_STORE && ins->n_src >= 2 && ins->src[1] == base_reg) {
         current_val = ins->src[0];
+        while (current_val < MAX_INSTRS && repl_valid[current_val]) {
+          current_val = repl[current_val];
+        }
         current_val_set = true;
         if (n_stores < 256)
           stores_to_remove[n_stores++] = ins;
@@ -2348,6 +2373,7 @@ typedef struct {
   /* var name → slot index; slot_alloca_reg[slot] = reg holding alloca result */
   char var_names[AST_MAX_VARS][NAME_LEN];
   RegID slot_alloca_reg[AST_MAX_VARS];
+  Instr *slot_alloca_instr[AST_MAX_VARS];
   uint32_t n_vars;
   int want_address; /* 1 when lowering lhs of assign/compound_assign: return
                        address reg, no load */
@@ -2418,15 +2444,20 @@ static int is_main_func(const char *func_name) {
  * conditional/loop body, the alloca was emitted there and never runs on other
  * paths → uninitialized slot → null deref. Fix: always hoist OP_ALLOCA to the
  * entry block so it dominates all uses. */
-static RegID get_or_create_var(LowerCtx *ctx, const char *name) {
+static RegID get_or_create_var(LowerCtx *ctx, const char *name, int size) {
   if (!name || (uintptr_t)name < 4096 || name[0] == '\0') {
     fprintf(stderr, "[ZCC-IR] DEBUG: get_or_create_var EMPTY OR NULL\n");
     return 0;
   }
   fprintf(stderr, "[ZCC-IR] DEBUG: get_or_create_var('%s')\n", name);
-  for (uint32_t i = 0; i < ctx->n_vars; i++)
-    if (strcmp(ctx->var_names[i], name) == 0)
+  for (uint32_t i = 0; i < ctx->n_vars; i++) {
+    if (strcmp(ctx->var_names[i], name) == 0) {
+      if (size > (int)ctx->slot_alloca_instr[i]->imm) {
+        ctx->slot_alloca_instr[i]->imm = size;
+      }
       return ctx->slot_alloca_reg[i];
+    }
+  }
 
   if (ctx->n_vars >= AST_MAX_VARS) {
     fprintf(stderr, "FATAL: AST_MAX_VARS exceeded\n");
@@ -2439,7 +2470,8 @@ static RegID get_or_create_var(LowerCtx *ctx, const char *name) {
   RegID r = ctx->next_reg++;
   ctx->slot_alloca_reg[slot] = r;
 
-  Instr *alloca = make_instr_imm(ctx->next_instr_id++, OP_ALLOCA, r, 8, 0);
+  Instr *alloca = make_instr_imm(ctx->next_instr_id++, OP_ALLOCA, r, size > 0 ? size : 8, 0);
+  ctx->slot_alloca_instr[slot] = alloca;
 
   /* Hoist OP_ALLOCA to the entry block so it dominates all uses. */
   Block *entry = ctx->fn->blocks[ctx->fn->entry];
@@ -2487,7 +2519,7 @@ static RegID lower_expr(LowerCtx *ctx, ASTNode *ast) {
     break;
   }
   case AST_VAR: {
-    RegID alloca_r = get_or_create_var(ctx, ast->var_name);
+    RegID alloca_r = get_or_create_var(ctx, ast->var_name, 8);
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_LOAD;
@@ -2552,7 +2584,7 @@ static void lower_stmt(LowerCtx *ctx, ASTNode *ast) {
   Function *fn = ctx->fn;
   switch (ast->kind) {
   case AST_ASSIGN: {
-    RegID alloca_r = get_or_create_var(ctx, ast->lhs->var_name);
+    RegID alloca_r = get_or_create_var(ctx, ast->lhs->var_name, 8);
     RegID val_r = lower_expr(ctx, ast->rhs);
     Instr *st = calloc(1, sizeof(Instr));
     st->id = ctx->next_instr_id++;
@@ -2767,6 +2799,10 @@ extern int node_rhs_ptr_size(struct Node *n);
 
 extern int node_ptr_elem_size(struct Node *n);
 
+/* CG-IR-015: always-present declarations (not guarded by STANDALONE) */
+extern int node_type_size(struct Node *n);
+extern int node_type_unsigned(struct Node *n);
+
 /* Map ND_* (zcc.c) to ZND_* (bridge). Use sentinels from zcc_ast_bridge.h. */
 static int nd_to_znd(int nd_kind) {
   switch (nd_kind) {
@@ -2962,14 +2998,28 @@ static ZCCNode *zcc_node_from_expr(struct Node *n) {
     }
     break;
   }
-  case ZND_MOD:
-  case ZND_MUL:
+  /* CG-IR-015: DIV/MOD/SHR/SHL need the node's result type to select
+   * correct 32-bit vs 64-bit instructions in ir_asm_lower_insn.
+   * Encoding: member_size > 0 = signed (abs = byte width),
+   *           member_size < 0 = unsigned (abs = byte width),
+   *           member_size = 0 = unknown/default (→ IR_TY_I64 in lowering). */
   case ZND_DIV:
+  case ZND_MOD:
+  case ZND_SHR:
+  case ZND_SHL:
+    z->lhs = zcc_node_from_expr(node_lhs(n));
+    z->rhs = zcc_node_from_expr(node_rhs(n));
+    {
+      int ts = node_type_size(n);      /* 4 for int, 8 for long/ptr         */
+      int tu = node_type_unsigned(n);  /* 1 if unsigned                     */
+      /* member_size is unused for arithmetic nodes; repurpose as type tag. */
+      z->member_size = tu ? -(ts) : ts;
+    }
+    break;
+  case ZND_MUL:
   case ZND_BAND:
   case ZND_BOR:
   case ZND_BXOR:
-  case ZND_SHL:
-  case ZND_SHR:
   case ZND_LT:
   case ZND_LE:
   case ZND_GT:
@@ -3150,6 +3200,16 @@ static ZCCNode *zcc_node_from_stmt(struct Node *n) {
       if (call_node) { free(z); return call_node; }
     }
     break;
+  /* CG-IR-015: Expression-statements (i++, --p, etc.) in stmt position */
+  case ZND_POST_INC:
+  case ZND_PRE_INC:
+  case ZND_POST_DEC:
+  case ZND_PRE_DEC:
+  {
+    ZCCNode *expr_node = zcc_node_from_expr(n);
+    if (expr_node) { free(z); return expr_node; }
+  }
+  break;
   case ZND_NOP:
     break;
   case ZND_SWITCH: {
@@ -3234,6 +3294,21 @@ void zcc_node_free(ZCCNode *z) {
 
 static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node);
 static void zcc_lower_stmt(LowerCtx *ctx, ZCCNode *node);
+
+/* CG-IR-015: decode the member_size type-tag set by zcc_node_from_expr for
+ * DIV/MOD/SHR/SHL nodes.  Convention:
+ *   member_size ==  4  →  IR_TY_I32   (signed int)
+ *   member_size == -4  →  IR_TY_U32   (unsigned int)
+ *   member_size == -8  →  IR_TY_U64   (unsigned long)
+ *   otherwise          →  IR_TY_I64   (signed long / default)           */
+static IRType irtype_from_node(const ZCCNode *node) {
+  if (!node) return IR_TY_I64;
+  int ms = node->member_size;
+  if (ms ==  4) return IR_TY_I32;
+  if (ms == -4) return IR_TY_U32;
+  if (ms == -8) return IR_TY_U64;
+  return IR_TY_I64;
+}
 
 static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
   if (!node)
@@ -3630,7 +3705,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
       emit_instr(ctx, load_ins);
       return val_r;
     } else {
-      RegID alloca_r = get_or_create_var(ctx, node->name);
+      RegID alloca_r = get_or_create_var(ctx, node->name, node->member_size > 0 ? node->member_size : 8);
       if (ctx->want_address || node->is_array || node->is_func)
         return alloca_r;
       ins = calloc(1, sizeof(Instr));
@@ -3650,6 +3725,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_ADD;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-017 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3663,6 +3739,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_SUB;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-017 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3676,6 +3753,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_MOD;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-015 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3689,6 +3767,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_MUL;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-017 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3702,6 +3781,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_DIV;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-015 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3719,6 +3799,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_SUB;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-017: NEG → 0-x */
     ins->line_no = node->line_no;
     ins->dst = r;
     ins->src[0] = zero_r;
@@ -3734,6 +3815,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_BOR;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-017 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3748,6 +3830,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_BXOR;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-017 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3761,6 +3844,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_BNOT;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-017 */
     ins->dst = r;
     ins->src[0] = l;
     ins->n_src = 1;
@@ -3792,6 +3876,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_BAND;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-017 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3806,6 +3891,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_SHL;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-015 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3820,6 +3906,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = OP_SHR;
+    ins->ir_type = irtype_from_node(node); /* CG-IR-015 */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3850,6 +3937,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     ins = calloc(1, sizeof(Instr));
     ins->id = ctx->next_instr_id++;
     ins->op = cmp_op;
+    ins->ir_type = irtype_from_node(node->lhs); /* CG-IR-017: operand width */
     ins->dst = r;
     ins->src[0] = l;
     ins->src[1] = rh;
@@ -3859,7 +3947,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     break;
   }
   case ZND_POST_INC: {
-    RegID alloca_r = get_or_create_var(ctx, node->lhs->name);
+    RegID alloca_r = get_or_create_var(ctx, node->lhs->name, 8);
     if (!alloca_r)
       return 0;
     Instr *load_ins = calloc(1, sizeof(Instr));
@@ -3905,7 +3993,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     return r; /* return value before increment */
   }
   case ZND_POST_DEC: {
-    RegID alloca_r = get_or_create_var(ctx, node->lhs->name);
+    RegID alloca_r = get_or_create_var(ctx, node->lhs->name, 8);
     if (!alloca_r)
       return 0;
     Instr *load_ins = calloc(1, sizeof(Instr));
@@ -3951,7 +4039,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     return r; /* return value before decrement */
   }
   case ZND_PRE_INC: {
-    RegID alloca_r = get_or_create_var(ctx, node->lhs->name);
+    RegID alloca_r = get_or_create_var(ctx, node->lhs->name, 8);
     if (!alloca_r)
       return 0;
     Instr *load_ins = calloc(1, sizeof(Instr));
@@ -3997,7 +4085,7 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     return r_new; /* return value after increment */
   }
   case ZND_PRE_DEC: {
-    RegID alloca_r = get_or_create_var(ctx, node->lhs->name);
+    RegID alloca_r = get_or_create_var(ctx, node->lhs->name, 8);
     if (!alloca_r)
       return 0;
     Instr *load_ins = calloc(1, sizeof(Instr));
@@ -4754,8 +4842,8 @@ Function *zcc_ast_to_ir(ZCCNode *body_ast, const char *func_name) {
    * slots -8, -16. Prologue stores argc→-8, argv→-16; later uses (e.g. argv in
    * for.body) then load the value. */
   if (is_main_func(func_name)) {
-    (void)get_or_create_var(&ctx, "argc");
-    (void)get_or_create_var(&ctx, "argv");
+    (void)get_or_create_var(&ctx, "argc", 8);
+    (void)get_or_create_var(&ctx, "argv", 8);
   } else {
     const char *params_env = getenv("ZCC_IR_PARAM_NAMES");
     fprintf(stderr, "[ZCC-IR] DEBUG: params_env=%s\n",
@@ -4770,7 +4858,7 @@ Function *zcc_ast_to_ir(ZCCNode *body_ast, const char *func_name) {
         char *comma = strchr(spt, ',');
         if (comma)
           *comma = '\0';
-        (void)get_or_create_var(&ctx, spt);
+        (void)get_or_create_var(&ctx, spt, 8);
         if (!comma)
           break;
         spt = comma + 1;
@@ -5470,12 +5558,16 @@ void run_all_passes(Function *fn, PassResult *result, const char *profile_path,
   uint32_t opt_sr = opt_strength_reduction_pass(fn);
   uint32_t opt_cp = opt_copy_prop_pass(fn);
   uint32_t opt_p = opt_peephole_pass(fn);
+  uint32_t opt_cp2 = 0;
+  if (opt_p > 0) {
+    opt_cp2 = opt_copy_prop_pass(fn);
+  }
 
-  if (folded > 0 || opt_sr > 0 || opt_cp > 0 || opt_p > 0) {
+  if (folded > 0 || opt_sr > 0 || opt_cp > 0 || opt_p > 0 || opt_cp2 > 0) {
     fprintf(
         stderr,
-        "[IR-Opts] Folded: %u | S-Reduce: %u | Copy-Prop: %u | Peephole: %u\n",
-        folded, opt_sr, opt_cp, opt_p);
+        "[IR-Opts] Folded: %u | S-Reduce: %u | Copy-Prop: %u | Peephole: %u | Copy-Prop2: %u\n",
+        folded, opt_sr, opt_cp, opt_p, opt_cp2);
     licm_build_def_block(fn);
   }
 
@@ -5490,8 +5582,11 @@ void run_all_passes(Function *fn, PassResult *result, const char *profile_path,
 
   /* ── Pass 1: SSA-form DCE ── */
   uint32_t dce_removed = ssa_dce_pass(fn);
+  uint32_t dce_total   = dce_removed;
+#ifdef ZCC_DCE_VERBOSE
   fprintf(stderr, "[DCE->SSA]  instructions removed: %u  blocks removed: %u\n",
           dce_removed, fn->stats.dce_blocks_removed);
+#endif
 
   /* Recompute reachability after DCE */
   compute_reachability(fn);
@@ -5504,8 +5599,14 @@ void run_all_passes(Function *fn, PassResult *result, const char *profile_path,
   /* ── Pass 3: SSA-form DCE again (cleanup after LICM) ── */
   licm_build_def_block(fn);
   dce_removed = ssa_dce_pass(fn);
+  dce_total  += dce_removed;
+#ifdef ZCC_DCE_VERBOSE
   fprintf(stderr, "[DCE->SSA]  instructions removed: %u  blocks removed: %u\n",
           dce_removed, fn->stats.dce_blocks_removed);
+#endif
+  if (dce_total > 0)
+    fprintf(stderr, "[DCE]  eliminated=%4u  (%u pre-LICM + %u post)\n",
+            dce_total, dce_total - dce_removed, dce_removed);
 
   compute_reachability(fn);
 
@@ -5568,52 +5669,6 @@ void run_all_passes(Function *fn, PassResult *result, const char *profile_path,
     }
   }
   result->n_blocks = pgo_reorder_pass(fn, result->order);
-  /* Structural order for validation: entry first, then if blocks by name
-   * (then.0, else.0, merge.0, then.1, merge.1, ...), then exit. */
-  {
-    uint32_t k = 0;
-    result->order[k++] = fn->entry;
-    /* Find and add blocks by desired name order (if.then.N, if.else.N,
-     * if.merge.N for N=0,1,...). */
-    for (int n = 0; n < (int)fn->n_blocks; n++) {
-      char then_name[NAME_LEN], else_name[NAME_LEN], merge_name[NAME_LEN];
-      snprintf(then_name, sizeof(then_name), "if.then.%d", n);
-      snprintf(else_name, sizeof(else_name), "if.else.%d", n);
-      snprintf(merge_name, sizeof(merge_name), "if.merge.%d", n);
-      BlockID found = 0;
-      for (BlockID i = 0; i < fn->n_blocks; i++) {
-        if (i == fn->entry || i == fn->exit || !fn->blocks[i])
-          continue;
-        if (strcmp(fn->blocks[i]->name, then_name) == 0) {
-          result->order[k++] = i;
-          found++;
-          break;
-        }
-      }
-      for (BlockID i = 0; i < fn->n_blocks; i++) {
-        if (i == fn->entry || i == fn->exit || !fn->blocks[i])
-          continue;
-        if (strcmp(fn->blocks[i]->name, else_name) == 0) {
-          result->order[k++] = i;
-          found++;
-          break;
-        }
-      }
-      for (BlockID i = 0; i < fn->n_blocks; i++) {
-        if (i == fn->entry || i == fn->exit || !fn->blocks[i])
-          continue;
-        if (strcmp(fn->blocks[i]->name, merge_name) == 0) {
-          result->order[k++] = i;
-          found++;
-          break;
-        }
-      }
-      if (found == 0)
-        break; /* no more if blocks for this n */
-    }
-    result->order[k++] = fn->exit;
-    result->n_blocks = k;
-  }
   result->licm_hoisted = fn->stats.licm_hoisted;
   result->dce_instrs_removed = fn->stats.dce_instrs_removed;
   for (uint32_t i = 0; i < result->n_blocks; i++) {
@@ -5680,6 +5735,7 @@ static void ir_asm_number_and_liveness(Function *fn,
     for (Instr *ins = blk->head; ins; ins = ins->next) {
       if (ins->op == OP_NOP)
         continue;
+      ins->lscan_seq = seq;
       /* Uses */
       if (ins->op == OP_CONDBR) {
         if (ins->n_src >= 1 && ins->src[0])
@@ -5841,6 +5897,13 @@ typedef struct {
   int body_only; /* 1 when AST owns prologue/epilogue (skip push/pop) */
   int slot_base; /* CG-IR-008: base offset for IR spill slots (0 or -stack_size)
                   */
+  int ir_extra;
+  int alloca_bytes_total;
+  int csave_base; /* CG-IR-016-CSAVE-V2: %rbp-relative base of callee-save area.
+                   * = -(stack_size + ir_extra) + 32
+                   * Slots: csave_base (rbx), csave_base-8 (r12), -16 (r13),
+                   *        csave_base-24 (r14), csave_base-32 (r15).          */
+  int ret_size;  /* CG-IR-015: return type bytes (4=int, 8=long/ptr, 0→treat as 8) */
 } IRAsmCtx;
 
 static int ir_asm_slot(RegID r) { return -8 * (int)(r + 2); }
@@ -5865,6 +5928,21 @@ static void ir_asm_load_to_rax(IRAsmCtx *ctx, RegID r) {
     fprintf(f, "    movq %%%s, %%rax\n", phys_reg_name[p]);
   else
     fprintf(f, "    movq %d(%%rbp), %%rax\n", slot);
+}
+
+static void ir_asm_load_to_rax_typed(IRAsmCtx *ctx, RegID r, IRType t) {
+  FILE *f = ctx->out;
+  int slot;
+  int p = ir_asm_vreg_location(ctx, r, &slot);
+  if (p >= 0) {
+    fprintf(f, "    movq %%%s, %%rax\n", phys_reg_name[p]);
+    if (t == IR_TY_I32)      fprintf(f, "    movslq %%eax, %%rax\n");
+    else if (t == IR_TY_U32) fprintf(f, "    movl %%eax, %%eax\n");
+  } else {
+    if (t == IR_TY_I32)      fprintf(f, "    movslq %d(%%rbp), %%rax\n", slot);
+    else if (t == IR_TY_U32) fprintf(f, "    movl %d(%%rbp), %%eax\n", slot);
+    else                     fprintf(f, "    movq %d(%%rbp), %%rax\n", slot);
+  }
 }
 
 static void ir_asm_store_rax_to(IRAsmCtx *ctx, RegID r) {
@@ -5923,31 +6001,31 @@ static void ir_asm_emit_phi_edge_copy(IRAsmCtx *ctx, BlockID from_bid,
 
   /* Phase 1: count PHIs from this edge */
   int n_phis = 0;
-  Instr *phi_ins = to_blk->head;
-  while (phi_ins && phi_ins->op == OP_PHI) {
-    for (uint32_t p = 0; p < phi_ins->n_phi; p++) {
-      if (phi_ins->phi[p].block == from_bid) {
+  for (Instr *ins = to_blk->head; ins; ins = ins->next) {
+    if (ins->op != OP_PHI)
+      continue;
+    for (uint32_t p = 0; p < ins->n_phi; p++) {
+      if (ins->phi[p].block == from_bid) {
         n_phis++;
         break;
       }
     }
-    phi_ins = phi_ins->next;
   }
   if (n_phis == 0)
     return;
 
   /* Fast path: single PHI — no interference possible */
   if (n_phis == 1) {
-    phi_ins = to_blk->head;
-    while (phi_ins && phi_ins->op == OP_PHI) {
-      for (uint32_t p = 0; p < phi_ins->n_phi; p++) {
-        if (phi_ins->phi[p].block == from_bid) {
-          ir_asm_load_to_rax(ctx, phi_ins->phi[p].reg);
-          ir_asm_store_rax_to(ctx, phi_ins->dst);
+    for (Instr *ins = to_blk->head; ins; ins = ins->next) {
+      if (ins->op != OP_PHI)
+        continue;
+      for (uint32_t p = 0; p < ins->n_phi; p++) {
+        if (ins->phi[p].block == from_bid) {
+          ir_asm_load_to_rax(ctx, ins->phi[p].reg);
+          ir_asm_store_rax_to(ctx, ins->dst);
           return;
         }
       }
-      phi_ins = phi_ins->next;
     }
     return;
   }
@@ -5956,38 +6034,42 @@ static void ir_asm_emit_phi_edge_copy(IRAsmCtx *ctx, BlockID from_bid,
    * Push all sources, then pop to destinations in reverse order. */
 
   /* Phase 2: push all source values (forward order) */
-  phi_ins = to_blk->head;
-  while (phi_ins && phi_ins->op == OP_PHI) {
-    for (uint32_t p = 0; p < phi_ins->n_phi; p++) {
-      if (phi_ins->phi[p].block == from_bid) {
-        ir_asm_load_to_rax(ctx, phi_ins->phi[p].reg);
+  for (Instr *ins = to_blk->head; ins; ins = ins->next) {
+    if (ins->op != OP_PHI)
+      continue;
+    for (uint32_t p = 0; p < ins->n_phi; p++) {
+      if (ins->phi[p].block == from_bid) {
+        ir_asm_load_to_rax(ctx, ins->phi[p].reg);
         fprintf(f, "    pushq %%rax\n");
         break;
       }
     }
-    phi_ins = phi_ins->next;
   }
 
   /* Phase 3: collect destination regs in order, then pop in reverse */
   {
-    RegID phi_dsts[64];
+    RegID *phi_dsts = (RegID *)malloc(sizeof(RegID) * n_phis);
+    if (!phi_dsts) {
+      fprintf(stderr, "Fatal: Out of memory in ir_asm_emit_phi_edge_copy\n");
+      exit(1);
+    }
     int n_dst = 0;
-    phi_ins = to_blk->head;
-    while (phi_ins && phi_ins->op == OP_PHI) {
-      for (uint32_t p = 0; p < phi_ins->n_phi; p++) {
-        if (phi_ins->phi[p].block == from_bid) {
-          if (n_dst < 64)
-            phi_dsts[n_dst++] = phi_ins->dst;
+    for (Instr *ins = to_blk->head; ins; ins = ins->next) {
+      if (ins->op != OP_PHI)
+        continue;
+      for (uint32_t p = 0; p < ins->n_phi; p++) {
+        if (ins->phi[p].block == from_bid) {
+          phi_dsts[n_dst++] = ins->dst;
           break;
         }
       }
-      phi_ins = phi_ins->next;
     }
     /* Pop in reverse order (LIFO) to match push order */
     for (int i = n_dst - 1; i >= 0; i--) {
       fprintf(f, "    popq %%rax\n");
       ir_asm_store_rax_to(ctx, phi_dsts[i]);
     }
+    free(phi_dsts);
   }
 }
 
@@ -6037,88 +6119,185 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
     break;
   }
   case OP_ADD: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    addq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
+    /* CG-IR-017: addl for I32/U32, addq for I64/U64 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    addl %%ecx, %%eax\n");
+    } else {
+      fprintf(f, "    addq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_SUB: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    subq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
+    /* CG-IR-017: subl for I32/U32, subq for I64/U64 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    subl %%ecx, %%eax\n");
+    } else {
+      fprintf(f, "    subq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_MUL: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
+    /* CG-IR-017: imull for I32/U32, imulq for I64/U64 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
     fprintf(f, "    movq ");
     ir_asm_emit_src_operand(ctx, ins->src[1]);
     fprintf(f, ", %%rcx\n");
-    fprintf(f, "    imulq %%rcx, %%rax\n");
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32)
+      fprintf(f, "    imull %%ecx, %%eax\n");
+    else
+      fprintf(f, "    imulq %%rcx, %%rax\n");
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_DIV: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    cqo\n");
-    fprintf(f, "    movq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rcx\n");
-    fprintf(f, "    idivq %%rcx\n");
+    /* CG-IR-015: select instruction width from ir_type.
+     * Bug: cqo sign-extends rax→rdx:rax in 64-bit; for 32-bit int operands
+     * that corrupts the dividend.  Fix: use cltd/idivl for I32, plain
+     * xor+divl for U32, xor+divq for U64, cqo/idivq for I64 (default). */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32) {
+      fprintf(f, "    cltd\n");              /* sign-extend eax → edx:eax    */
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    idivl %%ecx\n");
+    } else if (ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movl %%eax, %%eax\n"); /* zero upper 32 bits of rax    */
+      fprintf(f, "    xorl %%edx, %%edx\n");
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    divl %%ecx\n");
+    } else if (ins->ir_type == IR_TY_U64) {
+      fprintf(f, "    xorl %%edx, %%edx\n");
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    divq %%rcx\n");
+    } else {                                /* IR_TY_I64 — original path     */
+      fprintf(f, "    cqo\n");
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    idivq %%rcx\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_MOD: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    cqo\n");
-    fprintf(f, "    movq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rcx\n");
-    fprintf(f, "    idivq %%rcx\n");
-    fprintf(f, "    movq %%rdx, ");
-    ir_asm_emit_src_operand(ctx, ins->dst);
-    fprintf(f, "\n");
+    /* CG-IR-015: same width/sign selection as OP_DIV; remainder is in
+     * edx (32-bit) or rdx (64-bit) after the div instruction, so move it
+     * into eax/rax before the generic ir_asm_store_rax_to. */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32) {
+      fprintf(f, "    cltd\n");
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    idivl %%ecx\n");
+      fprintf(f, "    movl %%edx, %%eax\n");
+    } else if (ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movl %%eax, %%eax\n");
+      fprintf(f, "    xorl %%edx, %%edx\n");
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    divl %%ecx\n");
+      fprintf(f, "    movl %%edx, %%eax\n");
+    } else if (ins->ir_type == IR_TY_U64) {
+      fprintf(f, "    xorl %%edx, %%edx\n");
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    divq %%rcx\n");
+      fprintf(f, "    movq %%rdx, %%rax\n");
+    } else {                               /* IR_TY_I64 — original path      */
+      fprintf(f, "    cqo\n");
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    idivq %%rcx\n");
+      fprintf(f, "    movq %%rdx, %%rax\n");
+    }
+    ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_BAND: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    andq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    andl %%ecx, %%eax\n");
+    } else {
+      fprintf(f, "    andq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_SHL: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    /* Prefer immediate shift if count is a compile-time constant */
+    /* CG-IR-015: fix undefined sz_suffix(ir_type_bytes(n->type)) reference.
+     * For the immediate path: shlq is always correct for ADD/SUB lower-bits
+     * (upper bits discarded anyway), but use shll for I32/U32 to stay clean.
+     * For the reg-count path: was referencing undefined `n->type` — fixed. */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    int shl_is32 = (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32);
     if (ins->src[1] < MAX_INSTRS && fn->def_of[ins->src[1]] &&
         fn->def_of[ins->src[1]]->op == OP_CONST) {
-      int64_t k = fn->def_of[ins->src[1]]->imm & 63;
-      fprintf(f, "    shlq $%lld, %%rax\n", (long long)k);
+      int64_t k = fn->def_of[ins->src[1]]->imm & (shl_is32 ? 31 : 63);
+      if (shl_is32) fprintf(f, "    shll $%lld, %%eax\n", (long long)k);
+      else          fprintf(f, "    shlq $%lld, %%rax\n", (long long)k);
     } else {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
       fprintf(f, ", %%rcx\n");
-      fprintf(f, "    shlq %%cl, %%rax\n");
+      if (shl_is32) fprintf(f, "    shll %%cl, %%eax\n");
+      else          fprintf(f, "    shlq %%cl, %%rax\n");
     }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_SHR: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    /* Prefer immediate shift if count is a compile-time constant */
+    /* CG-IR-015: critical fix.
+     *  Bug A: shrq on a 32-bit value shifts upper garbage into lower bits.
+     *  Bug B: sarq used for unsigned right-shift propagates sign bit.
+     *  Fix: select {shr,sar}{l,q} based on ir_type width + signedness.
+     *  Also fixes the undefined sz_suffix(ir_type_bytes(n->type)) reference. */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    int shr_is32  = (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32);
+    int shr_unsig = (ins->ir_type == IR_TY_U32 || ins->ir_type == IR_TY_U64);
     if (ins->src[1] < MAX_INSTRS && fn->def_of[ins->src[1]] &&
         fn->def_of[ins->src[1]]->op == OP_CONST) {
-      int64_t k = fn->def_of[ins->src[1]]->imm & 63;
-      fprintf(f, "    shrq $%lld, %%rax\n", (long long)k);
+      int64_t k = fn->def_of[ins->src[1]]->imm & (shr_is32 ? 31 : 63);
+      if      (shr_is32 && shr_unsig)  fprintf(f, "    shrl $%lld, %%eax\n", (long long)k);
+      else if (shr_is32)               fprintf(f, "    sarl $%lld, %%eax\n", (long long)k);
+      else if (shr_unsig)              fprintf(f, "    shrq $%lld, %%rax\n", (long long)k);
+      else                             fprintf(f, "    shrq $%lld, %%rax\n", (long long)k); /* I64 default: keep shrq for compat */
     } else {
       fprintf(f, "    movq ");
       ir_asm_emit_src_operand(ctx, ins->src[1]);
       fprintf(f, ", %%rcx\n");
-      fprintf(f, "    shrq %%cl, %%rax\n");
+      if      (shr_is32 && shr_unsig)  fprintf(f, "    shrl %%cl, %%eax\n");
+      else if (shr_is32)               fprintf(f, "    sarl %%cl, %%eax\n");
+      else if (shr_unsig)              fprintf(f, "    shrq %%cl, %%rax\n");
+      else                             fprintf(f, "    shrq %%cl, %%rax\n"); /* I64 default: keep shrq for compat */
     }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
@@ -6197,94 +6376,191 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
   case OP_RET:
     if (ins->n_src >= 1)
       ir_asm_load_to_rax(ctx, ins->src[0]);
+    /* CG-IR-015: zero-truncate 32-bit return values.
+     * 64-bit arithmetic (neg/sub on sign-extended values) can leave garbage
+     * in the upper 32 bits of rax.  Callers of int-returning functions read
+     * only eax; the movl self-move zero-extends eax → rax implicitly. */
+    if (ctx->ret_size == 4)
+      fprintf(f, "    movl %%eax, %%eax\n");
     if (!ctx->body_only) {
       for (int i = CALLEE_SAVED_PUSH_N - 1; i >= 0; i--) {
         int p = callee_saved_push_order[i];
         if (ctx->used_callee_saved_mask & (1 << p))
           fprintf(f, "    popq %%%s\n", phys_reg_name[p]);
       }
+    } else if (ctx->csave_base) {
+      /* CG-IR-016-RET: body_only path — restore callee-saved registers
+       * BEFORE the jmp so they execute on every return path, not just
+       * fall-through.  The 'after-body' restores in
+       * zcc_run_passes_emit_body_pgo are only reached by fall-through
+       * (functions with no explicit return) — dead code for most funcs. */
+      fprintf(f, "    movq %d(%%rbp), %%rbx\n", ctx->csave_base);
+      fprintf(f, "    movq %d(%%rbp), %%r12\n", ctx->csave_base - 8);
+      fprintf(f, "    movq %d(%%rbp), %%r13\n", ctx->csave_base - 16);
+      fprintf(f, "    movq %d(%%rbp), %%r14\n", ctx->csave_base - 24);
+      fprintf(f, "    movq %d(%%rbp), %%r15\n", ctx->csave_base - 32);
     }
     fprintf(f, "    jmp .Lfunc_end_%d\n", ctx->func_end_label);
     break;
   case OP_LT: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    cmpq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
-    fprintf(f, "    setl %%al\n");
-    fprintf(f, "    movzbq %%al, %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    cmpl %%ecx, %%eax\n");
+      fprintf(f, "    setl %%al\n");
+      fprintf(f, "    movzbl %%al, %%eax\n");
+    } else {
+      fprintf(f, "    cmpq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+      fprintf(f, "    setl %%al\n");
+      fprintf(f, "    movzbq %%al, %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_EQ: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    cmpq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
-    fprintf(f, "    sete %%al\n");
-    fprintf(f, "    movzbq %%al, %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    cmpl %%ecx, %%eax\n");
+      fprintf(f, "    sete %%al\n");
+      fprintf(f, "    movzbl %%al, %%eax\n");
+    } else {
+      fprintf(f, "    cmpq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+      fprintf(f, "    sete %%al\n");
+      fprintf(f, "    movzbq %%al, %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_NE: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    cmpq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
-    fprintf(f, "    setne %%al\n");
-    fprintf(f, "    movzbq %%al, %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    cmpl %%ecx, %%eax\n");
+      fprintf(f, "    setne %%al\n");
+      fprintf(f, "    movzbl %%al, %%eax\n");
+    } else {
+      fprintf(f, "    cmpq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+      fprintf(f, "    setne %%al\n");
+      fprintf(f, "    movzbq %%al, %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_GT: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    cmpq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
-    fprintf(f, "    setg %%al\n");
-    fprintf(f, "    movzbq %%al, %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    cmpl %%ecx, %%eax\n");
+      fprintf(f, "    setg %%al\n");
+      fprintf(f, "    movzbl %%al, %%eax\n");
+    } else {
+      fprintf(f, "    cmpq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+      fprintf(f, "    setg %%al\n");
+      fprintf(f, "    movzbq %%al, %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_GE: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    cmpq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
-    fprintf(f, "    setge %%al\n");
-    fprintf(f, "    movzbq %%al, %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    cmpl %%ecx, %%eax\n");
+      fprintf(f, "    setge %%al\n");
+      fprintf(f, "    movzbl %%al, %%eax\n");
+    } else {
+      fprintf(f, "    cmpq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+      fprintf(f, "    setge %%al\n");
+      fprintf(f, "    movzbq %%al, %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_LE: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    cmpq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
-    fprintf(f, "    setle %%al\n");
-    fprintf(f, "    movzbq %%al, %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    cmpl %%ecx, %%eax\n");
+      fprintf(f, "    setle %%al\n");
+      fprintf(f, "    movzbl %%al, %%eax\n");
+    } else {
+      fprintf(f, "    cmpq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+      fprintf(f, "    setle %%al\n");
+      fprintf(f, "    movzbq %%al, %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_BOR: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    orq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    orl %%ecx, %%eax\n");
+    } else {
+      fprintf(f, "    orq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_BXOR: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    xorq ");
-    ir_asm_emit_src_operand(ctx, ins->src[1]);
-    fprintf(f, ", %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32) {
+      fprintf(f, "    movq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rcx\n");
+      fprintf(f, "    xorl %%ecx, %%eax\n");
+    } else {
+      fprintf(f, "    xorq ");
+      ir_asm_emit_src_operand(ctx, ins->src[1]);
+      fprintf(f, ", %%rax\n");
+    }
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
   case OP_BNOT: {
-    ir_asm_load_to_rax(ctx, ins->src[0]);
-    fprintf(f, "    notq %%rax\n");
+    /* CG-IR-017 */
+    ir_asm_load_to_rax_typed(ctx, ins->src[0], ins->ir_type);
+    if (ins->ir_type == IR_TY_I32 || ins->ir_type == IR_TY_U32)
+      fprintf(f, "    notl %%eax\n");
+    else
+      fprintf(f, "    notq %%rax\n");
     ir_asm_store_rax_to(ctx, ins->dst);
     break;
   }
@@ -6317,16 +6593,34 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
     int stack_args = (na > 6) ? na - 6 : 0;
     int n_csave =
         ctx->body_only ? 0 : __builtin_popcount(ctx->used_callee_saved_mask);
-    /* Caller-saved phys regs that linear scan might have assigned: r10(1),
-       r11(2). Save them before the call destroys them. 2 pushes = 16 bytes,
-       alignment-neutral. */
-    fprintf(f, "    pushq %%r10\n");
-    fprintf(f, "    pushq %%r11\n");
-    /* Alignment: after prologue + n_csave + 2 (r10/r11), need RSP 16-aligned at
-       callq. Total extra pushes = stack_args + pad. (n_csave + 2 + stack_args +
-       pad) must be even. */
-    int need_pad = (n_csave + stack_args) &
-                   1; /* 2 is even, so parity = n_csave + stack_args */
+
+    int current_seq = ins->lscan_seq;
+    int caller_saved_live[N_PHYS_REGS];
+    int n_caller_saved = 0;
+
+    /* Liveness Query: Identify caller-saved regs (r10, r11) holding a live var.
+     * (rax/rdi/rdx, etc., are safely excluded universally from N_PHYS_REGS).
+     * An active caller-save has def_seq BEFORE current and last_use AFTER. */
+    for (int p = 0; p < N_PHYS_REGS; p++) {
+      if (!(PHYS_CALLEE_SAVED_MASK & (1 << p))) {
+        for (int r = 1; r < MAX_INSTRS; r++) {
+          if (ctx->phys_reg[r] == p) {
+            if (ctx->def_seq[r] < current_seq && ctx->last_use[r] > current_seq) {
+              caller_saved_live[n_caller_saved++] = p;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    /* Emit pushq for active caller-saved registers */
+    for (int i = 0; i < n_caller_saved; i++) {
+      fprintf(f, "    pushq %%%s\n", phys_reg_name[caller_saved_live[i]]);
+    }
+
+    /* Alignment: Ensure exact 16-byte RSP alignment for callq */
+    int need_pad = (n_csave + n_caller_saved + stack_args) & 1;
     if (need_pad)
       fprintf(f, "    subq $8, %%rsp\n");
     /* Push stack args (7th+) in reverse order */
@@ -6351,12 +6645,15 @@ static void ir_asm_lower_insn(IRAsmCtx *ctx, const Instr *ins,
     int cleanup = stack_args * 8 + (need_pad ? 8 : 0);
     if (cleanup > 0)
       fprintf(f, "    addq $%d, %%rsp\n", cleanup);
-    /* Restore caller-saved phys regs */
-    fprintf(f, "    popq %%r11\n");
-    fprintf(f, "    popq %%r10\n");
+      
     /* Store return value */
     if (ins->dst)
       ir_asm_store_rax_to(ctx, ins->dst);
+
+    /* Restore active caller-saved registers in reverse order. */
+    for (int i = n_caller_saved - 1; i >= 0; i--) {
+      fprintf(f, "    popq %%%s\n", phys_reg_name[caller_saved_live[i]]);
+    }
     break;
   }
   default:
@@ -6368,6 +6665,18 @@ static void ir_asm_assign_alloca_offsets(IRAsmCtx *ctx) {
   Function *fn = ctx->fn;
   int n = 0;
   int np = ctx->num_params;
+  uint32_t max_reg = fn->n_regs;
+  for (uint32_t bi = 0; bi < fn->n_blocks; bi++) {
+    Block *blk = fn->blocks[bi];
+    if (!blk) continue;
+    for (Instr *ins = blk->head; ins; ins = ins->next) {
+      if (ins->dst >= max_reg) max_reg = ins->dst + 1;
+      for (uint32_t s = 0; s < ins->n_src && s < MAX_OPERANDS; s++)
+        if (ins->src[s] >= max_reg) max_reg = ins->src[s] + 1;
+    }
+  }
+  int current_alloca_offset = ctx->slot_base - 8 * (int)(max_reg + 2);
+  int total_bytes = 0;
   if (np < 0)
     np = 0;
   for (uint32_t bi = 0; bi < fn->n_blocks; bi++) {
@@ -6377,17 +6686,25 @@ static void ir_asm_assign_alloca_offsets(IRAsmCtx *ctx) {
     for (Instr *ins = blk->head; ins; ins = ins->next) {
       if (ins->op != OP_ALLOCA || !ins->dst)
         continue;
-      int off = (n < np)
-                    ? (-8 * (n + 1))
-                    : (ctx->slot_base - 8 * (int)(fn->n_regs + 2 + (n - np)));
+      int size = (ins->imm > 0) ? (int)ins->imm : 8;
+      size = (size + 7) & ~7;
+      int off;
+      if (n < np) {
+        off = -8 * (n + 1);
+      } else {
+        current_alloca_offset -= size;
+        off = current_alloca_offset;
+        total_bytes += size;
+      }
       if (ins->dst < MAX_INSTRS) {
         ctx->alloca_off[ins->dst] = off;
-        fprintf(stderr, "[ALLOCA] dst=%u off=%d\n", ins->dst, off);
+        fprintf(stderr, "[ALLOCA] dst=%u off=%d size=%d\n", ins->dst, off, size);
       }
       n++;
     }
   }
   ctx->n_allocas = n;
+  ctx->alloca_bytes_total = total_bytes;
 }
 
 static void ir_asm_emit_one_block(IRAsmCtx *ctx, BlockID bid) {
@@ -6449,7 +6766,7 @@ static void ir_asm_emit_one_block(IRAsmCtx *ctx, BlockID bid) {
 
 static void ir_asm_emit_function_body(IRAsmCtx *ctx) {
   Function *fn = ctx->fn;
-  ir_asm_assign_alloca_offsets(ctx);
+  /* ir_asm_assign_alloca_offsets hoisted to caller */
 
   /* If no order was provided (e.g. emit path that didn't run passes), build BFS
    * order. */
@@ -6676,6 +6993,7 @@ int zcc_run_passes_emit_body(ZCCNode *body_ast, const char *profile_path,
   for (uint32_t i = 0; i < ctx.n_block_order; i++)
     ctx.block_order[i] = result->order[i];
 
+  ir_asm_assign_alloca_offsets(&ctx);
   ir_asm_emit_function_body(&ctx);
   ir_asm_fill_metadata(fn, out_names, out_edges);
 
@@ -6737,42 +7055,62 @@ int zcc_run_passes_emit_body_pgo(ZCCNode *body_ast, const char *profile_path,
   ctx.body_only =
       1; /* AST owns prologue/epilogue -- skip push/pop of callee-saved */
   ctx.slot_base = -stack_size; /* CG-IR-008: IR slots start below AST frame */
+  int ir_extra = 0;
   for (int i = 0; i < MAX_INSTRS; i++)
     ctx.alloca_off[i] = 0;
   ctx.n_block_order = result->n_blocks <= MAX_BLOCKS ? result->n_blocks : 0;
   for (uint32_t i = 0; i < ctx.n_block_order; i++)
     ctx.block_order[i] = result->order[i];
 
-  /* CG-IR-009: scan IR to compute exact frame depth before emission.
+    /* CG-IR-009: scan IR to compute exact frame depth before emission.
    * Must happen BEFORE ir_asm_emit_function_body since alloca offsets
-   * and spill slots all live below slot_base. */
+   * and spill slots all live below slot_base.
+   * CG-IR-016-CSAVE-V2: ir_extra extended by n_csave_slots=5 to give
+   * each callee-saved register its own explicit 8-byte slot at the very
+   * bottom of the frame.  csave_base is the highest of those 5 slots.  */
   {
+    ir_asm_assign_alloca_offsets(&ctx);
+    
     uint32_t max_reg = fn->n_regs;
-    int n_alloca = 0;
-    int64_t alloca_bytes = 0;
     for (uint32_t bi = 0; bi < fn->n_blocks; bi++) {
       Block *b = fn->blocks[bi];
-      if (!b)
-        continue;
+      if (!b) continue;
       for (Instr *ins = b->head; ins; ins = ins->next) {
-        if (ins->dst >= max_reg)
-          max_reg = ins->dst + 1;
+        if (ins->dst >= max_reg) max_reg = ins->dst + 1;
         for (uint32_t s = 0; s < ins->n_src && s < MAX_OPERANDS; s++)
-          if (ins->src[s] >= max_reg)
-            max_reg = ins->src[s] + 1;
-        if (ins->op == OP_ALLOCA) {
-          n_alloca++;
-          if (ins->imm > 0)
-            alloca_bytes += ins->imm;
-        }
+          if (ins->src[s] >= max_reg) max_reg = ins->src[s] + 1;
       }
     }
-    int ir_extra = 8 * ((int)max_reg + n_alloca + 8) + (int)alloca_bytes;
-    ir_extra = (ir_extra + 15) & ~15;
-    fprintf(out, "    subq $%d, %%rsp\n", ir_extra);
+    
+    int n_csave_slots = 5; /* rbx, r12, r13, r14, r15 — always reserve all 5 */
+    ctx.ir_extra = 8 * ((int)max_reg + 8 + n_csave_slots) + ctx.alloca_bytes_total;
+    ctx.ir_extra = (ctx.ir_extra + 15) & ~15;
+    ir_extra = ctx.ir_extra;
+    fprintf(out, "    subq $%d, %%rsp\n", ctx.ir_extra);
+
+    /* CG-IR-016-CSAVE-V3: csave_base is the %rbp-relative offset of the
+     * highest callee-save slot (rbx). It sits at the extreme bottom of the 
+     * expanded ir_extra frame mathematically avoiding all dynamically allocated buffers. */
+    ctx.csave_base = -(stack_size + ctx.ir_extra) + 32;
   }
 
+  /* CG-IR-016-CSAVE-V2: save callee-saved registers via movq (NOT pushq —
+   * pushq would shift RSP and break every slot_base-relative spill access).
+   * All 5 are always saved unconditionally; cost is 5 movq at entry/exit.  */
+  fprintf(out, "    movq %%rbx, %d(%%rbp)\n", ctx.csave_base);
+  fprintf(out, "    movq %%r12, %d(%%rbp)\n", ctx.csave_base - 8);
+  fprintf(out, "    movq %%r13, %d(%%rbp)\n", ctx.csave_base - 16);
+  fprintf(out, "    movq %%r14, %d(%%rbp)\n", ctx.csave_base - 24);
+  fprintf(out, "    movq %%r15, %d(%%rbp)\n", ctx.csave_base - 32);
+
   ir_asm_emit_function_body(&ctx);
+
+  /* CG-IR-016-CSAVE-V2: restore callee-saved registers before AST epilogue */
+  fprintf(out, "    movq %d(%%rbp), %%rbx\n", ctx.csave_base);
+  fprintf(out, "    movq %d(%%rbp), %%r12\n", ctx.csave_base - 8);
+  fprintf(out, "    movq %d(%%rbp), %%r13\n", ctx.csave_base - 16);
+  fprintf(out, "    movq %d(%%rbp), %%r14\n", ctx.csave_base - 24);
+  fprintf(out, "    movq %d(%%rbp), %%r15\n", ctx.csave_base - 32);
 
   fprintf(stderr, "[ZCC-IR] fn=%s  emitted from IR (PGO layout) %u blocks\n",
           func_name ? func_name : "?", (unsigned)fn->n_blocks);

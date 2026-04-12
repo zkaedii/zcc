@@ -14,7 +14,7 @@ GCC → zcc₁ → zcc₁ compiles itself → zcc₂.s
                               cmp zcc₂.s zcc₃.s → IDENTICAL ✓
 ```
 
-## Status (Apr 10 2026)
+## Status (Apr 12 2026)
 
 | Metric | Result |
 |--------|--------|
@@ -22,12 +22,27 @@ GCC → zcc₁ → zcc₁ compiles itself → zcc₂.s
 | Regression tests | ✅ 21/21 pass |
 | Fuzz suite | ✅ 53/53 pass |
 | SQLite 3.45.0 | ✅ Full SQL round-trip verified |
+| DOOM 1.10 | ✅ Compiles, links, renders X11 frames |
+| libcurl 8.7.1 | ✅ 70/70 source files compile clean |
 | IR backend tests | ✅ 21/21 pass |
-| Peephole elisions (self-compile) | 5,363 |
+| Peephole elisions (self-compile) | 7,661 |
 
 ### DOOM 1.10 (id Software Engine)
 
 ZCC successfully compiles, links, and runs the entire `linuxdoom-1.10` source code (45,000 lines). The engine reliably boots, loads WAD format assets, initializes the core subsystems, and renders 3D frames into an X11 shared memory framebuffer using a 32-bit TrueColor synthesized palette LUT without any runtime segment faults. This stresses and validates the robustness of ZCC's structural alignment, global state management, and memory pointer arithmetic.
+
+### libcurl 8.7.1 (Network Library)
+
+ZCC compiles **70 out of 70** libcurl source files through all 5 compiler phases (Lexing, Prescan, AST, Codegen, Peephole). This includes the core transfer engine (`transfer.c`, `multi.c`), all protocol handlers (HTTP, FTP, IMAP, POP3, SMTP, RTSP, TFTP, DICT, Telnet), URL parsing, connection management, cookie handling, DNS resolution, and the options/configuration layer. The compilation required:
+
+- Two-pass `prescan_declarations` for forward symbol resolution (288–877 symbols per file)
+- 47 POSIX/glibc system typedefs registered as builtins
+- Builtin struct definitions for `fd_set`, `timespec`, `sockaddr`, `addrinfo`
+- `__asm__()` statement skipping, `typedef T (Name)(params)` parsing
+- `sizeof(variable)` in constant expressions, cast-in-const-expr support
+- 30+ libc/POSIX function declarations (socket API, DNS, ctype)
+
+No source modifications were made to libcurl itself.
 
 ### SQLite Round-Trip Verification
 

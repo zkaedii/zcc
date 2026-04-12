@@ -178,6 +178,24 @@ static long long parse_const_expr_unary(Compiler *cc) {
                 expect(cc, TK_RPAREN);
                 return type_size(st);
             }
+            /* sizeof(variable) or sizeof(variable[0]) */
+            if (cc->tk == TK_IDENT) {
+                Symbol *sym = scope_find(cc, cc->tk_text);
+                if (sym && sym->type) {
+                    Type *vtype = sym->type;
+                    next_token(cc); /* consume ident */
+                    /* handle sizeof(arr[0]) */
+                    if (cc->tk == TK_LBRACKET) {
+                        next_token(cc); /* [ */
+                        if (cc->tk == TK_NUM) next_token(cc); /* index */
+                        expect(cc, TK_RBRACKET); /* ] */
+                        if (vtype->kind == TY_ARRAY && vtype->base)
+                            vtype = vtype->base;
+                    }
+                    expect(cc, TK_RPAREN);
+                    return type_size(vtype);
+                }
+            }
             long long v = parse_const_expr(cc);
             expect(cc, TK_RPAREN);
             return v;

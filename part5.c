@@ -158,6 +158,118 @@ static void init_compiler(Compiler *cc) {
     sym = scope_add(cc, "curl_socket_t", cc->ty_int);
     sym->is_typedef = 1;
 
+    /* struct timespec { long tv_sec; long tv_nsec; } */
+    {
+        Type *ts = type_new(cc, TY_STRUCT);
+        StructField *f1, *f2;
+        strncpy(ts->tag, "timespec", MAX_IDENT - 1);
+        f1 = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f1->name, "tv_sec", MAX_IDENT - 1);
+        f1->type = cc->ty_long;
+        f1->offset = 0;
+        f2 = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f2->name, "tv_nsec", MAX_IDENT - 1);
+        f2->type = cc->ty_long;
+        f2->offset = 8;
+        f1->next = f2;
+        f2->next = 0;
+        ts->fields = f1;
+        ts->size = 16;
+        ts->align = 8;
+        ts->is_complete = 1;
+        register_struct(cc, ts);
+    }
+
+    /* struct sockaddr { unsigned short sa_family; char sa_data[14]; } */
+    {
+        Type *sa = type_new(cc, TY_STRUCT);
+        StructField *f1, *f2;
+        strncpy(sa->tag, "sockaddr", MAX_IDENT - 1);
+        f1 = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f1->name, "sa_family", MAX_IDENT - 1);
+        f1->type = cc->ty_ushort;
+        f1->offset = 0;
+        f2 = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f2->name, "sa_data", MAX_IDENT - 1);
+        f2->type = type_array(cc, cc->ty_char, 14);
+        f2->offset = 2;
+        f1->next = f2;
+        f2->next = 0;
+        sa->fields = f1;
+        sa->size = 16;
+        sa->align = 2;
+        sa->is_complete = 1;
+        register_struct(cc, sa);
+    }
+
+    /* struct addrinfo { int ai_flags, ai_family, ai_socktype, ai_protocol;
+       size_t ai_addrlen; struct sockaddr *ai_addr; char *ai_canonname;
+       struct addrinfo *ai_next; } */
+    {
+        Type *ai = type_new(cc, TY_STRUCT);
+        StructField *prev, *f;
+        Type *sockaddr_ptr;
+        strncpy(ai->tag, "addrinfo", MAX_IDENT - 1);
+        ai->fields = 0;
+        prev = 0;
+
+        /* Look up struct sockaddr for pointer type */
+        sockaddr_ptr = type_ptr(cc, find_struct(cc, "sockaddr"));
+
+        /* ai_flags: int, offset 0 */
+        f = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f->name, "ai_flags", MAX_IDENT - 1);
+        f->type = cc->ty_int; f->offset = 0; f->next = 0;
+        ai->fields = f; prev = f;
+
+        /* ai_family: int, offset 4 */
+        f = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f->name, "ai_family", MAX_IDENT - 1);
+        f->type = cc->ty_int; f->offset = 4; f->next = 0;
+        prev->next = f; prev = f;
+
+        /* ai_socktype: int, offset 8 */
+        f = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f->name, "ai_socktype", MAX_IDENT - 1);
+        f->type = cc->ty_int; f->offset = 8; f->next = 0;
+        prev->next = f; prev = f;
+
+        /* ai_protocol: int, offset 12 */
+        f = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f->name, "ai_protocol", MAX_IDENT - 1);
+        f->type = cc->ty_int; f->offset = 12; f->next = 0;
+        prev->next = f; prev = f;
+
+        /* ai_addrlen: size_t (ulong), offset 16 — aligned to 8 */
+        f = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f->name, "ai_addrlen", MAX_IDENT - 1);
+        f->type = cc->ty_ulong; f->offset = 16; f->next = 0;
+        prev->next = f; prev = f;
+
+        /* ai_addr: struct sockaddr*, offset 24 */
+        f = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f->name, "ai_addr", MAX_IDENT - 1);
+        f->type = sockaddr_ptr; f->offset = 24; f->next = 0;
+        prev->next = f; prev = f;
+
+        /* ai_canonname: char*, offset 32 */
+        f = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f->name, "ai_canonname", MAX_IDENT - 1);
+        f->type = type_ptr(cc, cc->ty_char); f->offset = 32; f->next = 0;
+        prev->next = f; prev = f;
+
+        /* ai_next: struct addrinfo*, offset 40 */
+        f = (StructField *)cc_alloc(cc, sizeof(StructField));
+        strncpy(f->name, "ai_next", MAX_IDENT - 1);
+        f->type = type_ptr(cc, ai); f->offset = 40; f->next = 0;
+        prev->next = f; prev = f;
+
+        ai->size = 48;
+        ai->align = 8;
+        ai->is_complete = 1;
+        register_struct(cc, ai);
+    }
+
     /* NULL as enum constant */
     sym = scope_add(cc, "NULL", cc->ty_long);
     sym->is_enum_const = 1;
@@ -537,6 +649,46 @@ static void init_compiler(Compiler *cc) {
       /* gettimeofday — returns int */
       ft = type_func(cc, cc->ty_int);
       sym = scope_add(cc, "gettimeofday", ft);
+      sym->is_global = 1;
+
+      /* clock_gettime — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "clock_gettime", ft);
+      sym->is_global = 1;
+
+      /* getaddrinfo — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "getaddrinfo", ft);
+      sym->is_global = 1;
+
+      /* freeaddrinfo — returns void */
+      ft = type_func(cc, cc->ty_void);
+      sym = scope_add(cc, "freeaddrinfo", ft);
+      sym->is_global = 1;
+
+      /* gai_strerror — returns const char* */
+      ft = type_func(cc, type_ptr(cc, cc->ty_char));
+      sym = scope_add(cc, "gai_strerror", ft);
+      sym->is_global = 1;
+
+      /* inet_ntop — returns const char* */
+      ft = type_func(cc, type_ptr(cc, cc->ty_char));
+      sym = scope_add(cc, "inet_ntop", ft);
+      sym->is_global = 1;
+
+      /* getpeername — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "getpeername", ft);
+      sym->is_global = 1;
+
+      /* getsockname — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "getsockname", ft);
+      sym->is_global = 1;
+
+      /* gethostname — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "gethostname", ft);
       sym->is_global = 1;
     }
   }

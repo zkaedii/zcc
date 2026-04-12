@@ -1,0 +1,15 @@
+*.o
+*.s
+*.log
+*.asm
+*.bin
+*.wad
+*.patch
+*.pyc
+core
+core.*
+zcc1
+zcc2
+zcc3
+doom_*
+render.ppm

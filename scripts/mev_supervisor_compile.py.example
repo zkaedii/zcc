@@ -1,0 +1,58 @@
+"""
+Example: MEV bot supervisor JIT compile using native Linux zcc.
+zcc emits assembly (.s) only when -o ends in .s; for .so we must
+assemble+link with gcc -shared -fPIC.
+"""
+
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
+# Where the Linux zcc binary lives (set by linux_build_zcc.sh or your env)
+WORK_DIR = os.environ.get("MEV_WORK_DIR", os.getcwd())
+COMPILER_PATH = os.environ.get("ZCC_PATH", os.path.join(WORK_DIR, "zcc"))
+
+def compile_c_to_so(c_source: str, output_so: str) -> bool:
+    """Compile C source to a shared object for ctypes. Returns True on success."""
+    with tempfile.TemporaryDirectory() as td:
+        src_path = os.path.join(td, "strategy.c")
+        asm_path = os.path.join(td, "strategy.s")
+        with open(src_path, "w") as f:
+            f.write(c_source)
+
+        # Step 1: zcc -> assembly (-o *.s means assembly only, no link)
+        cmd_zcc = [COMPILER_PATH, src_path, "-o", asm_path]
+        r = subprocess.run(cmd_zcc, capture_output=True, text=True, cwd=WORK_DIR)
+        if r.returncode != 0:
+            print(r.stderr or r.stdout)
+            return False
+
+        # Step 2: gcc -shared -fPIC -> .so (required for ctypes)
+        cmd_gcc = [
+            "gcc", "-shared", "-fPIC",
+            "-o", output_so,
+            asm_path,
+            "-lm",
+        ]
+        r = subprocess.run(cmd_gcc, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr or r.stdout)
+            return False
+    return True
+
+
+if __name__ == "__main__":
+    # Example: build Linux zcc then compile a tiny .so
+    # From repo root (or after copying zcc.c):
+    #   ./scripts/linux_build_zcc.sh
+    #   export ZCC_PATH=/path/to/zcc
+    #   python scripts/mev_supervisor_compile.py.example
+    so_path = os.path.join(WORK_DIR, "dynamic_strategy.so")
+    c_code = """
+    int run_strategy(int x) { return x + 42; }
+    """
+    if compile_c_to_so(c_code, so_path):
+        print("Built:", so_path)
+    else:
+        print("Build failed")

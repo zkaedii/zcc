@@ -23,23 +23,30 @@ GCC → zcc₁ → zcc₁ compiles itself → zcc₂.s
 | Fuzz suite | ✅ 53/53 pass |
 | SQLite 3.45.0 | ✅ Full SQL round-trip verified |
 | DOOM 1.10 | ✅ Compiles, links, renders X11 frames |
-| libcurl 8.7.1 | ✅ 70/70 source files compile clean |
+| libcurl 8.7.1 | ✅ 133/133 compiled, linked, runtime-verified |
 | IR backend tests | ✅ 21/21 pass |
-| Peephole elisions (self-compile) | 7,661 |
+| Peephole elisions (self-compile) | 7,670 |
 
 ### DOOM 1.10 (id Software Engine)
 
 ZCC successfully compiles, links, and runs the entire `linuxdoom-1.10` source code (45,000 lines). The engine reliably boots, loads WAD format assets, initializes the core subsystems, and renders 3D frames into an X11 shared memory framebuffer using a 32-bit TrueColor synthesized palette LUT without any runtime segment faults. This stresses and validates the robustness of ZCC's structural alignment, global state management, and memory pointer arithmetic.
 
-### libcurl 8.7.1 (Network Library)
+### libcurl 8.7.1 (Network Library) — Full Graduation
 
-ZCC compiles **70 out of 70** libcurl source files through all 5 compiler phases (Lexing, Prescan, AST, Codegen, Peephole). This includes the core transfer engine (`transfer.c`, `multi.c`), all protocol handlers (HTTP, FTP, IMAP, POP3, SMTP, RTSP, TFTP, DICT, Telnet), URL parsing, connection management, cookie handling, DNS resolution, and the options/configuration layer. The compilation required:
+ZCC compiles, assembles, links, and **runs** all **133** libcurl 8.7.1 source files as a 1.1MB ELF x86-64 executable. The runtime-verified test harness validates:
+
+- **URL API**: `curl_url()` allocation, `curl_url_set()` parsing (HTTP/FTP/IP), `curl_url_get()` field extraction (scheme, host, path, port) — all correct
+- **Easy API**: `curl_easy_init()`, `curl_easy_setopt()` (URL, TIMEOUT, NOSIGNAL, WRITEFUNCTION, WRITEDATA), `curl_easy_strerror()`, `curl_easy_cleanup()` — all pass
+- **Variadic forwarding**: `curl_easy_setopt()` correctly forwards variadic args through `Curl_vsetopt()` via SysV ABI 24-byte `va_list` struct
+- **Function-pointer globals**: `Curl_cmalloc = (curl_malloc_callback)malloc` emits correct `.quad` relocations
+
+Compiler enhancements required:
 
 - Two-pass `prescan_declarations` for forward symbol resolution (288–877 symbols per file)
-- 47 POSIX/glibc system typedefs registered as builtins
-- Builtin struct definitions for `fd_set`, `timespec`, `sockaddr`, `addrinfo`
-- `__asm__()` statement skipping, `typedef T (Name)(params)` parsing
-- `sizeof(variable)` in constant expressions, cast-in-const-expr support
+- SysV ABI `va_list` struct with `__builtin_va_start` codegen (`gp_offset`, `fp_offset`, `reg_save_area`, `overflow_arg_area`)
+- `ND_CAST` stripping in global variable initializer emission
+- 47 POSIX/glibc system typedefs, builtin structs (`fd_set`, `timespec`, `sockaddr`, `addrinfo`)
+- `__asm__()` skipping, `sizeof(variable)` in const-expr, cast-in-const-expr
 - 30+ libc/POSIX function declarations (socket API, DNS, ctype)
 
 No source modifications were made to libcurl itself.

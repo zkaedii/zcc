@@ -2,6 +2,9 @@
 /* PARSER                                                            */
 /* ================================================================ */
 
+static Node *ensure_type(Compiler *cc, Node *n, Type *ty);
+
+
 static int is_type_token(Compiler *cc) {
     if (cc->tk >= TK_INT && cc->tk <= TK_DOUBLE) return 1;
     if (cc->tk >= TK_STATIC && cc->tk <= TK_INLINE) return 1;
@@ -1186,6 +1189,37 @@ Node *parse_postfix(Compiler *cc) {
                            cc->filename ? cc->filename : "<input>", line, call->func_name);
                     call->type = cc->ty_int;
                 }
+                /* C standard default argument promotions for variadic args */
+                {
+                    int i;
+                    int has_proto = 0;
+                    int num_params = 0;
+                    int is_variadic = 1;
+                    if (sym && sym->type && sym->type->kind == TY_FUNC) {
+                        has_proto = 1;
+                        num_params = sym->type->num_params;
+                        is_variadic = sym->type->is_variadic;
+                    }
+                    for (i = 0; i < call->num_args; i++) {
+                        Node *arg = call->args[i];
+                        int is_vararg = (!has_proto) || (i >= num_params && is_variadic);
+                        if (is_vararg && arg && arg->type) {
+                            if (arg->type->kind == TY_FLOAT) {
+                                Node *c = node_new(cc, ND_CAST, arg->line);
+                                c->lhs = arg;
+                                c->cast_type = cc->ty_double;
+                                c->type = cc->ty_double;
+                                call->args[i] = c;
+                            } else if (arg->type->size < 4 && is_integer(arg->type)) {
+                                Node *c = node_new(cc, ND_CAST, arg->line);
+                                c->lhs = arg;
+                                c->cast_type = cc->ty_int;
+                                c->type = cc->ty_int;
+                                call->args[i] = c;
+                            }
+                        }
+                    }
+                }
                 n = call;
                 continue;
             }
@@ -1224,6 +1258,39 @@ Node *parse_postfix(Compiler *cc) {
                     }
                 } else {
                     call->type = cc->ty_int;
+                }
+                /* C standard default argument promotions for variadic args */
+                {
+                    int i;
+                    int has_proto = 0;
+                    int num_params = 0;
+                    int is_variadic = 1;
+                    Type *ctype = n->type;
+                    if (ctype && ctype->kind == TY_PTR && ctype->base) ctype = ctype->base;
+                    if (ctype && ctype->kind == TY_FUNC) {
+                        has_proto = 1;
+                        num_params = ctype->num_params;
+                        is_variadic = ctype->is_variadic;
+                    }
+                    for (i = 0; i < call->num_args; i++) {
+                        Node *arg = call->args[i];
+                        int is_vararg = (!has_proto) || (i >= num_params && is_variadic);
+                        if (is_vararg && arg && arg->type) {
+                            if (arg->type->kind == TY_FLOAT) {
+                                Node *c = node_new(cc, ND_CAST, arg->line);
+                                c->lhs = arg;
+                                c->cast_type = cc->ty_double;
+                                c->type = cc->ty_double;
+                                call->args[i] = c;
+                            } else if (arg->type->size < 4 && is_integer(arg->type)) {
+                                Node *c = node_new(cc, ND_CAST, arg->line);
+                                c->lhs = arg;
+                                c->cast_type = cc->ty_int;
+                                c->type = cc->ty_int;
+                                call->args[i] = c;
+                            }
+                        }
+                    }
                 }
                 n = call;
                 continue;
@@ -1437,10 +1504,7 @@ Node *parse_unary(Compiler *cc) {
                 return expr;
             }
 
-            n = node_new(cc, ND_CAST, line);
-            n->lhs = parse_unary(cc);
-            n->type = cast_type;
-            n->cast_type = cast_type;
+            n = ensure_type(cc, parse_unary(cc), cast_type);
             return n;
         }
     }
@@ -1530,6 +1594,20 @@ static Type *promote_type(Compiler *cc, Type *t1, Type *t2) {
 static Node *ensure_type(Compiler *cc, Node *n, Type *ty) {
     if (!n || !n->type || !ty) return n;
     if (n->type == ty) return n;
+    if (is_float_type(ty) && is_integer(n->type)) {
+        Node *c = node_new(cc, ND_ITOF, n->line);
+        c->lhs = n;
+        c->cast_type = ty;
+        c->type = ty;
+        return c;
+    }
+    if (is_integer(ty) && is_float_type(n->type)) {
+        Node *c = node_new(cc, ND_FTOI, n->line);
+        c->lhs = n;
+        c->cast_type = ty;
+        c->type = ty;
+        return c;
+    }
     Node *c = node_new(cc, ND_CAST, n->line);
     c->lhs = n;
     c->cast_type = ty;
@@ -2396,7 +2474,7 @@ Node *parse_stmt(Compiler *cc) {
                                         deref->type = elem_type;
                                         asgn = node_new(cc, ND_ASSIGN, line);
                                         asgn->lhs = deref;
-                                        asgn->rhs = inits[idx];
+                                        asgn->rhs = ensure_type(cc, inits[idx], elem_type);
                                         asgn->type = elem_type;
                                         block->stmts[cnt] = asgn;
                                         cnt++;
@@ -2481,7 +2559,7 @@ Node *parse_stmt(Compiler *cc) {
                                         }
                                         asgn_n = node_new(cc, ND_ASSIGN, line);
                                         asgn_n->lhs = mem_n;
-                                        asgn_n->rhs = inits_s[fi];
+                                        asgn_n->rhs = ensure_type(cc, inits_s[fi], mem_n->type);
                                         asgn_n->type = mem_n->type;
                                         /* Grow block if needed */
                                         if (cnt >= cap) {
@@ -2560,7 +2638,7 @@ Node *parse_stmt(Compiler *cc) {
                             var->type = vtype;
                             asgn = node_new(cc, ND_ASSIGN, line);
                             asgn->lhs = var;
-                            asgn->rhs = parse_assign(cc);
+                            asgn->rhs = ensure_type(cc, parse_assign(cc), vtype);
                             asgn->type = vtype;
                             if (cnt < cap) {
                                 block->stmts[cnt] = asgn;

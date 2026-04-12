@@ -3007,39 +3007,43 @@ static void emit_global_var(Compiler *cc, Node *gvar) {
     }
     fprintf(cc->out, "%s:\n", gvar->name);
     /* only handle simple integer initializers */
-    if (gvar->initializer->kind == ND_NUM) {
+    /* Strip ND_CAST wrappers (e.g. function pointer casts like
+       `Curl_cmalloc = (curl_malloc_callback)malloc`) */
+    Node *init = gvar->initializer;
+    while (init && init->kind == ND_CAST) init = init->lhs;
+    if (init && init->kind == ND_NUM) {
       if (size == 1)
-        fprintf(cc->out, "    .byte %lld\n", gvar->initializer->int_val);
+        fprintf(cc->out, "    .byte %lld\n", init->int_val);
       else if (size == 2)
-        fprintf(cc->out, "    .short %lld\n", gvar->initializer->int_val);
+        fprintf(cc->out, "    .short %lld\n", init->int_val);
       else if (size == 4)
-        fprintf(cc->out, "    .long %lld\n", gvar->initializer->int_val);
+        fprintf(cc->out, "    .long %lld\n", init->int_val);
       else
-        fprintf(cc->out, "    .quad %lld\n", gvar->initializer->int_val);
-    } else if (gvar->initializer->kind == ND_ADDR && gvar->initializer->lhs && gvar->initializer->lhs->kind == ND_VAR) {
+        fprintf(cc->out, "    .quad %lld\n", init->int_val);
+    } else if (init->kind == ND_ADDR && init->lhs && init->lhs->kind == ND_VAR) {
       if (size == 4)
-        fprintf(cc->out, "    .long %s\n", gvar->initializer->lhs->name);
+        fprintf(cc->out, "    .long %s\n", init->lhs->name);
       else
-        fprintf(cc->out, "    .quad %s\n", gvar->initializer->lhs->name);
-    } else if (gvar->initializer->kind == ND_ADDR && gvar->initializer->lhs && gvar->initializer->lhs->kind == ND_DEREF && gvar->initializer->lhs->lhs && gvar->initializer->lhs->lhs->kind == ND_ADD && gvar->initializer->lhs->lhs->lhs && gvar->initializer->lhs->lhs->lhs->kind == ND_VAR && gvar->initializer->lhs->lhs->rhs && gvar->initializer->lhs->lhs->rhs->kind == ND_NUM) {
-      long long offset = gvar->initializer->lhs->lhs->rhs->int_val;
-      if (gvar->initializer->lhs->lhs->lhs->type && gvar->initializer->lhs->lhs->lhs->type->base) offset *= type_size(gvar->initializer->lhs->lhs->lhs->type->base);
-      if (size == 4) fprintf(cc->out, "    .long %s + %lld\n", gvar->initializer->lhs->lhs->lhs->name, offset);
-      else fprintf(cc->out, "    .quad %s + %lld\n", gvar->initializer->lhs->lhs->lhs->name, offset);
-    } else if (gvar->initializer->kind == ND_ADD && gvar->initializer->lhs && gvar->initializer->lhs->kind == ND_VAR && gvar->initializer->rhs && gvar->initializer->rhs->kind == ND_NUM) {
-      long long offset = gvar->initializer->rhs->int_val;
-      if (gvar->initializer->lhs->type && gvar->initializer->lhs->type->base) offset *= type_size(gvar->initializer->lhs->type->base);
-      if (size == 4) fprintf(cc->out, "    .long %s + %lld\n", gvar->initializer->lhs->name, offset);
-      else fprintf(cc->out, "    .quad %s + %lld\n", gvar->initializer->lhs->name, offset);
-    } else if (gvar->initializer->kind == ND_VAR) {
+        fprintf(cc->out, "    .quad %s\n", init->lhs->name);
+    } else if (init->kind == ND_ADDR && init->lhs && init->lhs->kind == ND_DEREF && init->lhs->lhs && init->lhs->lhs->kind == ND_ADD && init->lhs->lhs->lhs && init->lhs->lhs->lhs->kind == ND_VAR && init->lhs->lhs->rhs && init->lhs->lhs->rhs->kind == ND_NUM) {
+      long long offset = init->lhs->lhs->rhs->int_val;
+      if (init->lhs->lhs->lhs->type && init->lhs->lhs->lhs->type->base) offset *= type_size(init->lhs->lhs->lhs->type->base);
+      if (size == 4) fprintf(cc->out, "    .long %s + %lld\n", init->lhs->lhs->lhs->name, offset);
+      else fprintf(cc->out, "    .quad %s + %lld\n", init->lhs->lhs->lhs->name, offset);
+    } else if (init->kind == ND_ADD && init->lhs && init->lhs->kind == ND_VAR && init->rhs && init->rhs->kind == ND_NUM) {
+      long long offset = init->rhs->int_val;
+      if (init->lhs->type && init->lhs->type->base) offset *= type_size(init->lhs->type->base);
+      if (size == 4) fprintf(cc->out, "    .long %s + %lld\n", init->lhs->name, offset);
+      else fprintf(cc->out, "    .quad %s + %lld\n", init->lhs->name, offset);
+    } else if (init->kind == ND_VAR) {
       if (size == 4)
-        fprintf(cc->out, "    .long %s\n", gvar->initializer->name);
+        fprintf(cc->out, "    .long %s\n", init->name);
       else
-        fprintf(cc->out, "    .quad %s\n", gvar->initializer->name);
-    } else if (gvar->initializer->kind == ND_STR) {
+        fprintf(cc->out, "    .quad %s\n", init->name);
+    } else if (init->kind == ND_STR) {
       if (gvar->type && gvar->type->kind == TY_ARRAY) {
           int j;
-          int str_id = gvar->initializer->str_id;
+          int str_id = init->str_id;
           int len = cc->strings[str_id].len;
           fprintf(cc->out, "    .ascii \"");
           for (j = 0; j < len; j++) {
@@ -3055,26 +3059,26 @@ static void emit_global_var(Compiler *cc, Node *gvar) {
           fprintf(cc->out, "\\0\"\n");
           if (size > len + 1) fprintf(cc->out, "    .zero %d\n", size - (len + 1));
       } else {
-          if (size == 4) fprintf(cc->out, "    .long .Lstr_%d\n", gvar->initializer->str_id);
-          else fprintf(cc->out, "    .quad .Lstr_%d\n", gvar->initializer->str_id);
+          if (size == 4) fprintf(cc->out, "    .long .Lstr_%d\n", init->str_id);
+          else fprintf(cc->out, "    .quad .Lstr_%d\n", init->str_id);
       }
-        } else if (gvar->initializer->kind == ND_INIT_LIST) {
+        } else if (init->kind == ND_INIT_LIST) {
             int emitted = 0;
             int i;
             int elem_size = 1;
         if (gvar->type && gvar->type->kind == TY_STRUCT) {
             int arg_idx = 0;
-            emit_struct_fields(cc, gvar->type->fields, gvar->initializer->args, gvar->initializer->num_args, &arg_idx, gvar->initializer->num_args, 0, &emitted);
+            emit_struct_fields(cc, gvar->type->fields, init->args, init->num_args, &arg_idx, init->num_args, 0, &emitted);
         } else if (gvar->type && gvar->type->kind == TY_ARRAY && gvar->type->base && (gvar->type->base->kind == TY_STRUCT || gvar->type->base->kind == TY_UNION)) {
             int i;
             int arg_idx = 0;
             int elem_size = type_size(gvar->type->base);
-            int budget = gvar->initializer->num_args / gvar->type->array_len;
+            int budget = init->num_args / gvar->type->array_len;
             for (i = 0; i < gvar->type->array_len; i++) {
                 int expected_end = (i + 1) * elem_size;
                 int arg_end = (i + 1) * budget;
-                if (arg_end > gvar->initializer->num_args) arg_end = gvar->initializer->num_args;
-                emit_struct_fields(cc, gvar->type->base->fields, gvar->initializer->args, gvar->initializer->num_args, &arg_idx, arg_end, i * elem_size, &emitted);
+                if (arg_end > init->num_args) arg_end = init->num_args;
+                emit_struct_fields(cc, gvar->type->base->fields, init->args, init->num_args, &arg_idx, arg_end, i * elem_size, &emitted);
                 if (emitted < expected_end) {
                     fprintf(cc->out, "    .zero %d\n", expected_end - emitted);
                     emitted = expected_end;
@@ -3084,8 +3088,8 @@ static void emit_global_var(Compiler *cc, Node *gvar) {
             int i;
             int elem_size = 1;
             if (gvar->type && gvar->type->base) elem_size = type_size(gvar->type->base);
-            for (i = 0; i < gvar->initializer->num_args; i++) {
-                Node *elem = gvar->initializer->args[i];
+            for (i = 0; i < init->num_args; i++) {
+                Node *elem = init->args[i];
                 int const_ok = 1;
                 long long const_val = eval_const_expr_p4(elem, &const_ok);
                 if (!elem) {

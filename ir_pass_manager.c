@@ -4,8 +4,10 @@
  * Compiled by GCC only (linked separately, NOT concatenated into zcc.c).
  * Operates on ir_func_t* linked lists defined in ir.h.
  *
- * Phase 2: stub passes that count nodes (no mutations).
- * Steps 4-6 will implement real DCE, constant folding, and strength reduction.
+ * Production passes:
+ *   DCE            — backward liveness scan, unlinks dead definitions
+ *   Constant Fold  — evaluates binary ops on known constants
+ *   Strength Reduce — mul-by-0 → const 0, add/sub-by-0 → copy
  *
  * Default pipeline: DCE → const_fold → strength_reduce → DCE
  */
@@ -15,8 +17,7 @@
 #include <string.h>
 #include "ir.h"
 
-/* ── Pass result type (duplicated from ir_pass_manager.h to avoid
- *    include ordering issues with ir.h) ──────────────────────────────── */
+/* ── Pass result type ────────────────────────────────────────────────── */
 
 typedef struct {
     int nodes_before;
@@ -54,35 +55,324 @@ static int count_nodes(ir_func_t *fn) {
     return count;
 }
 
-/* ── Built-in passes (Phase 2: stubs, count nodes only) ──────────────── */
+/* Check if an opcode is side-effectful (must not be DCE'd) */
+static int is_side_effect(ir_op_t op) {
+    switch (op) {
+    case IR_STORE:
+    case IR_CALL:
+    case IR_RET:
+    case IR_BR:
+    case IR_BR_IF:
+    case IR_LABEL:
+    case IR_ARG:
+        return 1;
+    default:
+        return 0;
+    }
+}
 
+/* Check if a node references 'name' as a source operand.
+ * For IR_STORE, dst is actually a USE (the address), not a definition. */
+static int node_uses(ir_node_t *n, const char *name) {
+    if (name[0] == '\0') return 0;
+    if (n->src1[0] && strcmp(n->src1, name) == 0) return 1;
+    if (n->src2[0] && strcmp(n->src2, name) == 0) return 1;
+    /* IR_STORE uses dst as the address operand — it's a USE, not a DEF */
+    if (n->op == IR_STORE && n->dst[0] && strcmp(n->dst, name) == 0) return 1;
+    return 0;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * PASS 1: Dead Code Elimination (DCE)
+ * ════════════════════════════════════════════════════════════════════════
+ * Scan the node list.  A node is dead if:
+ *   1) It defines a temp (dst[0] != '\0')
+ *   2) It is NOT side-effectful (not store/call/ret/br/br_if/label/arg)
+ *   3) It is NOT IR_STORE (where dst is a use, not a definition)
+ *   4) No subsequent node references dst in src1, src2, or store-dst
+ *
+ * Complexity: O(N²) per function. With ~300 nodes/function average,
+ * this is ~90K comparisons/function — negligible.
+ */
 static ir_pass_result_t ir_pass_dce(void *fn_ptr) {
     ir_func_t *fn = (ir_func_t *)fn_ptr;
     ir_pass_result_t r;
+    ir_node_t *prev;
+    ir_node_t *n;
+    ir_node_t *scan;
+    ir_node_t *next;
+    int deleted = 0;
+
     memset(&r, 0, sizeof(r));
     r.nodes_before = count_nodes(fn);
-    /* Phase 2: no-op — real DCE in Step 4 */
-    r.nodes_after = r.nodes_before;
+
+    prev = NULL;
+    n = fn->head;
+    while (n) {
+        next = n->next;
+
+        /* Does this node define a temp that could be dead? */
+        if (n->dst[0] != '\0'
+            && !is_side_effect(n->op)
+            && n->op != IR_STORE) {
+
+            /* Check if ANY subsequent node uses this temp */
+            int used = 0;
+            for (scan = next; scan; scan = scan->next) {
+                if (node_uses(scan, n->dst)) {
+                    used = 1;
+                    break;
+                }
+            }
+
+            if (!used) {
+                /* Dead node — unlink from list */
+                if (prev) {
+                    prev->next = next;
+                } else {
+                    fn->head = next;
+                }
+                if (n == fn->tail) {
+                    fn->tail = prev;
+                }
+                free(n);
+                fn->node_count--;
+                deleted++;
+                /* Don't advance prev; it still points to the right place */
+                n = next;
+                continue;
+            }
+        }
+
+        prev = n;
+        n = next;
+    }
+
+    r.nodes_after = r.nodes_before - deleted;
+    r.nodes_deleted = deleted;
+    r.changed = deleted > 0;
     return r;
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+ * PASS 2: Constant Folding
+ * ════════════════════════════════════════════════════════════════════════
+ * Scan forward.  Track temps defined by IR_CONST.  When a binary op
+ * has both src1 and src2 as known constants, evaluate at compile time
+ * and replace the node with IR_CONST.
+ */
+
+#define CONST_MAP_MAX 2048
+
+typedef struct {
+    char name[32];  /* IR_NAME_MAX */
+    long value;
+} const_map_entry_t;
+
+static const_map_entry_t s_cmap[CONST_MAP_MAX];
+static int s_cmap_count;
+
+static void cmap_clear(void) {
+    s_cmap_count = 0;
+}
+
+static void cmap_add(const char *name, long value) {
+    int i;
+    /* Update if exists */
+    for (i = 0; i < s_cmap_count; i++) {
+        if (strcmp(s_cmap[i].name, name) == 0) {
+            s_cmap[i].value = value;
+            return;
+        }
+    }
+    /* Add new */
+    if (s_cmap_count >= CONST_MAP_MAX) return;
+    strncpy(s_cmap[s_cmap_count].name, name, 31);
+    s_cmap[s_cmap_count].name[31] = '\0';
+    s_cmap[s_cmap_count].value = value;
+    s_cmap_count++;
+}
+
+static int cmap_get(const char *name, long *value) {
+    int i;
+    if (name[0] == '\0') return 0;
+    for (i = 0; i < s_cmap_count; i++) {
+        if (strcmp(s_cmap[i].name, name) == 0) {
+            *value = s_cmap[i].value;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static ir_pass_result_t ir_pass_const_fold(void *fn_ptr) {
     ir_func_t *fn = (ir_func_t *)fn_ptr;
     ir_pass_result_t r;
+    ir_node_t *n;
+    int modified = 0;
+
     memset(&r, 0, sizeof(r));
     r.nodes_before = count_nodes(fn);
-    /* Phase 2: no-op — real constant folding in Step 5 */
-    r.nodes_after = r.nodes_before;
+
+    cmap_clear();
+
+    for (n = fn->head; n; n = n->next) {
+        /* Track constants */
+        if (n->op == IR_CONST && n->dst[0]) {
+            cmap_add(n->dst, n->imm);
+            continue;
+        }
+
+        /* Check binary ops with two known constant operands */
+        if (n->src1[0] && n->src2[0]) {
+            long v1, v2, result;
+
+            if (!cmap_get(n->src1, &v1)) continue;
+            if (!cmap_get(n->src2, &v2)) continue;
+
+            switch (n->op) {
+            case IR_ADD: result = v1 + v2; break;
+            case IR_SUB: result = v1 - v2; break;
+            case IR_MUL: result = v1 * v2; break;
+            case IR_DIV: if (v2 == 0) continue; result = v1 / v2; break;
+            case IR_MOD: if (v2 == 0) continue; result = v1 % v2; break;
+            case IR_AND: result = v1 & v2; break;
+            case IR_OR:  result = v1 | v2; break;
+            case IR_XOR: result = v1 ^ v2; break;
+            case IR_SHL: result = v1 << v2; break;
+            case IR_SHR: result = v1 >> v2; break;
+            case IR_EQ:  result = (v1 == v2) ? 1 : 0; break;
+            case IR_NE:  result = (v1 != v2) ? 1 : 0; break;
+            case IR_LT:  result = (v1 < v2)  ? 1 : 0; break;
+            case IR_LE:  result = (v1 <= v2) ? 1 : 0; break;
+            case IR_GT:  result = (v1 > v2)  ? 1 : 0; break;
+            case IR_GE:  result = (v1 >= v2) ? 1 : 0; break;
+            default: continue;
+            }
+
+            /* Replace with IR_CONST */
+            n->op = IR_CONST;
+            n->imm = result;
+            n->src1[0] = '\0';
+            n->src2[0] = '\0';
+
+            /* Track the new constant */
+            cmap_add(n->dst, result);
+
+            modified++;
+        }
+    }
+
+    r.nodes_after = r.nodes_before; /* const fold mutates, doesn't delete */
+    r.nodes_modified = modified;
+    r.changed = modified > 0;
     return r;
 }
 
+/* ════════════════════════════════════════════════════════════════════════
+ * PASS 3: Strength Reduction
+ * ════════════════════════════════════════════════════════════════════════
+ * Pattern-match on operations with one known constant operand:
+ *   MUL dst, src, 0  → CONST dst, 0
+ *   MUL dst, 0, src  → CONST dst, 0
+ *   ADD dst, src, 0  → COPY  dst, src
+ *   ADD dst, 0, src  → COPY  dst, src
+ *   SUB dst, src, 0  → COPY  dst, src
+ *
+ * Phase 3 will add: MUL 2^N → SHL N, DIV 2^N → SHR N (unsigned)
+ */
 static ir_pass_result_t ir_pass_strength_reduce(void *fn_ptr) {
     ir_func_t *fn = (ir_func_t *)fn_ptr;
     ir_pass_result_t r;
+    ir_node_t *n;
+    int modified = 0;
+
     memset(&r, 0, sizeof(r));
     r.nodes_before = count_nodes(fn);
-    /* Phase 2: no-op — real strength reduction in Step 6 */
-    r.nodes_after = r.nodes_before;
+
+    /* Collect constants */
+    cmap_clear();
+    for (n = fn->head; n; n = n->next) {
+        if (n->op == IR_CONST && n->dst[0]) {
+            cmap_add(n->dst, n->imm);
+        }
+    }
+
+    /* Apply strength reductions */
+    for (n = fn->head; n; n = n->next) {
+        long val;
+
+        if (n->op == IR_MUL) {
+            /* MUL by 0 (either operand) → CONST 0 */
+            if (cmap_get(n->src2, &val) && val == 0) {
+                n->op = IR_CONST;
+                n->imm = 0;
+                n->src1[0] = '\0';
+                n->src2[0] = '\0';
+                cmap_add(n->dst, 0);
+                modified++;
+                continue;
+            }
+            if (cmap_get(n->src1, &val) && val == 0) {
+                n->op = IR_CONST;
+                n->imm = 0;
+                n->src1[0] = '\0';
+                n->src2[0] = '\0';
+                cmap_add(n->dst, 0);
+                modified++;
+                continue;
+            }
+            /* MUL by 1 → COPY */
+            if (cmap_get(n->src2, &val) && val == 1) {
+                n->op = IR_COPY;
+                /* src1 stays, src2 cleared */
+                n->src2[0] = '\0';
+                modified++;
+                continue;
+            }
+            if (cmap_get(n->src1, &val) && val == 1) {
+                n->op = IR_COPY;
+                /* swap src2 into src1 position */
+                strncpy(n->src1, n->src2, 31);
+                n->src1[31] = '\0';
+                n->src2[0] = '\0';
+                modified++;
+                continue;
+            }
+        }
+
+        if (n->op == IR_ADD) {
+            /* ADD src, 0 → COPY src */
+            if (cmap_get(n->src2, &val) && val == 0) {
+                n->op = IR_COPY;
+                n->src2[0] = '\0';
+                modified++;
+                continue;
+            }
+            if (cmap_get(n->src1, &val) && val == 0) {
+                n->op = IR_COPY;
+                strncpy(n->src1, n->src2, 31);
+                n->src1[31] = '\0';
+                n->src2[0] = '\0';
+                modified++;
+                continue;
+            }
+        }
+
+        if (n->op == IR_SUB) {
+            /* SUB src, 0 → COPY src */
+            if (cmap_get(n->src2, &val) && val == 0) {
+                n->op = IR_COPY;
+                n->src2[0] = '\0';
+                modified++;
+                continue;
+            }
+        }
+    }
+
+    r.nodes_after = r.nodes_before; /* strength reduce mutates, doesn't delete */
+    r.nodes_modified = modified;
+    r.changed = modified > 0;
     return r;
 }
 
@@ -113,6 +403,8 @@ static void ir_pm_run(ir_pass_manager_t *pm, ir_module_t *mod) {
     int f;
     int total_nodes_in = 0;
     int total_nodes_out = 0;
+    int total_deleted = 0;
+    int total_modified = 0;
 
     for (p = 0; p < pm->count; p++) {
         int pass_before = 0;
@@ -138,11 +430,13 @@ static void ir_pm_run(ir_pass_manager_t *pm, ir_module_t *mod) {
 
         if (p == 0) total_nodes_in = pass_before;
         total_nodes_out = pass_after;
+        total_deleted += pass_deleted;
+        total_modified += pass_modified;
     }
 
     if (pm->verbose && pm->count > 0) {
-        fprintf(stderr, "  [IR Pass] Pipeline complete: %d nodes -> %d nodes\n",
-                total_nodes_in, total_nodes_out);
+        fprintf(stderr, "  [IR Pass] Pipeline complete: %d nodes -> %d nodes (total: %d deleted, %d modified)\n",
+                total_nodes_in, total_nodes_out, total_deleted, total_modified);
     }
 }
 

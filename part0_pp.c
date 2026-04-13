@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #define PP_MAX_MACROS 4096
 #define PP_MAX_PARAMS 16
-#define PP_MAX_BODY   4096
+#define PP_MAX_BODY   16384
 #define PP_MAX_INCLUDE_DEPTH 32
 
 typedef struct {
@@ -15,6 +15,14 @@ typedef struct {
     char body[PP_MAX_BODY];
     int  active;
 } PPMacro;
+
+typedef struct {
+    const char *src;
+    int pos;
+    int len;
+    char *alloc_buf;
+    PPMacro *expanding_macro;
+} PPInputCtx;
 
 typedef struct {
     PPMacro macros[PP_MAX_MACROS];
@@ -38,6 +46,10 @@ typedef struct {
     int         line;
     const char *filename;
     const char *include_paths;
+
+    PPInputCtx input_stack[32];
+    int input_depth;
+    char *alloc_buf;
 } PPState;
 
 static const char *zcc_stddef_text = 
@@ -86,6 +98,9 @@ static const char *zcc_stddef_text =
 "#define __builtin_constant_p(x) 0\n"
 "#define __builtin_types_compatible_p(x, y) 0\n"
 "#define __builtin_unreachable()\n"
+"#define __x86_64__ 1\n"
+"#define __GNUC__ 1\n"
+"#define assert(x)\n"
 "#define offsetof(t, m) ((unsigned long)&(((t*)0)->m))\n"
 "typedef int int32_t;\n"
 "typedef unsigned int uint32_t;\n"
@@ -115,6 +130,17 @@ static void pp_emit_str(PPState *state, const char *str, int len) {
 }
 
 static char pp_peek(PPState *state) {
+    while (state->pos >= state->len && state->input_depth > 0) {
+        if (state->alloc_buf) free(state->alloc_buf);
+        state->input_depth--;
+        if (state->input_stack[state->input_depth].expanding_macro) {
+            state->input_stack[state->input_depth].expanding_macro->active = 1;
+        }
+        state->src = state->input_stack[state->input_depth].src;
+        state->pos = state->input_stack[state->input_depth].pos;
+        state->len = state->input_stack[state->input_depth].len;
+        state->alloc_buf = state->input_stack[state->input_depth].alloc_buf;
+    }
     if (state->pos >= state->len) return 0;
     return state->src[state->pos];
 }
@@ -122,10 +148,28 @@ static char pp_peek(PPState *state) {
 static char pp_next(PPState *state) {
     char c = pp_peek(state);
     if (c) {
-        if (c == '\n') state->line++;
+        if (c == '\n' && state->input_depth == 0) state->line++;
         state->pos++;
     }
     return c;
+}
+
+static void pp_push_input(PPState *state, const char *new_src, char *alloc_buf, PPMacro *macro) {
+    if (state->input_depth >= 32) {
+        fprintf(stderr, "zcc preprocessor error: macro expansion too deep\n");
+        exit(1);
+    }
+    state->input_stack[state->input_depth].src = state->src;
+    state->input_stack[state->input_depth].pos = state->pos;
+    state->input_stack[state->input_depth].len = state->len;
+    state->input_stack[state->input_depth].alloc_buf = state->alloc_buf;
+    state->input_stack[state->input_depth].expanding_macro = macro;
+    state->input_depth++;
+    
+    state->src = new_src;
+    state->pos = 0;
+    state->len = strlen(new_src);
+    state->alloc_buf = alloc_buf;
 }
 
 static void pp_skip_whitespace(PPState *state) {
@@ -171,65 +215,27 @@ static PPMacro *pp_add_macro(PPState *state, const char *name) {
 
 static void pp_read_line(PPState *state, char *buf, int max) {
     int i = 0;
-    int in_str = 0;
-    int in_char = 0;
-    while (1) {
-        int c_peek = pp_peek(state);
-        if (c_peek == '\n') break;
-        if (c_peek == 0) break;
-        if (i >= max - 1) break;
-
-        if (!in_str && !in_char && state->pos + 1 < state->len) {
-            if (state->src[state->pos] == '/' && state->src[state->pos + 1] == '/') {
-                for (;;) {
-                    int p = pp_peek(state);
-                    if (p == '\n') break;
-                    if (p == 0) break;
-                    pp_next(state);
-                }
-                break;
-            }
-            if (state->src[state->pos] == '/' && state->src[state->pos + 1] == '*') {
-                pp_next(state); pp_next(state);
-                for (;;) {
-                    int p = pp_peek(state);
-                    if (p == 0) break;
-                    if (state->pos + 1 < state->len && state->src[state->pos] == '*' && state->src[state->pos + 1] == '/') {
-                        pp_next(state); pp_next(state);
-                        break;
-                    }
-                    if (p == '\n') {
-                        buf[i++] = '\n';
-                    }
-                    pp_next(state);
-                }
-                if (i > 0 && buf[i-1] != ' ') buf[i++] = ' ';
-                continue;
-            }
+    int in_comment = 0;
+    while (pp_peek(state) != '\n' && pp_peek(state) != 0 && i < max - 1) {
+        char c = pp_peek(state);
+        if (c == '\\' && state->src[state->pos + 1] == '\n') {
+            pp_next(state); pp_next(state);
+            continue;
         }
-        
-        char c = pp_next(state);
-        
-        if (c == '\\') {
-            int nxt = pp_peek(state);
-            if (nxt == '\n') {
-                pp_next(state);
-                continue;
-            }
-            if (nxt == '"' || nxt == '\'') {
-                buf[i++] = c;
-                if (i < max - 1) buf[i++] = pp_next(state);
-                continue;
-            }
+        if (!in_comment && c == '/' && state->src[state->pos + 1] == '/') {
+            while (pp_peek(state) != '\n' && pp_peek(state) != 0) pp_next(state);
+            break;
         }
-        if (c == '"' && !in_char) in_str = !in_str;
-        if (c == '\'' && !in_str) in_char = !in_char;
-        buf[i++] = c;
-    }
-    
-    /* right trim trailing whitespace from the macro body */
-    while (i > 0 && (buf[i-1] == ' ' || buf[i-1] == '\t' || buf[i-1] == '\r')) {
-        i--;
+        if (!in_comment && c == '/' && state->src[state->pos + 1] == '*') {
+            in_comment = 1; pp_next(state); pp_next(state);
+            continue;
+        }
+        if (in_comment && c == '*' && state->src[state->pos + 1] == '/') {
+            in_comment = 0; pp_next(state); pp_next(state);
+            continue;
+        }
+        pp_next(state);
+        if (!in_comment) buf[i++] = c;
     }
     buf[i] = 0;
 }
@@ -264,133 +270,11 @@ static char *pp_read_file(const char *path, int *out_len) {
     return buf;
 }
 
+static void pp_parse_target_depth(PPState *state, int target_depth);
 
-static void pp_eval_skip_ws(const char **p) {
-    while (**p == ' ' || **p == '\t' || **p == '\r' || **p == '\n') (*p)++;
+static void pp_parse(PPState *state) {
+    pp_parse_target_depth(state, state->input_depth);
 }
-
-static int pp_eval_ident_len(const char *p) {
-    int i = 0;
-    while ((p[i] >= 'a' && p[i] <= 'z') || (p[i] >= 'A' && p[i] <= 'Z') || (p[i] >= '0' && p[i] <= '9') || p[i] == '_') i++;
-    return i;
-}
-
-static int pp_eval_or(PPState *state, const char **p);
-
-static int pp_eval_primary(PPState *state, const char **p) {
-    pp_eval_skip_ws(p);
-    if (**p == '(') {
-        (*p)++;
-        int val = pp_eval_or(state, p);
-        pp_eval_skip_ws(p);
-        if (**p == ')') (*p)++;
-        return val;
-    }
-    
-    if (**p >= '0' && **p <= '9') {
-        int val = 0;
-        while (**p >= '0' && **p <= '9') {
-            val = val * 10 + (**p - '0');
-            (*p)++;
-        }
-        return val;
-    }
-    
-    int len = pp_eval_ident_len(*p);
-    if (len > 0) {
-        if (strncmp(*p, "defined", len) == 0 && len == 7) {
-            (*p) += len;
-            pp_eval_skip_ws(p);
-            int has_paren = 0;
-            if (**p == '(') { has_paren = 1; (*p)++; pp_eval_skip_ws(p); }
-            int id_len = pp_eval_ident_len(*p);
-            char ident[128];
-            if (id_len > 127) id_len = 127;
-            strncpy(ident, *p, id_len);
-            ident[id_len] = 0;
-            (*p) += id_len;
-            pp_eval_skip_ws(p);
-            if (has_paren && **p == ')') (*p)++;
-            
-            PPMacro *m = pp_find_macro(state, ident);
-            return m ? 1 : 0;
-        } else {
-            char ident[128];
-            if (len > 127) len = 127;
-            strncpy(ident, *p, len);
-            ident[len] = 0;
-            (*p) += len;
-            
-            PPMacro *m = pp_find_macro(state, ident);
-            if (m) {
-                if (m->body[0]) return atoi(m->body);
-                return 0;
-            }
-            return 0;
-        }
-    }
-    return 0;
-}
-
-static int pp_eval_unary(PPState *state, const char **p) {
-    pp_eval_skip_ws(p);
-    if (**p == '!') {
-        (*p)++;
-        return !pp_eval_unary(state, p);
-    }
-    return pp_eval_primary(state, p);
-}
-
-static int pp_eval_compare(PPState *state, const char **p) {
-    int val = pp_eval_unary(state, p);
-    pp_eval_skip_ws(p);
-    
-    if ((*p)[0] == '=' && (*p)[1] == '=') { (*p) += 2; return val == pp_eval_unary(state, p); }
-    if ((*p)[0] == '!' && (*p)[1] == '=') { (*p) += 2; return val != pp_eval_unary(state, p); }
-    if ((*p)[0] == '>' && (*p)[1] == '=') { (*p) += 2; return val >= pp_eval_unary(state, p); }
-    if ((*p)[0] == '<' && (*p)[1] == '=') { (*p) += 2; return val <= pp_eval_unary(state, p); }
-    if ((*p)[0] == '>') { (*p)++; return val > pp_eval_unary(state, p); }
-    if ((*p)[0] == '<') { (*p)++; return val < pp_eval_unary(state, p); }
-    
-    return val;
-}
-
-static int pp_eval_and(PPState *state, const char **p) {
-    int val = pp_eval_compare(state, p);
-    while (1) {
-        pp_eval_skip_ws(p);
-        if ((*p)[0] == '&' && (*p)[1] == '&') {
-            (*p) += 2;
-            int right = pp_eval_compare(state, p);
-            val = val && right;
-        } else {
-            break;
-        }
-    }
-    return val;
-}
-
-static int pp_eval_or(PPState *state, const char **p) {
-    int val = pp_eval_and(state, p);
-    while (1) {
-        pp_eval_skip_ws(p);
-        if ((*p)[0] == '|' && (*p)[1] == '|') {
-            (*p) += 2;
-            int right = pp_eval_and(state, p);
-            val = val || right;
-        } else {
-            break;
-        }
-    }
-    return val;
-}
-
-static int pp_eval_expr(PPState *state, const char *expr) {
-    const char *p = expr;
-    return pp_eval_or(state, &p);
-}
-
-static void pp_parse(PPState *state);
 
 static void pp_process_include(PPState *state, const char *path, int is_system) {
     char *file_src = 0;
@@ -436,8 +320,6 @@ static void pp_process_include(PPState *state, const char *path, int is_system) 
             state->macros[i].active = sub_state->macros[i].active;
         }
         
-
-        
         pp_emit_str(state, sub_state->out, sub_state->out_len);
         
         if (sub_state->out) free(sub_state->out);
@@ -467,20 +349,91 @@ static void pp_parse_params(PPState *state, PPMacro *m) {
     if (pp_peek(state) == ')') pp_next(state);
 }
 
+static int pp_eval_expr_str(PPState *state, const char *s, int depth) {
+    char buf[1024];
+    int i=0, j=0;
+    char *or_ptr, *and_ptr;
+    
+    fprintf(stderr, "eval depth=%d s='%s'\n", depth, s);
+    if (depth > 16) {
+        fprintf(stderr, "RECURSION DEPTH MAXED OUT!\n");
+        return 0;
+    }
+    
+    while(s[i] && j<1023) { if (s[i]!=' ' && s[i]!='\t' && s[i]!='\n' && s[i]!='\r') buf[j++]=s[i]; i++; }
+    buf[j]=0;
+    if (buf[0] == 0) return 0;
+    
+    or_ptr = strstr(buf, "||");
+    if (or_ptr) {
+        *or_ptr = 0;
+        return pp_eval_expr_str(state, buf, depth+1) || pp_eval_expr_str(state, or_ptr + 2, depth+1);
+    }
+    and_ptr = strstr(buf, "&&");
+    if (and_ptr) {
+        *and_ptr = 0;
+        return pp_eval_expr_str(state, buf, depth+1) && pp_eval_expr_str(state, and_ptr + 2, depth+1);
+    }
+    
+    char *op;
+    if ((op = strstr(buf, "=="))) {
+        *op = 0; return pp_eval_expr_str(state, buf, depth+1) == pp_eval_expr_str(state, op+2, depth+1);
+    }
+    if ((op = strstr(buf, "!="))) {
+        *op = 0; return pp_eval_expr_str(state, buf, depth+1) != pp_eval_expr_str(state, op+2, depth+1);
+    }
+    if ((op = strstr(buf, "<="))) {
+        *op = 0; return pp_eval_expr_str(state, buf, depth+1) <= pp_eval_expr_str(state, op+2, depth+1);
+    }
+    if ((op = strstr(buf, ">="))) {
+        *op = 0; return pp_eval_expr_str(state, buf, depth+1) >= pp_eval_expr_str(state, op+2, depth+1);
+    }
+    if ((op = strchr(buf, '<'))) {
+        *op = 0; return pp_eval_expr_str(state, buf, depth+1) < pp_eval_expr_str(state, op+1, depth+1);
+    }
+    if ((op = strchr(buf, '>'))) {
+        *op = 0; return pp_eval_expr_str(state, buf, depth+1) > pp_eval_expr_str(state, op+1, depth+1);
+    }
+    
+    if (buf[0] == '!') return !pp_eval_expr_str(state, buf+1, depth+1);
+    
+    /* parenthesis stripping */
+    if (buf[0] == '(' && buf[j-1] == ')') {
+        buf[j-1] = 0;
+        return pp_eval_expr_str(state, buf+1, depth+1);
+    }
+    
+    if (buf[0] >= '0' && buf[0] <= '9') return strtol(buf, NULL, 0);
+    
+    if (strncmp(buf, "defined", 7) == 0) {
+        char *p = buf + 7;
+        char name[128];
+        int n_idx = 0;
+        while (*p == '(') p++;
+        while (*p && *p != ')' && n_idx < 127) name[n_idx++] = *p++;
+        name[n_idx] = 0;
+        return pp_find_macro(state, name) != 0;
+    }
+    
+    PPMacro *m = pp_find_macro(state, buf);
+    if (m) return pp_eval_expr_str(state, m->body, depth+1);
+    return 0;
+}
+
 static void pp_parse_directive(PPState *state) {
-    char dir[64];
+    char dir[1024];
     int active = pp_is_active(state);
     
     pp_skip_whitespace(state);
-    pp_parse_ident(state, dir, 64);
+    pp_parse_ident(state, dir, 1024);
     pp_skip_whitespace(state);
 
-        if (strcmp(dir, "ifdef") == 0 || strcmp(dir, "ifndef") == 0) {
+    if (strcmp(dir, "ifdef") == 0 || strcmp(dir, "ifndef") == 0) {
         char name[128];
         int is_defined;
         pp_parse_ident(state, name, 128);
         is_defined = (pp_find_macro(state, name) != 0);
-
+        
         state->cond_depth++;
         state->cond_else_seen[state->cond_depth] = 0;
         if (!active) {
@@ -490,36 +443,21 @@ static void pp_parse_directive(PPState *state) {
             else state->cond_stack[state->cond_depth] = !is_defined;
         }
         state->cond_satisfied[state->cond_depth] = state->cond_stack[state->cond_depth];
-        
-        int new_active = 1;
-        int i;
-        for (i = 0; i <= state->cond_depth; i++) if (!state->cond_stack[i]) new_active = 0;
-
-        pp_read_line(state, dir, 64);
-        } else if (strcmp(dir, "if") == 0) {
+        pp_read_line(state, dir, 1024);
+    } else if (strcmp(dir, "if") == 0) {
+        char expr[256];
+        pp_skip_whitespace(state);
+        pp_read_line(state, expr, 256);
         state->cond_depth++;
         state->cond_else_seen[state->cond_depth] = 0;
         if (!active) {
             state->cond_stack[state->cond_depth] = 0;
-            state->cond_satisfied[state->cond_depth] = 0;
         } else {
-            char expr[256];
-            pp_read_line(state, expr, 256);
-            int result = pp_eval_expr(state, expr);
-            state->cond_stack[state->cond_depth] = result;
-            state->cond_satisfied[state->cond_depth] = result;
-            
-            int new_active = 1;
-            int i;
-            for (i = 0; i <= state->cond_depth; i++) if (!state->cond_stack[i]) new_active = 0;
-
+            state->cond_stack[state->cond_depth] = pp_eval_expr_str(state, expr, 0); 
         }
+        state->cond_satisfied[state->cond_depth] = state->cond_stack[state->cond_depth];
     } else if (strcmp(dir, "elif") == 0) {
-        if (state->cond_depth <= 0) {
-            fprintf(stderr, "#elif without #if\\n");
-        } else if (state->cond_else_seen[state->cond_depth]) {
-            fprintf(stderr, "#elif after #else\\n");
-        } else {
+        if (state->cond_depth > 0 && !state->cond_else_seen[state->cond_depth]) {
             char expr[256];
             pp_read_line(state, expr, 256);
             if (state->cond_satisfied[state->cond_depth]) {
@@ -528,16 +466,18 @@ static void pp_parse_directive(PPState *state) {
                 int active_parent = 1;
                 int i;
                 for (i = 0; i < state->cond_depth; i++) if (!state->cond_stack[i]) active_parent = 0;
-                if (!active_parent) {
-                    state->cond_stack[state->cond_depth] = 0;
-                } else {
-                    int result = pp_eval_expr(state, expr);
+                if (active_parent) {
+                    int result = pp_eval_expr_str(state, expr, 0);
                     state->cond_stack[state->cond_depth] = result;
                     if (result) state->cond_satisfied[state->cond_depth] = 1;
+                } else {
+                    state->cond_stack[state->cond_depth] = 0;
                 }
             }
+        } else {
+            pp_read_line(state, dir, 1024);
         }
-} else if (strcmp(dir, "else") == 0) {
+    } else if (strcmp(dir, "else") == 0) {
         if (state->cond_depth > 0) {
             state->cond_else_seen[state->cond_depth] = 1;
             int parent_active = 1;
@@ -554,15 +494,15 @@ static void pp_parse_directive(PPState *state) {
                 state->cond_stack[state->cond_depth] = 0;
             }
         }
-        pp_read_line(state, dir, 64);
+        pp_read_line(state, dir, 1024);
     } else if (strcmp(dir, "endif") == 0) {
-
         if (state->cond_depth > 0) {
             state->cond_satisfied[state->cond_depth] = 0;
             state->cond_else_seen[state->cond_depth] = 0;
             state->cond_depth--;
         }
-        pp_read_line(state, dir, 64);
+
+        pp_read_line(state, dir, 1024);
     } else if (active) {
         if (strcmp(dir, "define") == 0) {
             char name[128];
@@ -583,7 +523,7 @@ static void pp_parse_directive(PPState *state) {
             char name[128];
             pp_parse_ident(state, name, 128);
             pp_undef_macro(state, name);
-            pp_read_line(state, dir, 64);
+            pp_read_line(state, dir, 1024);
         } else if (strcmp(dir, "include") == 0) {
             char inc_path[256];
             int is_system = 0;
@@ -603,12 +543,16 @@ static void pp_parse_directive(PPState *state) {
             pp_read_line(state, msg, 256);
             fprintf(stderr, "zcc preprocessor error: #error %s\n", msg);
         } else {
-            pp_read_line(state, dir, 64);
+            pp_read_line(state, dir, 1024);
         }
+    } else {
+        pp_read_line(state, dir, 1024);
     }
+    
     if (pp_peek(state) == '\n') pp_next(state);
     pp_emit(state, '\n');
 }
+
 
 static void pp_expand_ident(PPState *state, const char *ident) {
     PPMacro *m;
@@ -616,7 +560,10 @@ static void pp_expand_ident(PPState *state, const char *ident) {
     char args[PP_MAX_PARAMS][256];
     char c;
     
-    if (!pp_is_active(state)) return;
+    if (strcmp(ident, "defined") == 0) {
+        pp_emit_str(state, "defined", 7);
+        return;
+    }
     
     m = pp_find_macro(state, ident);
     if (!m) {
@@ -625,15 +572,15 @@ static void pp_expand_ident(PPState *state, const char *ident) {
     }
     
     if (!m->is_function_like) {
-        pp_emit_str(state, m->body, strlen(m->body));
+        m->active = 0;
+        pp_push_input(state, m->body, NULL, m);
         return;
     }
     
     /* Function-like macro expansion */
-    memset(args, 0, sizeof(args));
-    /* check if next non-whitespace is '(' */
     int saved_pos = state->pos;
     int saved_line = state->line;
+    
     pp_skip_whitespace(state);
     if (pp_peek(state) != '(') {
         /* Not an invocation */
@@ -644,6 +591,9 @@ static void pp_expand_ident(PPState *state, const char *ident) {
     }
     pp_next(state); /* consume '(' */
     
+    /* parse arguments */
+    for (i = 0; i < PP_MAX_PARAMS; i++) args[i][0] = 0;
+    
     p_count = 0;
     int paren_level = 0;
     int arg_idx = 0;
@@ -653,30 +603,25 @@ static void pp_expand_ident(PPState *state, const char *ident) {
         c = pp_peek(state);
         
         if (c == '\\') {
-            if (p_count < PP_MAX_PARAMS && arg_idx < 255) {
-                args[p_count][arg_idx++] = c;
-                args[p_count][arg_idx] = 0;
-            }
             pp_next(state);
-            c = pp_peek(state);
-            if (c == 0) break;
-            if (p_count < PP_MAX_PARAMS && arg_idx < 255) {
+            if (pp_peek(state) == '\n') { pp_next(state); continue; }
+            if (p_count < PP_MAX_PARAMS && arg_idx < 254) {
                 args[p_count][arg_idx++] = c;
+                args[p_count][arg_idx++] = pp_next(state);
                 args[p_count][arg_idx] = 0;
-            }
-            pp_next(state);
+            } else { pp_next(state); }
             continue;
         }
         
         if (c == '"' && !in_char) in_string = !in_string;
-        else if (c == '\'' && !in_string) in_char = !in_char;
+        if (c == '\'' && !in_string) in_char = !in_char;
         
         if (!in_string && !in_char) {
             if (c == '(') paren_level++;
             else if (c == ')') {
                 if (paren_level == 0) {
-                    pp_next(state);
-                    p_count++;
+                    pp_next(state); /* consume ')' */
+                    if (arg_idx > 0 || m->num_params > 0) p_count++;
                     break;
                 }
                 paren_level--;
@@ -695,45 +640,76 @@ static void pp_expand_ident(PPState *state, const char *ident) {
         pp_next(state);
     }
     
+    /* PRE-EXPAND ARGUMENTS */
+    char expanded_args[PP_MAX_PARAMS][1024];
+    for (i = 0; i < p_count; i++) { /* using p_count which is correctly set */
+        char *old_out = state->out;
+        int old_out_len = state->out_len;
+        int old_out_cap = state->out_cap;
+        
+        state->out = expanded_args[i];
+        state->out_len = 0;
+        state->out_cap = 1023;
+        
+        /* Evaluate arg[i] as an independent parsing stream */
+        pp_push_input(state, args[i], NULL, NULL);
+        pp_parse_target_depth(state, state->input_depth); 
+        expanded_args[i][state->out_len] = 0;
+        
+        /* restore */
+        state->out = old_out;
+        state->out_len = old_out_len;
+        state->out_cap = old_out_cap;
+    }
+    
     /* substitute */
     int len = strlen(m->body);
+    int est_len = len + (p_count * 256) + 1;
+    char *subst = (char *)malloc(est_len);
+    int subst_idx = 0;
+    
     for (i = 0; i < len; i++) {
         if (is_ident_start(m->body[i])) {
-            char param_name[64];
-            int t = 0;
-            while (i < len && is_ident_char(m->body[i]) && t < 63) param_name[t++] = m->body[i++];
-            param_name[t] = 0;
+            char param_name[128];
+            int p_idx = 0;
+            while (i < len && is_ident_char(m->body[i]) && p_idx < 127) {
+                param_name[p_idx++] = m->body[i++];
+            }
+            param_name[p_idx] = 0;
             i--; /* backup */
             
-            /* See if it matches a parameter */
             int found = -1;
             int j;
             for (j = 0; j < m->num_params; j++) {
-                if (strcmp(param_name, m->params[j]) == 0) { found = j; break; }
+                if (strcmp(m->params[j], param_name) == 0) {
+                    found = j;
+                    break;
+                }
             }
             
-            if (found >= 0) {
-                pp_emit_str(state, args[found], strlen(args[found]));
+            if (found >= 0 && found < p_count) {
+                strcpy(subst + subst_idx, expanded_args[found]);
+                subst_idx += strlen(expanded_args[found]);
             } else {
-                pp_emit_str(state, param_name, strlen(param_name));
+                strcpy(subst + subst_idx, param_name);
+                subst_idx += strlen(param_name);
             }
         } else {
-            pp_emit(state, m->body[i]);
+            subst[subst_idx++] = m->body[i];
         }
     }
+    subst[subst_idx] = 0;
+    
+    /* Standard C preprocessor hide-set logic */
+    m->active = 0;
+    pp_push_input(state, subst, subst, m);
 }
 
-static void pp_parse(PPState *state) {
+static void pp_parse_target_depth(PPState *state, int target_depth) {
     int in_string = 0;
-    while (pp_peek(state) != 0) {
+    while (1) {
         char c = pp_peek(state);
-        
-        static int logged_1429 = 0;
-        if (state->line == 1429 && !logged_1429) {
-            FILE *f = fopen("pp_trace.log", "a");
-            if (f) { fprintf(f, "LINE 1429 REACHED! active=%d depth=%d cond[1]=%d new_active=%d\\n", pp_is_active(state), state->cond_depth, state->cond_stack[1], state->cond_stack[0] && state->cond_stack[1] && state->cond_stack[2] && state->cond_stack[3]); fclose(f); }
-            logged_1429 = 1;
-        }
+        if (state->input_depth < target_depth || c == 0) break;
         
         if (c == '"' || c == '\'') {
             in_string = c;
@@ -786,13 +762,6 @@ static void pp_parse(PPState *state) {
         }
 
         if (c == '#') {
-            if (state->line > 3680) {
-                FILE *trace = fopen("pp_trace.log", "a");
-                if (trace) {
-                    fprintf(trace, "HIT '#' AT LINE %d (active=%d)\\n", state->line, pp_is_active(state));
-                    fclose(trace);
-                }
-            }
             pp_next(state);
             pp_parse_directive(state);
             continue;
@@ -822,18 +791,22 @@ char *zcc_preprocess(const char *source, int source_len,
     
     state->cond_stack[0] = 1;
     
-    pp_parse(state);
+    {
+        PPMacro *m = pp_add_macro(state, "__x86_64__");
+        strcpy(m->body, "1");
+        m = pp_add_macro(state, "__GNUC__");
+        strcpy(m->body, "1");
+        m = pp_add_macro(state, "__thread");
+        strcpy(m->body, "");
+    }
+
+    pp_parse_target_depth(state, 0);
     
     pp_emit(state, 0);
     if (out_len) *out_len = state->out_len - 1;
     result = state->out;
-    
-    FILE *dump = fopen("pp_dump.c", "wb");
-    if (dump) {
-        fwrite(result, 1, state->out_len - 1, dump);
-        fclose(dump);
-    }
-    
     free(state);
     return result;
 }
+
+/* ================================================================ */

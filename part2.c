@@ -338,6 +338,10 @@ static Keyword keywords[] = {
     {"union",     TK_UNION},
     {"enum",      TK_ENUM},
     {"typedef",   TK_TYPEDEF},
+    {"typeof",    TK_TYPEOF},
+    {"__typeof__", TK_TYPEOF},
+    {"__typeof",  TK_TYPEOF},
+    {"__auto_type", TK_AUTO_TYPE},
     {"sizeof",    TK_SIZEOF},
     {"__builtin_va_arg", TK_BUILTIN_VA_ARG},
     {"static",    TK_STATIC},
@@ -362,11 +366,6 @@ static Keyword keywords[] = {
     {"restrict",  TK_VOLATILE},
     {"__int128",   TK_LONG},
     {"__int128_t", TK_LONG},
-    {"typeof",     TK_TYPEOF},
-    {"__typeof__", TK_TYPEOF},
-    {"__typeof",   TK_TYPEOF},
-    {"__auto_type", TK_AUTO_TYPE},
-    {"_Generic",   TK_GENERIC},
     {0, 0}
 };
 
@@ -411,15 +410,14 @@ static int lookup_keyword_fallback(char *buf, int len) {
     if (len==5 && buf[0]=='u'&&buf[1]=='n'&&buf[2]=='i'&&buf[3]=='o'&&buf[4]=='n') return TK_UNION;
     if (len==4 && buf[0]=='e'&&buf[1]=='n'&&buf[2]=='u'&&buf[3]=='m') return TK_ENUM;
     if (len==6 && buf[0]=='s'&&buf[1]=='i'&&buf[2]=='z'&&buf[3]=='e'&&buf[4]=='o'&&buf[5]=='f') return TK_SIZEOF;
-    if (len==6 && buf[0]=='t'&&buf[1]=='y'&&buf[2]=='p'&&buf[3]=='e'&&buf[4]=='o'&&buf[5]=='f') return TK_TYPEOF;
-    if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='t'&&buf[3]=='y'&&buf[4]=='p'&&buf[5]=='e'&&buf[6]=='o'&&buf[7]=='f') return TK_TYPEOF;
-    if (len==10 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='t'&&buf[3]=='y'&&buf[4]=='p'&&buf[5]=='e'&&buf[6]=='o'&&buf[7]=='f'&&buf[8]=='_'&&buf[9]=='_') return TK_TYPEOF;
-    if (len==11 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='a'&&buf[3]=='u'&&buf[4]=='t'&&buf[5]=='o'&&buf[6]=='_'&&buf[7]=='t'&&buf[8]=='y'&&buf[9]=='p'&&buf[10]=='e') return TK_AUTO_TYPE;
     if (len==6 && buf[0]=='s'&&buf[1]=='t'&&buf[2]=='a'&&buf[3]=='t'&&buf[4]=='i'&&buf[5]=='c') return TK_STATIC;
     if (len==6 && buf[0]=='e'&&buf[1]=='x'&&buf[2]=='t'&&buf[3]=='e'&&buf[4]=='r'&&buf[5]=='n') return TK_EXTERN;
     if (len==5 && buf[0]=='c'&&buf[1]=='o'&&buf[2]=='n'&&buf[3]=='s'&&buf[4]=='t') return TK_CONST;
     if (len==4 && buf[0]=='a'&&buf[1]=='u'&&buf[2]=='t'&&buf[3]=='o') return TK_AUTO;
     if (len==6 && buf[0]=='i'&&buf[1]=='n'&&buf[2]=='l'&&buf[3]=='i'&&buf[4]=='n'&&buf[5]=='e') return TK_INLINE;
+    if (len==6 && buf[0]=='t'&&buf[1]=='y'&&buf[2]=='p'&&buf[3]=='e'&&buf[4]=='o'&&buf[5]=='f') return TK_TYPEOF;
+    if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='t'&&buf[3]=='y'&&buf[4]=='p'&&buf[5]=='e'&&buf[6]=='o'&&buf[7]=='f') return TK_TYPEOF;
+    if (len==10 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='t'&&buf[3]=='y'&&buf[4]=='p'&&buf[5]=='e'&&buf[6]=='o'&&buf[7]=='f'&&buf[8]=='_'&&buf[9]=='_') return TK_TYPEOF;
     /* 7–8 char keywords: need len check then safe indices 0..6 or 0..7 */
     if (len==7 && buf[0]=='t'&&buf[1]=='y'&&buf[2]=='p'&&buf[3]=='e'&&buf[4]=='d'&&buf[5]=='e'&&buf[6]=='f') return TK_TYPEDEF;
     if (len==7 && buf[0]=='d'&&buf[1]=='e'&&buf[2]=='f'&&buf[3]=='a'&&buf[4]=='u'&&buf[5]=='l'&&buf[6]=='t') return TK_DEFAULT;
@@ -429,7 +427,6 @@ static int lookup_keyword_fallback(char *buf, int len) {
     if (len==8 && buf[0]=='r'&&buf[1]=='e'&&buf[2]=='g'&&buf[3]=='i'&&buf[4]=='s'&&buf[5]=='t'&&buf[6]=='e'&&buf[7]=='r') return TK_REGISTER;
     if (len==8 && buf[0]=='r'&&buf[1]=='e'&&buf[2]=='s'&&buf[3]=='t'&&buf[4]=='r'&&buf[5]=='i'&&buf[6]=='c'&&buf[7]=='t') return TK_VOLATILE;
     if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='c'&&buf[3]=='o'&&buf[4]=='n'&&buf[5]=='s'&&buf[6]=='t') return TK_CONST;
-    if (len==8 && buf[0]=='_'&&buf[1]=='G'&&buf[2]=='e'&&buf[3]=='n'&&buf[4]=='e'&&buf[5]=='r'&&buf[6]=='i'&&buf[7]=='c') return TK_GENERIC;
     if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='s'&&buf[3]=='i'&&buf[4]=='g'&&buf[5]=='n'&&buf[6]=='e'&&buf[7]=='d') return TK_SIGNED;
     if (len==8 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='i'&&buf[3]=='n'&&buf[4]=='l'&&buf[5]=='i'&&buf[6]=='n'&&buf[7]=='e') return TK_INLINE;
     if (len==9 && buf[0]=='_'&&buf[1]=='_'&&buf[2]=='c'&&buf[3]=='o'&&buf[4]=='n'&&buf[5]=='s'&&buf[6]=='t'&&buf[7]=='_'&&buf[8]=='_') return TK_CONST;

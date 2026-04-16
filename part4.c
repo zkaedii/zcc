@@ -650,9 +650,6 @@ void codegen_expr(Compiler *cc, Node *node) {
       fprintf(cc->out, "    movq $0, %%rax\n");
       return;
     }
-    if (node->lhs->kind == ND_MEMBER) {
-        fprintf(stderr, "PART4 ND_ASSIGN: member=%s is_bf=%d bs=%d bo=%d\n", node->lhs->member_name, node->lhs->is_bitfield, node->lhs->bit_size, node->lhs->bit_offset);
-    }
     /* Use member_size for ND_MEMBER so stage2 stores 4 bytes to cc->tk etc.,
      * not 8 */
     if (node->lhs->kind == ND_MEMBER && node->lhs->member_size > 0) {
@@ -674,27 +671,8 @@ void codegen_expr(Compiler *cc, Node *node) {
         /* If member type is pointer/func, always use movq regardless of member_size */
         if (node->lhs->type && is_pointer(node->lhs->type)) {
           if (backend_ops) fprintf(cc->out, "    str r1, [r0]\n");
-          else fprintf(cc->out, "    movq %%r11, (%%rax)\n");
+      else fprintf(cc->out, "    movq %%r11, (%%rax)\n");
         } else {
-        if (!backend_ops && node->lhs->is_bitfield) {
-            long long mask = (1ULL << node->lhs->bit_size) - 1;
-            long long shifted_mask = ~(mask << node->lhs->bit_offset);
-            switch(node->lhs->member_size) {
-                case 1: fprintf(cc->out, "    movzbl (%%rax), %%r10d\n"); break;
-                case 2: fprintf(cc->out, "    movzwl (%%rax), %%r10d\n"); break;
-                case 4: fprintf(cc->out, "    movl (%%rax), %%r10d\n"); break;
-                default: fprintf(cc->out, "    movq (%%rax), %%r10\n"); break;
-            }
-            fprintf(cc->out, "    movq $0x%llx, %%r8\n", (unsigned long long)shifted_mask);
-            fprintf(cc->out, "    andq %%r8, %%r10\n");
-            fprintf(cc->out, "    movq $0x%llx, %%r8\n", (unsigned long long)mask);
-            fprintf(cc->out, "    andq %%r8, %%r11\n");
-            if (node->lhs->bit_offset > 0) {
-                fprintf(cc->out, "    movb $%d, %%cl\n", node->lhs->bit_offset);
-                fprintf(cc->out, "    shlq %%cl, %%r11\n");
-            }
-            fprintf(cc->out, "    orq %%r10, %%r11\n");
-        }
         switch (node->lhs->member_size) {
         case 1:
           if (backend_ops) fprintf(cc->out, "    strb r1, [r0]\n");
@@ -1877,17 +1855,9 @@ void codegen_expr(Compiler *cc, Node *node) {
         case 8:
           fprintf(cc->out, "    movq (%%rax), %%rax\n");
           break;
+        default:
           break;
         }
-      }
-      if (!backend_ops && node->is_bitfield) {
-          if (node->bit_offset > 0) {
-              fprintf(cc->out, "    movb $%d, %%cl\n", node->bit_offset);
-              fprintf(cc->out, "    shrq %%cl, %%rax\n");
-          }
-          long long mask = (1ULL << node->bit_size) - 1;
-          fprintf(cc->out, "    movq $0x%llx, %%r8\n", (unsigned long long)mask);
-          fprintf(cc->out, "    andq %%r8, %%rax\n");
       }
       {
         char *dst = ir_bridge_fresh_tmp();
@@ -2526,23 +2496,6 @@ void codegen_stmt(Compiler *cc, Node *node) {
   }
 
   switch (node->kind) {
-  case ND_RSP_SAVE: {
-      if (!backend_ops && node->member_offset) {
-          int off = node->member_offset;
-          if (off > 0) off = -off;
-          fprintf(cc->out, "    movq %%rsp, %d(%%rbp)\n", off);
-      }
-      return;
-  }
-
-  case ND_RSP_RESTORE: {
-      if (!backend_ops && node->member_offset) {
-          int off = node->member_offset;
-          if (off > 0) off = -off;
-          fprintf(cc->out, "    movq %d(%%rbp), %%rsp\n", off);
-      }
-      return;
-  }
 
   case ND_RETURN:
     if (node->lhs) {

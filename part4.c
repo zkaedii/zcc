@@ -2,6 +2,11 @@
 /* CODE GENERATOR — x86-64 Linux (System V) or Windows x64 ABI      */
 /* ================================================================ */
 
+#ifndef ZCC_AST_BRIDGE_H
+/* Exclusively for standalone IDE analysis */
+#include "part1.c"
+#endif
+
 #include "ir_emit_dispatch.h"
 #include "ir_bridge.h"
 
@@ -88,12 +93,12 @@ static void emit_label_fmt(Compiler *cc, int n, int fmt) {
   }
   switch (fmt) {
   case FMT_JE:
-    if (backend_ops) fprintf(cc->out, "    beq .L%d\n" \
-    ); else fprintf(cc->out, "    je .L%d\n", n);
+    if (backend_ops) fprintf(cc->out, "    beq .L%d\n", n);
+    else fprintf(cc->out, "    je .L%d\n", n);
     break;
   case FMT_JMP:
-    if (backend_ops) fprintf(cc->out, "    b .L%d\n" \
-    ); else fprintf(cc->out, "    jmp .L%d\n", n);
+    if (backend_ops) fprintf(cc->out, "    b .L%d\n", n);
+    else fprintf(cc->out, "    jmp .L%d\n", n);
     break;
   case FMT_DEF:
     fprintf(cc->out, ".L%d:\n", n);
@@ -543,7 +548,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     fprintf(cc->out, "    .section .rodata\n");
     fprintf(cc->out, "    .p2align 3\n");
     fprintf(cc->out, ".L_flit_%d:\n", lbl);
-    memcpy(&bits, &node->f_val, 8);
+    memcpy(&bits, &node->f_val, sizeof(double));
     fprintf(cc->out, "    .quad %llu\n", bits);
     fprintf(cc->out, "    .text\n");
     fprintf(cc->out, "    movsd .L_flit_%d(%%rip), %%xmm0\n", lbl);
@@ -551,8 +556,8 @@ void codegen_expr(Compiler *cc, Node *node) {
     /* Satisfy IR subsystem sequence */
     {
       char *dst = ir_bridge_fresh_tmp();
-      long flit_bits;
-      memcpy(&flit_bits, &node->f_val, 8);
+      long long flit_bits;
+      memcpy(&flit_bits, &node->f_val, sizeof(double));
       ZCC_EMIT_FCONST(dst, flit_bits, node->line);
     }
     return;

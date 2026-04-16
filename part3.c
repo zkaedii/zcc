@@ -1,3 +1,8 @@
+#ifndef ZCC_AST_BRIDGE_H
+/* Exclusively for standalone IDE analysis */
+#include "part1.c"
+#endif
+
 /* ================================================================ */
 /* PARSER                                                            */
 /* ================================================================ */

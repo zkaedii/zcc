@@ -263,8 +263,8 @@ int main(void) {
     const int height = 480;
     const int samples_per_pixel = 1;
     
-    /* VLA FRAMEBUFFER (CG-006) - Dynamic allocation on stack */
-    unsigned char framebuffer[height][width][3];
+    /* NORMALIZED C89: Heap allocation to prevent stack segment fault */
+    unsigned char (*framebuffer)[640][3] = malloc(480 * 640 * 3);
     
     Scene scene;
     setup_scene(&scene);
@@ -333,5 +333,6 @@ int main(void) {
     }
     
     fprintf(stderr, "Render complete!\n");
+    free(framebuffer);
     return 0;
 }

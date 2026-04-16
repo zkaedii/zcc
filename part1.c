@@ -281,6 +281,8 @@ struct Node {
     Node *next;
 };
 
+char *zcc_preprocess(const char *source, int source_len, const char *filename, const char *include_paths, int *out_len);
+
 #include "zcc_ast_bridge.h"
 
 /* Keep nd_to_znd mapping in sync with this file's enum. */

@@ -1,3 +1,8 @@
+#ifndef ZCC_AST_BRIDGE_H
+/* Exclusively for standalone IDE analysis */
+#include "part1.c"
+#endif
+
 /* ================================================================ */
 /* PART 6: ARM TARGET BACKEND (thumbv6m)                             */
 /* ================================================================ */
@@ -107,6 +112,19 @@ static void thumb_emit_store_stack(Compiler *cc, int offset, const char *reg) {
     }
 }
 
+static void thumb_emit_float_binop(Compiler *cc, int op) {
+    const char *fn = 0;
+    switch (op) {
+        case ND_FADD: fn = "__aeabi_fadd"; break;
+        case ND_FSUB: fn = "__aeabi_fsub"; break;
+        case ND_FMUL: fn = "__aeabi_fmul"; break;
+        case ND_FDIV: fn = "__aeabi_fdiv"; break;
+    }
+    if (fn) {
+        fprintf(cc->out, "    bl %s\n", fn);
+    }
+}
+
 TargetBackend backend_thumbv6m = {
     4, /* ptr_size */
     thumb_emit_prologue,
@@ -114,5 +132,6 @@ TargetBackend backend_thumbv6m = {
     thumb_emit_call,
     thumb_emit_binary_op,
     thumb_emit_load_stack,
-    thumb_emit_store_stack
+    thumb_emit_store_stack,
+    thumb_emit_float_binop
 };

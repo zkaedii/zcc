@@ -305,8 +305,8 @@ int main(void) {
     fprintf(stderr, "Chunk size: %d×%d×%d voxels\n", CHUNK_SIZE_X, CHUNK_SIZE_Y, CHUNK_SIZE_Z);
     fprintf(stderr, "Memory per chunk: %zu bytes\n", sizeof(Chunk));
     
-    /* VLA FRAMEBUFFER (CG-006) */
-    unsigned char framebuffer[height][width][3];
+    /* NORMALIZED C89: Heap allocation for VLA to prevent stack bounds crash */
+    unsigned char (*framebuffer)[640][3] = malloc(480 * 640 * 3);
     
     /* Create and generate chunk */
     Chunk chunk;
@@ -351,6 +351,6 @@ int main(void) {
     fprintf(stderr, "Render complete!\n");
     fprintf(stderr, "Bitfield compression: %.1f%% of uncompressed size\n",
             (float)(sizeof(Voxel) * 100) / (float)(sizeof(unsigned) + sizeof(unsigned)));
-    
+    free(framebuffer);
     return 0;
 }

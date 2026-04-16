@@ -5,6 +5,15 @@
 
 #include "ir_emit_dispatch.h"
 
+#ifndef ZCC_AST_BRIDGE_H
+/* 
+ * This block is exclusively for IDE syntax analysis when viewing part5.c alone.
+ * Since part1.c #includes zcc_ast_bridge.h, this #ifndef prevents infinite loops
+ * and double-definitions when part1...5 are concatenated into zcc.c.
+ */
+#include "part1.c"
+#endif
+
 static void init_compiler(Compiler *cc) {
   /* zero everyt5555hing — cc was calloc'd */
 
@@ -433,19 +442,19 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[i], "--ir") == 0) {
       g_emit_ir = 1;
       g_ir_primary = 1;
+    } else if (strncmp(argv[i], "-l", 2) == 0 || strncmp(argv[i], "-L", 2) == 0 || strncmp(argv[i], "-O", 2) == 0) {
+      /* ignore linker flags */
     } else {
       input_file = argv[i];
     }
   }
 
   if (!zcc_verbose_flag) {
-/*
 #ifdef _WIN32
     freopen("nul", "w", stderr);
 #else
     freopen("/dev/null", "w", stderr);
 #endif
-*/
   }
 
   if (!input_file) {
@@ -469,13 +478,6 @@ int main(int argc, char **argv) {
   {
     int pp_len;
     char *pp_source = zcc_preprocess(source, source_len, input_file, ".:./include", &pp_len);
-    {
-        FILE *debug_pp = fopen("preprocessed.i", "wb");
-        if (debug_pp) {
-            fwrite(pp_source, 1, strlen(pp_source), debug_pp);
-            fclose(debug_pp);
-        }
-    }
     if (!pp_source) {
       fprintf(stderr, "zcc: preprocessing failed\n");
       return 1;
@@ -530,11 +532,11 @@ int main(int argc, char **argv) {
   }
 
   /* lex first token */
-  printf("[Phase 1] Lexical Array Bootstrap... OK\n"); fflush(stdout);
+  printf("[Phase 1] Lexical Array Bootstrap... OK\n");
   next_token(cc);
 
   /* parse */
-  printf("[Phase 2] AST Topological Generation... "); fflush(stdout);
+  printf("[Phase 2] AST Topological Generation... ");
   prog = parse_program(cc);
 
   if (cc->errors > 0) {
@@ -546,11 +548,11 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  printf("OK\n"); fflush(stdout);
+  printf("OK\n");
 
   /* generate code */
-  printf("[Phase 3] Native AST Constant Folding... OK\n"); fflush(stdout);
-  printf("[Phase 4] SystemV ABI X86-64 Codegen... OK\n"); fflush(stdout);
+  printf("[Phase 3] Native AST Constant Folding... OK\n");
+  printf("[Phase 4] SystemV ABI X86-64 Codegen... OK\n");
   fprintf(cc->out, "# ZCC asm begin\n");
   codegen_program(cc, prog);
   fclose(cc->out);
@@ -580,8 +582,8 @@ int main(int argc, char **argv) {
     printf("[Phase 6] GCC Assembly/Linker Binding... ");
     if (compile_only) {
       sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -c -o %s %s 2>&1", output_file, asm_file);
-    } else if (strcmp(input_file, "zcc.c") == 0 || strcmp(input_file, "zcc_pp.c") == 0 || (strlen(input_file) >= 6 && strcmp(input_file + strlen(input_file) - 6, "/zcc.c") == 0) || (strlen(input_file) >= 9 && strcmp(input_file + strlen(input_file) - 9, "/zcc_pp.c") == 0)) {
-      sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -o %s %s compiler_passes.c compiler_passes_ir.c -lm 2>&1", output_file, asm_file);
+    } else if (strcmp(input_file, "zcc.c") == 0 || (strlen(input_file) >= 6 && strcmp(input_file + strlen(input_file) - 6, "/zcc.c") == 0)) {
+      sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -o %s %s compiler_passes.c compiler_passes_ir.c ir_pass_manager.c -lm 2>&1", output_file, asm_file);
     } else {
       sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -o %s %s -lm -lpthread -ldl 2>&1", output_file, asm_file);
     }

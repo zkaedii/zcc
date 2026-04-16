@@ -216,8 +216,6 @@ static long long parse_const_expr_primary(Compiler *cc) {
     return 0;
 }
 
-
-
 static Type *parse_struct_or_union(Compiler *cc, int is_union) {
     Type *stype;
     char tag[MAX_IDENT];
@@ -268,15 +266,11 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
         int offset;
         int max_size;
         int max_align;
-        int current_bit_offset;
-        int bf_base_sz;
 
         last_field = 0;
         offset = 0;
         max_size = 0;
         max_align = 1;
-        current_bit_offset = 0;
-        bf_base_sz = 0;
 
         while (cc->tk != TK_RBRACE) {
             Type *ftype;
@@ -284,88 +278,81 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
             char fname[MAX_IDENT];
             StructField *field;
             int falign;
-            int bit_sz;
 
             if (cc->tk == TK_EOF) break;
 
             base_ftype = parse_type(cc);
-            do {
-                fname[0] = 0;
-                bit_sz = -1;
-                ftype = parse_declarator(cc, base_ftype, fname);
+            ftype = parse_declarator(cc, base_ftype, fname);
 
+            /* Ignore bitfield size since ZCC allocates full integers for them */
+            if (cc->tk == TK_COLON) {
+                next_token(cc);
+                parse_const_expr(cc);
+            }
+
+            field = (StructField *)cc_alloc(cc, sizeof(StructField));
+            strncpy(field->name, fname, MAX_IDENT - 1);
+            field->type = ftype;
+
+            falign = type_align(ftype);
+            if (falign > max_align) max_align = falign;
+
+            if (is_union) {
+                field->offset = 0;
+                if (type_size(ftype) > max_size) max_size = type_size(ftype);
+            } else {
+                /* align offset */
+                if (falign > 1) {
+                    offset = (offset + falign - 1) & ~(falign - 1);
+                }
+                field->offset = offset;
+                offset = offset + type_size(ftype);
+            }
+
+            field->next = 0;
+            if (last_field) {
+                last_field->next = field;
+            } else {
+                stype->fields = field;
+            }
+            last_field = field;
+
+            /* handle multiple declarators: int *next, *prev; */
+            while (cc->tk == TK_COMMA) {
+                Type *ftype2;
+                char fname2[MAX_IDENT];
+                StructField *field2;
+                int falign2;
+                next_token(cc);
+                ftype2 = parse_declarator(cc, base_ftype, fname2);
+
+                /* Ignore bitfield size since ZCC allocates full integers */
                 if (cc->tk == TK_COLON) {
                     next_token(cc);
-                    bit_sz = (int)parse_const_expr(cc);
+                    parse_const_expr(cc);
                 }
 
-                field = (StructField *)cc_alloc(cc, sizeof(StructField));
-                strncpy(field->name, fname, MAX_IDENT - 1);
-                field->type = ftype;
-                field->is_bitfield = 0;
-                field->bit_offset = 0;
-                field->bit_size = 0;
-
-                falign = type_align(ftype);
-                if (falign > max_align) max_align = falign;
-
+                field2 = (StructField *)cc_alloc(cc, sizeof(StructField));
+                strncpy(field2->name, fname2, MAX_IDENT - 1);
+                field2->type = ftype2;
+                falign2 = type_align(ftype2);
+                if (falign2 > max_align) max_align = falign2;
                 if (is_union) {
-                    field->offset = 0;
-                    if (type_size(ftype) > max_size) max_size = type_size(ftype);
-                    if (bit_sz >= 0) {
-                        field->is_bitfield = 1;
-                        field->bit_size = bit_sz;
-                    }
+                    field2->offset = 0;
+                    if (type_size(ftype2) > max_size) max_size = type_size(ftype2);
                 } else {
-                    if (bit_sz >= 0) {
-                        int type_bits = type_size(ftype) * 8;
-                        if (bit_sz == 0 || current_bit_offset + bit_sz > type_bits) {
-                            if (current_bit_offset > 0) {
-                                offset += bf_base_sz; /* flush prev bitfield */
-                                current_bit_offset = 0;
-                            }
-                        }
-                        if (bit_sz > 0) {
-                            if (current_bit_offset == 0) {
-                                offset = (offset + falign - 1) & ~(falign - 1);
-                                bf_base_sz = type_size(ftype);
-                            }
-                            field->offset = offset;
-                            field->is_bitfield = 1;
-                            field->bit_offset = current_bit_offset;
-                            field->bit_size = bit_sz;
-                            current_bit_offset += bit_sz;
-                        } else {
-                            field->offset = offset;
-                        }
-                    } else {
-                        if (current_bit_offset > 0) {
-                            offset += bf_base_sz;
-                            current_bit_offset = 0;
-                        }
-                        if (falign > 1) {
-                            offset = (offset + falign - 1) & ~(falign - 1);
-                        }
-                        field->offset = offset;
-                        offset += type_size(ftype);
+                    if (falign2 > 1) {
+                        offset = (offset + falign2 - 1) & ~(falign2 - 1);
                     }
+                    field2->offset = offset;
+                    offset = offset + type_size(ftype2);
                 }
+                field2->next = 0;
+                last_field->next = field2;
+                last_field = field2;
+            }
 
-                field->next = 0;
-                if (last_field) last_field->next = field;
-                else stype->fields = field;
-                last_field = field;
-
-                if (cc->tk == TK_COMMA) {
-                    next_token(cc);
-                } else {
-                    break;
-                }
-            } while (1);
             expect(cc, TK_SEMI);
-        }
-        if (current_bit_offset > 0) {
-            offset += bf_base_sz;
         }
 
             if (is_union) {
@@ -450,8 +437,6 @@ static Type *parse_enum_def(Compiler *cc) {
 /* Parse base type                                                   */
 /* ---------------------------------------------------------------- */
 
-Node *parse_expr(Compiler *cc);
-
 Type *parse_type(Compiler *cc) {
     Type *type = 0;
     int is_unsigned = 0;
@@ -486,19 +471,6 @@ Type *parse_type(Compiler *cc) {
         else if (cc->tk == TK_DOUBLE) { is_double = 1; next_token(cc); }
         else if (cc->tk == TK_FLOAT) { is_float = 1; next_token(cc); }
         else if (cc->tk == TK_VOID) { is_void = 1; next_token(cc); }
-        else if (cc->tk == TK_TYPEOF) {
-            next_token(cc);
-            expect(cc, TK_LPAREN);
-            Node *expr = parse_expr(cc);
-            expect(cc, TK_RPAREN);
-            type = expr->type;
-            if (!type) type = cc->ty_int;
-        }
-        else if (cc->tk == TK_AUTO_TYPE) {
-            next_token(cc);
-            type = type_new(cc, TY_VOID);
-            type->size = 0; /* placeholder */
-        }
         else break;
     }
 
@@ -533,6 +505,19 @@ Type *parse_type(Compiler *cc) {
         else if (cc->tk == TK_ENUM) {
             next_token(cc);
             type = parse_enum_def(cc);
+        }
+        else if (cc->tk == TK_TYPEOF) {
+            next_token(cc);
+            expect(cc, TK_LPAREN);
+            Node *expr = parse_expr(cc);
+            expect(cc, TK_RPAREN);
+            type = expr->type;
+            if (!type) type = cc->ty_int;
+        }
+        else if (cc->tk == TK_AUTO_TYPE) {
+            next_token(cc);
+            type = type_new(cc, TY_VOID);
+            type->size = 0; /* placeholder */
         }
         else if (cc->tk == TK_IDENT) {
             /* could be a typedef name */
@@ -1005,7 +990,6 @@ static StructField *find_struct_member(Type *type, const char *name, int *out_of
         if (f->name[0]) {
             if (strcmp(f->name, name) == 0) {
                 *out_offset = f->offset;
-                fprintf(stderr, "FOUND FIELD: %s, is_bf=%d, bf_sz=%d\n", f->name, f->is_bitfield, f->bit_size);
                 return f;
             }
         } else if (f->type && (f->type->kind == TY_STRUCT || f->type->kind == TY_UNION)) {
@@ -1078,9 +1062,6 @@ Node *parse_postfix(Compiler *cc) {
                     member->member_offset = accumulated_offset;
                     member->type = f->type;
                     member->member_size = type_size(f->type);
-                    member->is_bitfield = f->is_bitfield;
-                    member->bit_offset = f->bit_offset;
-                    member->bit_size = f->bit_size;
                 } else {
                     char buf[256];
                     sprintf(buf, "unknown struct member '%s' in struct '%s' (type=%p, fields=%p)", cc->tk_text, (n->type && n->type->tag[0]) ? n->type->tag : "<anon>", (void*)n->type, n->type ? (void*)n->type->fields : NULL);
@@ -1126,9 +1107,6 @@ Node *parse_postfix(Compiler *cc) {
                     n->member_offset = accumulated_offset;
                     n->type = f->type;
                     n->member_size = type_size(f->type);
-                    n->is_bitfield = f->is_bitfield;
-                    n->bit_offset = f->bit_offset;
-                    n->bit_size = f->bit_size;
                 } else {
                     char buf[256];
                     sprintf(buf, "unknown struct member '%s' after -> in struct '%s' (type=%p, fields=%p)", cc->tk_text, (deref->type && deref->type->tag[0]) ? deref->type->tag : "<anon>", (void*)deref->type, deref->type ? (void*)deref->type->fields : NULL);
@@ -1265,70 +1243,11 @@ Node *parse_postfix(Compiler *cc) {
 
 /* --- unary: -, +, !, ~, *, &, ++, --, cast, sizeof --- */
 
-static int types_equal(Type *a, Type *b) {
-    if (!a || !b) return 0;
-    if (a->kind != b->kind) return 0;
-    if (a->kind == TY_PTR) return types_equal(a->base, b->base);
-    if (a->kind == TY_ARRAY) return a->array_len == b->array_len && types_equal(a->base, b->base);
-    if (a->kind == TY_STRUCT || a->kind == TY_UNION) return strcmp(a->tag, b->tag) == 0;
-    return 1;
-}
-
 Node *parse_unary(Compiler *cc) {
     int line;
     Node *n;
 
     line = cc->tk_line;
-
-    if (cc->tk == TK_GENERIC) {
-        next_token(cc); /* consume _Generic */
-        expect(cc, TK_LPAREN);
-        Node *expr_n = parse_assign(cc);
-        Type *expr_type = expr_n->type;
-        expect(cc, TK_COMMA);
-        
-        Node *selected_case = 0;
-        int default_matched = 0;
-        int exact_match = 0;
-        
-        while (cc->tk != TK_RPAREN && cc->tk != TK_EOF) {
-            int is_default = 0;
-            Type *case_type = 0;
-            if (cc->tk == TK_DEFAULT) {
-                is_default = 1;
-                next_token(cc);
-            } else {
-                char dummy[MAX_IDENT];
-                case_type = parse_type(cc);
-                case_type = parse_declarator(cc, case_type, dummy);
-            }
-            expect(cc, TK_COLON);
-            Node *case_expr = parse_assign(cc);
-            
-            if (!exact_match) {
-                if (is_default) {
-                    if (!selected_case) {
-                        selected_case = case_expr;
-                        default_matched = 1;
-                    }
-                } else if (types_equal(expr_type, case_type)) {
-                    selected_case = case_expr;
-                    exact_match = 1;
-                }
-            }
-            
-            if (cc->tk == TK_COMMA) {
-                next_token(cc);
-            } else {
-                break;
-            }
-        }
-        expect(cc, TK_RPAREN);
-        if (!selected_case) {
-            error(cc, "_Generic: no matching type found");
-        }
-        return selected_case;
-    }
 
     if (cc->tk == TK_SIZEOF) {
         Type *t = 0;
@@ -1941,33 +1860,6 @@ Node *parse_expr(Compiler *cc) {
 
 static Node *current_sw = 0;
 
-static int push_vla_scope(Compiler *cc) {
-    int sp_off = cc->local_offset + 8;
-    cc->local_offset += 8;
-    if (cc->vla_sp_depth < 100) cc->vla_sp_offsets[cc->vla_sp_depth++] = sp_off;
-    return sp_off;
-}
-
-static Node *wrap_vla_scope(Compiler *cc, Node *body, int sp_off) {
-    if (!body) return body;
-    Node *sp_save = node_new(cc, ND_RSP_SAVE, body->line);
-    sp_save->member_offset = sp_off;
-    Node *sp_restore = node_new(cc, ND_RSP_RESTORE, body->line);
-    sp_restore->member_offset = sp_off;
-    
-    Node *nblock = node_new(cc, ND_BLOCK, body->line);
-    nblock->stmts = (Node **)cc_alloc(cc, 3 * sizeof(Node*));
-    nblock->stmts[0] = sp_save;
-    nblock->stmts[1] = body;
-    nblock->stmts[2] = sp_restore;
-    nblock->num_stmts = 3;
-    return nblock;
-}
-
-static void pop_vla_scope(Compiler *cc) {
-    if (cc->vla_sp_depth > 0) cc->vla_sp_depth--;
-}
-
 Node *parse_stmt(Compiler *cc) {
     int line;
     line = cc->tk_line;
@@ -2079,10 +1971,7 @@ Node *parse_stmt(Compiler *cc) {
         wh = node_new(cc, ND_WHILE, line);
         wh->cond = parse_expr(cc);
         expect(cc, TK_RPAREN);
-        int sp_off = push_vla_scope(cc);
-        Node *body = parse_stmt(cc);
-        pop_vla_scope(cc);
-        wh->body = wrap_vla_scope(cc, body, sp_off);
+        wh->body = parse_stmt(cc);
         return wh;
     }
 
@@ -2122,10 +2011,7 @@ Node *parse_stmt(Compiler *cc) {
         }
         expect(cc, TK_RPAREN);
 
-        int sp_off = push_vla_scope(cc);
-        Node *body = parse_stmt(cc);
-        pop_vla_scope(cc);
-        forn->body = wrap_vla_scope(cc, body, sp_off);
+        forn->body = parse_stmt(cc);
         scope_pop(cc);
         return forn;
     }
@@ -2135,10 +2021,7 @@ Node *parse_stmt(Compiler *cc) {
         Node *dow;
         next_token(cc);
         dow = node_new(cc, ND_DO_WHILE, line);
-        int sp_off = push_vla_scope(cc);
-        Node *body = parse_stmt(cc);
-        pop_vla_scope(cc);
-        dow->body = wrap_vla_scope(cc, body, sp_off);
+        dow->body = parse_stmt(cc);
         if (cc->tk != TK_WHILE) {
             error(cc, "expected 'while' after do body");
         }
@@ -2166,10 +2049,7 @@ Node *parse_stmt(Compiler *cc) {
         Node *old_sw = current_sw;
         current_sw = sw;
 
-        int sp_off = push_vla_scope(cc);
-        Node *body = parse_stmt(cc);
-        pop_vla_scope(cc);
-        sw->body = wrap_vla_scope(cc, body, sp_off);
+        sw->body = parse_stmt(cc);
 
         current_sw = old_sw;
         return sw;
@@ -2225,18 +2105,7 @@ Node *parse_stmt(Compiler *cc) {
         Node *brk;
         next_token(cc);
         brk = node_new(cc, ND_BREAK, line);
-        expect(cc, TK_SEMI);
-        if (cc->vla_sp_depth > 0) {
-            int off = cc->vla_sp_offsets[cc->vla_sp_depth - 1];
-            Node *rest = node_new(cc, ND_RSP_RESTORE, line);
-            rest->member_offset = off;
-            Node *bblock = node_new(cc, ND_BLOCK, line);
-            bblock->stmts = (Node **)cc_alloc(cc, 2 * sizeof(Node*));
-            bblock->stmts[0] = rest;
-            bblock->stmts[1] = brk;
-            bblock->num_stmts = 2;
-            return bblock;
-        }
+            expect(cc, TK_SEMI);
         return brk;
     }
 
@@ -2245,18 +2114,7 @@ Node *parse_stmt(Compiler *cc) {
         Node *cont;
         next_token(cc);
         cont = node_new(cc, ND_CONTINUE, line);
-        expect(cc, TK_SEMI);
-        if (cc->vla_sp_depth > 0) {
-            int off = cc->vla_sp_offsets[cc->vla_sp_depth - 1];
-            Node *rest = node_new(cc, ND_RSP_RESTORE, line);
-            rest->member_offset = off;
-            Node *cblock = node_new(cc, ND_BLOCK, line);
-            cblock->stmts = (Node **)cc_alloc(cc, 2 * sizeof(Node*));
-            cblock->stmts[0] = rest;
-            cblock->stmts[1] = cont;
-            cblock->num_stmts = 2;
-            return cblock;
-        }
+            expect(cc, TK_SEMI);
         return cont;
     }
 
@@ -2290,9 +2148,7 @@ Node *parse_stmt(Compiler *cc) {
     if (is_type_token(cc)) {
         Type *base;
         int is_typedef = 0;
-        int is_auto = 0;
         if (cc->tk == TK_TYPEDEF) is_typedef = 1;
-        if (cc->tk == TK_AUTO_TYPE) is_auto = 1;
         base = parse_type(cc);
         int is_static_local = cc->current_is_static;
 
@@ -2675,17 +2531,11 @@ Node *parse_stmt(Compiler *cc) {
                         } else {
                             var = node_new(cc, ND_VAR, line);
                             strncpy(var->name, vname, MAX_IDENT - 1);
-                            Node *init_expr = parse_assign(cc);
-                            if (is_auto) {
-                                vtype = init_expr->type;
-                                if (!vtype) vtype = cc->ty_int;
-                                sym->type = vtype;
-                            }
                             var->sym = sym;
                             var->type = vtype;
                             asgn = node_new(cc, ND_ASSIGN, line);
                             asgn->lhs = var;
-                            asgn->rhs = init_expr;
+                            asgn->rhs = parse_assign(cc);
                             asgn->type = vtype;
                             if (cnt < cap) {
                                 block->stmts[cnt] = asgn;

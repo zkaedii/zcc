@@ -1,43 +1,29 @@
 
-## CG-001: Float Initializer Type Coercion Missing (April 14, 2026)
-Float variable initialization with literals caused silent truncation.
-Fix: Added ensure_type() call in parse_decl() initializer path.
+## CG-IR-011: Callee-Saved Register Mismatch (FIXED - Apr 15, 2026)
 
-## CG-002: Hardcoded Double-Precision SSE Suffixes (April 14, 2026)
-Math operations used addsd/mulsd regardless of operand type.
-Fix: Dynamic SSE suffix selection based on operand size.
-
-## CG-003: Variadic Float Promotion Not Automatic (April 14, 2026)
-printf with float arguments required manual double cast.
-Fix: Auto-insert ND_CAST for float args to variadic functions.
-
-## CG-004: ABI Parameter Type Promotion Failure (April 15, 2026)
-Integer literals passed to double parameters caused System V ABI violation.
-Fix: Auto-insert ND_CAST when arg type != param type in part3.c.
-Impact: Lua 5.4.6 VM fully operational, math.sqrt works correctly.
-
-## CG-IR-016: VLA Stack Overflow
-**Date**: 2026-04-15  
-**Severity**: CRITICAL  
 **Status**: ✅ FIXED  
+**Severity**: CRITICAL (Score 8.2, CWE-682)  
+**Fix Date**: April 15, 2026  
 
-### Symptom
-Experiments 1 & 2 crash with SIGSEGV immediately on execution
+### The Bug
+AST prologue statically saves registers based on AST allocation. IR backend's linear-scan allocator independently uses callee-saved registers (`rbx, r12-r15`) that were never saved, destroying caller state on return.
 
-### Root Cause
-VLA framebuffer (921.6 KB) exceeded System V ABI stack red-zone (656 bytes)
+### Cascades Severed
+- **A**: Memory collision (→ CG-IR-008)
+- **B**: Recursive state demolition
+- **C**: 16-byte alignment violations (→ CG-IR-015/007)
+- **D**: Phantom push hallucinations (→ CG-IR-004)
+
+### Fix (part4.c:L3050)
 ```c
-unsigned char framebuffer[480][640][3];  // Stack overflow!
+used_regs = allocate_registers(func);
+if (backend_ops) {
+    used_regs = 0x1F;  /* Force all 5 callee-saved regs for IR */
+}
 ```
 
-### Fix
-Migrated to C89 compliant heap allocation:
-```c
-unsigned char (*framebuffer)[640][3] = malloc(480 * 640 * 3);
-// ... use ...
-free(framebuffer);
-```
-
-### Validation
-All experiments execute cleanly with heap-allocated framebuffers ✅
-
+### Verification
+- ✅ fib(10) = 55 correct
+- ✅ Aggressive reproducer passed
+- ✅ Bootstrap stable (zcc2.s == zcc3.s)
+- ✅ Graphics experiments: 5/5 passed

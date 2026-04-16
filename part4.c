@@ -3048,6 +3048,11 @@ void codegen_func(Compiler *cc, Node *func) {
   fprintf(stderr, "cc_func: %s\n", func->func_def_name);
   used_regs = allocate_registers(func);
 
+  /* CG-IR-011 FIX: Force all 5 callee-saved regs when IR backend active */
+  if (backend_ops) {
+      used_regs = 0x1F;
+  }
+
   argregs[0] = "rdi";
   argregs[1] = "rsi";
   argregs[2] = "rdx";

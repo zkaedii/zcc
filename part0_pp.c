@@ -130,6 +130,11 @@ static void pp_emit_str(PPState *state, const char *str, int len) {
 }
 
 static char pp_peek(PPState *state) {
+    static int pp_peek_cnt = 0;
+    if (++pp_peek_cnt % 500000 == 0) {
+        printf("DEBUG zcc2 pp_peek_cnt=%d pos=%d line=%d\n", pp_peek_cnt, state->pos, state->line);
+        fflush(stdout);
+    }
     while (state->pos >= state->len && state->input_depth > 0) {
         if (state->alloc_buf) free(state->alloc_buf);
         state->input_depth--;
@@ -216,8 +221,11 @@ static PPMacro *pp_add_macro(PPState *state, const char *name) {
 static void pp_read_line(PPState *state, char *buf, int max) {
     int i = 0;
     int in_comment = 0;
-    while (pp_peek(state) != '\n' && pp_peek(state) != 0 && i < max - 1) {
+    while (pp_peek(state) != 0 && i < max - 1) {
         char c = pp_peek(state);
+        if (c == '\n' && !in_comment) {
+            break;
+        }
         if (c == '\\' && state->src[state->pos + 1] == '\n') {
             pp_next(state); pp_next(state);
             continue;
@@ -235,7 +243,7 @@ static void pp_read_line(PPState *state, char *buf, int max) {
             continue;
         }
         pp_next(state);
-        if (!in_comment) buf[i++] = c;
+        if (!in_comment && c != '\n') buf[i++] = c;
     }
     buf[i] = 0;
 }
@@ -311,9 +319,14 @@ static void pp_process_include(PPState *state, const char *path, int is_system) 
         
         /* we need to copy back the macros added by the header */
         for (i = state->num_macros; i < sub_state->num_macros; i++) {
-            if (state->num_macros >= PP_MAX_MACROS) break;
+            if (state->num_macros >= PP_MAX_MACROS) {
+                fprintf(stderr, "MAX MACROS REACHED!\n");
+                break;
+            }
             memcpy(&state->macros[state->num_macros++], &sub_state->macros[i], sizeof(PPMacro));
         }
+        
+        fprintf(stderr, "pp_process_include: %s added %d macros, total is %d\n", path, sub_state->num_macros - i, state->num_macros);
         
         /* update all previous active flags because undefs may have occurred */
         for (i = 0; i < state->num_macros; i++) {
@@ -669,6 +682,18 @@ static void pp_expand_ident(PPState *state, const char *ident) {
     int subst_idx = 0;
     
     for (i = 0; i < len; i++) {
+        if (m->body[i] == '#' && m->body[i+1] == '#') {
+            i++; /* skip second # */
+            /* strip trailing spaces from subst output */
+            while (subst_idx > 0 && (subst[subst_idx-1] == ' ' || subst[subst_idx-1] == '\t')) {
+                subst_idx--;
+            }
+            /* strip leading spaces in upcoming tokens */
+            while (i + 1 < len && (m->body[i+1] == ' ' || m->body[i+1] == '\t')) {
+                i++;
+            }
+            continue;
+        }
         if (is_ident_start(m->body[i])) {
             char param_name[128];
             int p_idx = 0;

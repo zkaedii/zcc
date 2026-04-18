@@ -167,6 +167,8 @@ struct Type {
     char tag[MAX_IDENT];
     StructField *fields;
     int is_complete;
+    int is_packed;   /* __attribute__((packed)) — suppress field alignment */
+    int explicit_align; /* __attribute__((aligned(N))) — override total align, 0 = none */
 };
 
 struct StringEntry {
@@ -274,6 +276,11 @@ struct Node {
     int is_extern;
     Node *initializer;
 
+    /* ND_BITFIELD (IR bridge) */
+    int is_bitfield;
+    int bit_offset;
+    int bit_size;
+
     /* ND_ASM */
     char *asm_string;
 
@@ -365,6 +372,9 @@ struct Node *node_case_body(struct Node *n) { return n ? n->case_body : NULL; }
 int node_member_offset(struct Node *n) { return n ? n->member_offset : 0; }
 int node_member_size(struct Node *n) { return (n && n->type) ? (int)n->type->size : 8; }
 int node_line_no(struct Node *n) { return n ? n->line : 0; }
+int node_is_bitfield(struct Node *n) { return n ? n->is_bitfield : 0; }
+int node_bit_offset(struct Node *n) { return n ? n->bit_offset : 0; }
+int node_bit_size(struct Node *n) { return n ? n->bit_size : 0; }
 int node_is_global(struct Node *n) {
     if (!n || n->kind != ND_VAR) return 0;
     return (n->sym && n->sym->is_local) ? 0 : 1;
@@ -487,6 +497,10 @@ struct Compiler {
     int local_offset;
 
     int current_is_static;
+
+    /* pending __attribute__ flags — set by lexer, consumed by parse_struct_or_union */
+    int pending_packed;     /* __attribute__((packed)) seen before struct keyword */
+    int pending_aligned_n;  /* __attribute__((aligned(N))) value, 0 = none */
 };
 
 typedef struct TargetBackend {

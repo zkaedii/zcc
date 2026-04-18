@@ -7,6 +7,15 @@
 /* PARSER                                                            */
 /* ================================================================ */
 
+/* CG-HARDEN-SILENT-001: per-cap warning flags (one warning per cap per compilation) */
+static int _warned_max_structs = 0;
+static int _warned_max_params = 0;
+static int _warned_max_strings = 0;
+static int _warned_max_call_args = 0;
+static int _warned_max_cases = 0;
+static int _warned_max_init = 0;
+static int _warned_max_globals = 0;
+
 static int is_type_token(Compiler *cc) {
     if (cc->tk >= TK_INT && cc->tk <= TK_DOUBLE) return 1;
     if (cc->tk >= TK_STATIC && cc->tk <= TK_INLINE) return 1;
@@ -38,6 +47,8 @@ static void register_struct(Compiler *cc, Type *t) {
     if (cc->num_structs < MAX_STRUCTS) {
         cc->structs[cc->num_structs] = t;
         cc->num_structs++;
+    } else {
+        if (!_warned_max_structs) { printf("zcc: warning: MAX_STRUCTS (%d) exceeded at %s:%d — subsequent struct types silently discarded\n", MAX_STRUCTS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_structs = 1; }
     }
 }
 
@@ -708,6 +719,8 @@ Type *parse_declarator(Compiler *cc, Type *base, char *name_out) {
                             if (ftype->num_params < MAX_PARAMS) {
                                 ftype->params[ftype->num_params] = ptype;
                                 ftype->num_params++;
+                            } else {
+                                if (!_warned_max_params) { printf("zcc: warning: MAX_PARAMS (%d) exceeded at %s:%d — subsequent params silently discarded\n", MAX_PARAMS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_params = 1; }
                             }
                             if (cc->tk == TK_COMMA) {
                                 next_token(cc);
@@ -780,6 +793,8 @@ Type *parse_declarator(Compiler *cc, Type *base, char *name_out) {
                     if (ftype->num_params < MAX_PARAMS) {
                         ftype->params[ftype->num_params] = ptype;
                         ftype->num_params++;
+                    } else {
+                        if (!_warned_max_params) { printf("zcc: warning: MAX_PARAMS (%d) exceeded at %s:%d — subsequent params silently discarded\n", MAX_PARAMS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_params = 1; }
                     }
 
                     if (cc->tk == TK_COMMA) {
@@ -859,6 +874,8 @@ Node *parse_primary(Compiler *cc) {
             se->label_id = cc->label_count;
             cc->label_count++;
             cc->num_strings++;
+        } else {
+            if (!_warned_max_strings) { printf("zcc: warning: MAX_STRINGS (%d) exceeded at %s:%d — subsequent string literals silently discarded\n", MAX_STRINGS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_strings = 1; }
         }
         n = node_new(cc, ND_STR, line);
         n->str_id = sid;
@@ -1174,6 +1191,7 @@ Node *parse_postfix(Compiler *cc) {
                         call->args[call->num_args] = parse_assign(cc);
                         call->num_args = call->num_args + 1;
                     } else {
+                        if (!_warned_max_call_args) { printf("zcc: warning: MAX_CALL_ARGS (%d) exceeded at %s:%d — subsequent call args silently discarded\n", MAX_CALL_ARGS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_call_args = 1; }
                         parse_assign(cc);
                     }
                     if (cc->tk == TK_COMMA) {
@@ -1219,6 +1237,7 @@ Node *parse_postfix(Compiler *cc) {
                         call->args[call->num_args] = parse_assign(cc);
                         call->num_args = call->num_args + 1;
                     } else {
+                        if (!_warned_max_call_args) { printf("zcc: warning: MAX_CALL_ARGS (%d) exceeded at %s:%d — subsequent call args silently discarded\n", MAX_CALL_ARGS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_call_args = 1; }
                         parse_assign(cc);
                     }
                     if (cc->tk == TK_COMMA) {
@@ -2116,6 +2135,8 @@ Node *parse_stmt(Compiler *cc) {
             strncpy(gto->label_name, cn->label_name, MAX_IDENT - 1);
             cnode->case_body = gto;
             current_sw->cases[current_sw->num_cases++] = cnode;
+        } else if (current_sw) {
+            if (!_warned_max_cases) { printf("zcc: warning: MAX_CASES (%d) exceeded at %s:%d — subsequent case labels silently discarded\n", MAX_CASES, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_cases = 1; }
         }
         return cn;
     }
@@ -2266,6 +2287,7 @@ Node *parse_stmt(Compiler *cc) {
                                         if (count < MAX_INIT) {
                                             inits[count++] = parse_assign(cc);
                                         } else {
+                                            if (!_warned_max_init) { printf("zcc: warning: MAX_INIT (%d) exceeded at %s:%d — subsequent initializers silently discarded\n", MAX_INIT, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_init = 1; }
                                             parse_assign(cc);
                                         }
                                         if (cc->tk == skip_tk) {
@@ -2305,7 +2327,8 @@ Node *parse_stmt(Compiler *cc) {
                             }
                         }
 
-                        if (cc->num_globals < MAX_GLOBALS) cc->globals[cc->num_globals++] = gvar;
+                        if (cc->num_globals < MAX_GLOBALS) { cc->globals[cc->num_globals++] = gvar; }
+                        else { if (!_warned_max_globals) { printf("zcc: warning: MAX_GLOBALS (%d) exceeded at %s:%d — subsequent globals silently discarded\n", MAX_GLOBALS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_globals = 1; } }
                     } else {
                         sym = scope_add_local(cc, vname, vtype);
 
@@ -2678,6 +2701,8 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
                     strncpy(func->param_names_buf[func->num_params], pname, MAX_IDENT - 1);
                     psym = scope_add_local(cc, pname, ptype);
                     func->num_params++;
+                } else {
+                    if (!_warned_max_params) { printf("zcc: warning: MAX_PARAMS (%d) exceeded at %s:%d — subsequent function params silently discarded\n", MAX_PARAMS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_params = 1; }
                 }
 
                 if (cc->tk == TK_COMMA) {
@@ -2881,6 +2906,8 @@ Node *parse_program(Compiler *cc) {
                                     if (ftype->num_params < MAX_PARAMS) {
                                         ftype->params[ftype->num_params] = ptype;
                                         ftype->num_params++;
+                                    } else {
+                                        if (!_warned_max_params) { printf("zcc: warning: MAX_PARAMS (%d) exceeded at %s:%d — subsequent params silently discarded\n", MAX_PARAMS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_params = 1; }
                                     }
                                     if (cc->tk == TK_COMMA) {
                                         next_token(cc);
@@ -3041,7 +3068,8 @@ Node *parse_program(Compiler *cc) {
                             if (count < MAX_INIT) {
                                 inits[count++] = parse_assign(cc);
                             } else {
-                                parse_assign(cc); /* discard if over limit */
+                                if (!_warned_max_init) { printf("zcc: warning: MAX_INIT (%d) exceeded at %s:%d — subsequent initializers silently discarded\n", MAX_INIT, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_init = 1; }
+                                parse_assign(cc);
                             }
                             if (cc->tk == skip_tk) {
                                 if (cc->tk != TK_EOF) next_token(cc);
@@ -3088,6 +3116,8 @@ Node *parse_program(Compiler *cc) {
             if (cc->num_globals < MAX_GLOBALS) {
                 cc->globals[cc->num_globals] = gvar;
                 cc->num_globals++;
+            } else {
+                if (!_warned_max_globals) { printf("zcc: warning: MAX_GLOBALS (%d) exceeded at %s:%d — subsequent globals silently discarded\n", MAX_GLOBALS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_globals = 1; }
             }
 
             /* handle multiple declarators: int a, b; */
@@ -3116,6 +3146,8 @@ Node *parse_program(Compiler *cc) {
                 if (cc->num_globals < MAX_GLOBALS) {
                     cc->globals[cc->num_globals] = gvar2;
                     cc->num_globals++;
+                } else {
+                    if (!_warned_max_globals) { printf("zcc: warning: MAX_GLOBALS (%d) exceeded at %s:%d — subsequent globals silently discarded\n", MAX_GLOBALS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_globals = 1; }
                 }
             }
 

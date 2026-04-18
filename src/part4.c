@@ -157,6 +157,15 @@ void codegen_load(Compiler *cc, Type *type) {
     fprintf(cc->out, "    movq (%%rax), %%rax\n");
     return;
   }
+  /* CG-FLOAT-001: float (4-byte FP) must use movss/cvtss2sd, not integer load.
+   * The stack slot holds IEEE 754 single-precision bits (4 bytes).
+   * Load them into XMM, widen to double, then move to %rax as double bits. */
+  if (type->kind == TY_FLOAT) {
+    fprintf(cc->out, "    movss (%%rax), %%xmm0\n");     /* load 4-byte float */
+    fprintf(cc->out, "    cvtss2sd %%xmm0, %%xmm0\n");   /* widen to double */
+    fprintf(cc->out, "    movq %%xmm0, %%rax\n");         /* double bits -> GPR */
+    return;
+  }
   switch (type->size) {
   case 1:
     if (is_unsigned_type(type))
@@ -230,6 +239,15 @@ void codegen_store(Compiler *cc, Type *type) {
     fprintf(cc->out, "    popq %%rsi\n");
     if (backend_ops) fprintf(cc->out, "    mov r0, r1\n");
       else fprintf(cc->out, "    movq %%r11, %%rax\n");
+    return;
+  }
+  /* CG-FLOAT-001: float (4-byte FP) must use cvtsd2ss/movss, not integer store.
+   * Value in %r11 is double bits (8 bytes). Convert to float, store 4 bytes. */
+  if (type->kind == TY_FLOAT) {
+    fprintf(cc->out, "    movq %%r11, %%xmm0\n");         /* double bits -> XMM */
+    fprintf(cc->out, "    cvtsd2ss %%xmm0, %%xmm0\n");   /* narrow to float */
+    fprintf(cc->out, "    movss %%xmm0, (%%rax)\n");      /* store 4-byte float */
+    fprintf(cc->out, "    movq %%r11, %%rax\n");           /* preserve %rax convention */
     return;
   }
   switch (type->size) {
@@ -579,7 +597,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     if (node->sym && node->sym->assigned_reg) {
       if (backend_ops) fprintf(cc->out, "    mov r0, %s\n", node->sym->assigned_reg); else fprintf(cc->out, "    movq %s, %%rax\n", node->sym->assigned_reg);
       if (node->type && !node_type_unsigned(node) && !is_pointer(node->type)) {
-          if (node->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+          if (node->type->size == 4 && !is_float_type(node->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
           else if (node->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
           else if (node->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
       } else if (node->type && node_type_unsigned(node)) {
@@ -625,7 +643,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     if (node->lhs && node->lhs->kind == ND_VAR && node->lhs->sym &&
         node->lhs->sym->assigned_reg) {
       if (node->lhs->type && !node_type_unsigned(node->lhs) && !is_pointer(node->lhs->type)) {
-          if (node->lhs->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+          if (node->lhs->type->size == 4 && !is_float_type(node->lhs->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
           else if (node->lhs->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
           else if (node->lhs->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
       } else if (node->lhs->type && node_type_unsigned(node->lhs)) {
@@ -790,7 +808,7 @@ void codegen_expr(Compiler *cc, Node *node) {
         break;
       }
       if (node->lhs->type && !node_type_unsigned(node->lhs) && !is_pointer(node->lhs->type)) {
-          if (node->lhs->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+          if (node->lhs->type->size == 4 && !is_float_type(node->lhs->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
           else if (node->lhs->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
           else if (node->lhs->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
       } else if (node->lhs->type && node_type_unsigned(node->lhs)) {
@@ -978,7 +996,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     if (backend_ops) fprintf(cc->out, "    mov r0, r1\n");
       else fprintf(cc->out, "    movq %%r11, %%rax\n");
     if (node->lhs->type && !node_type_unsigned(node->lhs) && !is_pointer(node->lhs->type)) {
-        if (node->lhs->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+        if (node->lhs->type->size == 4 && !is_float_type(node->lhs->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
         else if (node->lhs->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
         else if (node->lhs->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
     } else if (node->lhs->type && node_type_unsigned(node->lhs)) {
@@ -1929,6 +1947,11 @@ void codegen_expr(Compiler *cc, Node *node) {
         } else if (node->cast_type && !is_float_type(node->cast_type) && node->lhs && node->lhs->type && is_float_type(node->lhs->type)) {
             fprintf(cc->out, "    movq %%rax, %%xmm0\n");
             fprintf(cc->out, "    cvttsd2si %%xmm0, %%rax\n");
+        } else if (node->lhs && node->lhs->type && is_float_type(node->lhs->type) &&
+                   node->cast_type && is_float_type(node->cast_type)) {
+            /* CG-FLOAT-001: float -> double cast.
+             * codegen_load already widened float to double via cvtss2sd.
+             * Value is already correct in %rax as double bits. No-op. */
         } else if (src_size == 4 && !is_pointer(node->lhs ? node->lhs->type : 0)) {
             if (node->lhs && node->lhs->type && is_unsigned_type(node->lhs->type)) {
                 if (!backend_ops) fprintf(cc->out, "    movl %%eax, %%eax\n");
@@ -1998,7 +2021,7 @@ void codegen_expr(Compiler *cc, Node *node) {
       if (backend_ops) { fprintf(cc->out, "    ldr r3, =%d\n", esz); if (strcmp(reg, "rax") == 0) fprintf(cc->out, "    adds r0, r0, r3\n"); else fprintf(cc->out, "    adds r1, r1, r3\n"); } else fprintf(cc->out, "    addq $%d, %s\n", esz, reg);
       if (backend_ops) fprintf(cc->out, "    mov r0, %s\n", reg); else fprintf(cc->out, "    movq %s, %%rax\n", reg);
       if (node->lhs->type && !node_type_unsigned(node->lhs) && !is_pointer(node->lhs->type)) {
-          if (node->lhs->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+          if (node->lhs->type->size == 4 && !is_float_type(node->lhs->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
           else if (node->lhs->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
           else if (node->lhs->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
       } else if (node->lhs->type && node_type_unsigned(node->lhs)) {
@@ -2058,7 +2081,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     if (backend_ops) fprintf(cc->out, "    mov r0, r1\n");
       else fprintf(cc->out, "    movq %%r11, %%rax\n");
     if (node->lhs->type && !node_type_unsigned(node->lhs) && !is_pointer(node->lhs->type)) {
-        if (node->lhs->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+        if (node->lhs->type->size == 4 && !is_float_type(node->lhs->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
         else if (node->lhs->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
         else if (node->lhs->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
     } else if (node->lhs->type && node_type_unsigned(node->lhs)) {
@@ -2082,7 +2105,7 @@ void codegen_expr(Compiler *cc, Node *node) {
       if (backend_ops) { fprintf(cc->out, "    ldr r3, =%d\n", esz); if (strcmp(reg, "rax") == 0) fprintf(cc->out, "    subs r0, r0, r3\n"); else fprintf(cc->out, "    subs r1, r1, r3\n"); } else fprintf(cc->out, "    subq $%d, %s\n", esz, reg);
       if (backend_ops) fprintf(cc->out, "    mov r0, %s\n", reg); else fprintf(cc->out, "    movq %s, %%rax\n", reg);
       if (node->lhs->type && !node_type_unsigned(node->lhs) && !is_pointer(node->lhs->type)) {
-          if (node->lhs->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+          if (node->lhs->type->size == 4 && !is_float_type(node->lhs->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
           else if (node->lhs->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
           else if (node->lhs->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
       } else if (node->lhs->type && node_type_unsigned(node->lhs)) {
@@ -2142,7 +2165,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     if (backend_ops) fprintf(cc->out, "    mov r0, r1\n");
       else fprintf(cc->out, "    movq %%r11, %%rax\n");
     if (node->lhs->type && !node_type_unsigned(node->lhs) && !is_pointer(node->lhs->type)) {
-        if (node->lhs->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+        if (node->lhs->type->size == 4 && !is_float_type(node->lhs->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
         else if (node->lhs->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
         else if (node->lhs->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
     } else if (node->lhs->type && node_type_unsigned(node->lhs)) {
@@ -2440,7 +2463,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     if (node->type && is_float_type(node->type)) {
         fprintf(cc->out, "    movq %%xmm0, %%rax\n");
     } else if (node->type && !node_type_unsigned(node)) {
-        if (node->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
+        if (node->type->size == 4 && !is_float_type(node->type)) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
         else if (node->type->size == 1) fprintf(cc->out, "    movsbq %%al, %%rax\n");
         else if (node->type->size == 2) fprintf(cc->out, "    movswq %%ax, %%rax\n");
     } else if (node->type && node_type_unsigned(node)) {

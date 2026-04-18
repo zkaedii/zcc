@@ -1077,7 +1077,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     } else {
         fprintf(cc->out, "    addq %%r11, %%rax\n");
     }
-    if (node->type && type_size(node->type) == 4 && !is_pointer(node->type)) {
+    if (node->type && type_size(node->type) == 4 && !is_pointer(node->type) && !is_float_type(node->type)) {
       if (node_type_unsigned(node)) {
         if (!backend_ops) fprintf(cc->out, "    movl %%eax, %%eax\n");
       } else {
@@ -1161,7 +1161,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     if (backend_ops && backend_ops->emit_binary_op) backend_ops->emit_binary_op(cc, ND_SUB);
     else if (backend_ops) backend_ops->emit_binary_op(cc, ND_SUB);
       else fprintf(cc->out, "    subq %%r11, %%rax\n");
-    if (node->type && type_size(node->type) == 4 && !is_pointer(node->type)) {
+    if (node->type && type_size(node->type) == 4 && !is_pointer(node->type) && !is_float_type(node->type)) {
       if (node_type_unsigned(node)) {
         if (!backend_ops) fprintf(cc->out, "    movl %%eax, %%eax\n");
       } else {
@@ -1256,7 +1256,7 @@ void codegen_expr(Compiler *cc, Node *node) {
         if (backend_ops) backend_ops->emit_binary_op(cc, ND_MUL);
       else fprintf(cc->out, "    imulq %%r11, %%rax\n");
     }
-    if (node->type && type_size(node->type) == 4 && !is_pointer(node->type)) {
+    if (node->type && type_size(node->type) == 4 && !is_pointer(node->type) && !is_float_type(node->type)) {
       if (node_type_unsigned(node)) {
         if (!backend_ops) fprintf(cc->out, "    movl %%eax, %%eax\n");
       } else {
@@ -1920,7 +1920,7 @@ void codegen_expr(Compiler *cc, Node *node) {
             fprintf(cc->out, "    cvttsd2si %%xmm0, %%rax\n");
         } else if (node->cast_type->kind == TY_UINT || node->cast_type->kind == TY_ULONG) {
             if (!backend_ops) fprintf(cc->out, "    movl %%eax, %%eax\n");
-        } else if (!is_pointer(node->lhs ? node->lhs->type : 0)) {
+        } else if (!is_pointer(node->lhs ? node->lhs->type : 0) && !(node->lhs && node->lhs->type && is_float_type(node->lhs->type))) {
             if (!backend_ops) fprintf(cc->out, "    cltq\n");
         }
         break;

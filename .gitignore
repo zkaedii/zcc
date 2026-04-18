@@ -124,3 +124,279 @@ sqlite3_bt.log
 *.exe
 *.o
 *.s
+
+# ─── Build artifacts ──────────────────────────────────
+zcc
+zcc2
+zcc3
+*.o
+*.a
+
+# Assembly output (except intentional ones in tools/)
+zcc2.s
+zcc3.s
+/tmp/*.s
+
+# ─── Compiled probe binaries ──────────────────────────
+probe_fp24_gcc
+probe_fp24_zcc
+repro_float_store
+test_float_memcpy
+test_tbfp_basic
+fpx_gcc
+
+# Single-letter / short test binaries (scratch)
+/t
+/t[0-9]
+/r
+/pa
+/pk3
+/ps
+/ps_ref
+/pt
+/pt_ref
+/fs
+/fs_ref
+/pp_gcc
+/pp_zcc
+
+# src/ scratch binaries and assembly dumps
+src/t_*
+src/tfd
+src/tfm*
+src/zcc
+src/test_fpx_*
+src/test_neg_gcc
+src/test_u_*
+src/test_union_*
+src/cve_*
+src/pk3
+
+# ─── Session scratch scripts ──────────────────────────
+append_corpus_entries.py
+inspect_corpus.py
+
+# ─── Duplicate / backup source files ──────────────────
+src/*Copy*.c
+src/*(2).c
+src/*(3).c
+src/*(4).c
+src/*(5).c
+src/*(6).c
+src/*_backup.c
+src/*_BATCH*.c
+src/part4_BATCH*.c
+src/_*.c
+
+# ─── Session repro / scratch C files ──────────────────
+src/kraken_repro*.c
+src/kraken_debug.c
+src/kraken_exploit_test.c
+src/kraken_fixed.c
+src/fail_*.c
+src/seed*.c
+src/scratch*.c
+src/debug*.c
+src/debug[0-9].c
+src/dummy*.c
+src/repro*.c
+src/mismatch_*.c
+src/bisect*.c
+src/tmp_*.c
+src/min_*.c
+src/minimal*.c
+src/mincc*.c
+src/crash.c
+src/offset_check.c
+src/offset_test.c
+src/op_offset_test.c
+src/op_test.c
+
+# ─── Hello-world and trivial scratch ──────────────────
+src/hello*.c
+src/simple*.c
+src/simple*.h
+src/trivial.c
+src/tiny.c
+src/test.c
+src/test[0-9].c
+src/test[0-9][0-9].c
+src/t.c
+src/t2.c
+src/probe.c
+src/print_enum*.c
+src/parse_test.c
+src/my_test.c
+
+# ─── zcc processing pipeline artifacts ────────────────
+src/zcc_preprocessed*.c
+src/*_pp.c
+src/*_pp2.c
+src/zcc_from_parts.c
+src/zcc_final.c
+src/zcc_new.c
+src/zcc_limit_test.c
+src/zcc_offset_test.c
+src/zcc_stub.c
+src/zcc_test.c
+src/zcc_t3_patch.c
+src/zcc_expr.c
+src/zcc_stmt.c
+src/zcc_phase6.c
+src/zcc_pgo_rt.c
+src/zcc_rt.c
+src/zcc_stb_test_pp.c
+src/zcc_preprocessed_test.c
+
+# ─── Large embedded test corpora (stay out of git) ────
+src/sqlite3.c
+src/sqlite3.h
+src/miniz.c
+src/miniz.h
+src/miniz_export.h
+src/cJSON.c
+src/cJSON.h
+src/lua.c
+src/lua_zcc.c
+src/curl_*.c
+src/doom_*.c
+src/stb_*.c
+src/stb_*.h
+
+# ─── DOOM graphics scratch ────────────────────────────
+src/paint3d*.c
+src/r_colormaps.c
+src/r_init.c
+src/r_sprites*.c
+src/r_trans.c
+src/raytracer.c
+src/mesh_renderer.c
+src/rotate.c
+src/tinyrenderer.c
+src/init_gfx.c
+src/list_wads.c
+src/list2.c
+src/linked.c
+src/dom_rules_db.c
+src/character_engine.c
+src/dump_bones.c
+
+# ─── Kraken ML scratch ────────────────────────────────
+src/kraken_v2*.h
+src/kraken_inference*.c
+src/generate_neural_weights.c
+src/train_weights.c
+src/run_quantum_test.c
+
+# ─── Misc src/ scratch ────────────────────────────────
+src/alloc*.c
+src/alloca_test.c
+src/alpha_test*.c
+src/anon_test.c
+src/atomic_stubs.c
+src/asan_node_shim.c
+src/benchmark_workload.c
+src/bf.c
+src/bitfield_test.c
+src/bootstrap_runtime.c
+src/bst.c
+src/bubble.c
+src/cg_ir_004_fix.c
+src/dce_test.c
+src/fib.c
+src/get_enums.c
+src/hamiltonian.c
+src/hash.c
+src/hello.c.c
+src/hello_test.c
+src/jit_strat_*.c
+src/log*_test*.c
+src/log_test*.c
+src/macro_test*.c
+src/matrix_*.c
+src/multi_bitfield_test.c
+src/primelink.c
+src/ptr_test.c
+src/qsort.c
+src/shell.c
+src/shift_test.c
+src/show.c
+src/sizeof_test.c
+src/sqlite3_functest.c
+src/stdin_*.c
+src/stress_*.c
+src/struct_*_test.c
+src/strutil.c
+src/stubbed.c
+src/t8_pp.c
+src/test_*_gcc
+src/test_*_zcc
+src/test_abi_promotion.c
+src/test_asm_real.c
+src/test_bitfield.c
+src/test_fpx_*
+src/test_generic.c
+src/test_harness*.c
+src/test_header.h
+src/test_inc.h
+src/test_typeof.c
+src/test_vla*.c
+src/test_union_float.c
+src/test_tbfp*
+src/va_full_pp.c
+src/vm.c
+src/w_readlump.c
+src/x11_*.c
+src/zcc_ast_bridge*.h
+src/zcc_bridge_impl.c
+src/zcc_ir_*.h
+src/zkaedi_core_fixed.c
+src/zprime.h src/zqec.h src/zquantum.h src/zsurface.h
+src/qemu_*.c src/qemu_*.h
+src/tqpu*.c src/tqpu*.h
+src/patched_*.c
+src/phase2_phase3_insertions.c
+src/zcc_magic.h
+src/zcc_stddef.h
+src/fake_csmith.h
+
+# IR target tmps (if in src/)
+src/ir_*.c
+src/ir_*.h
+src/ir_to_*.c
+
+# Makefile in src/ (root Makefile should be tracked; src/ Makefile is scratch)
+src/Makefile
+
+# ─── Duplicate source copies of part*.c ───────────────
+# (root-level part*.c is canonical; src/part*.c may be stale dupes)
+# REVIEW BEFORE UNCOMMENTING:
+# src/part0_pp.c
+# src/part2.c
+# src/part4_*.c
+# src/part5_*.c
+# src/part6_*.c
+
+# ─── Experimental / legacy dirs ───────────────────────
+experiments/
+legacy_levels/
+patches/
+
+# ─── Preserve these ───────────────────────────────────
+# (explicit negation if anything above matched them by mistake)
+!tools/
+!probe_fp24_surface.c
+!probe_attr_packed.c
+!probe_float_cmp.c
+!probe_float_cmp_v2.c
+!probe_mixed_width_stress.c
+!probe_unproved_quick.c
+!probe_neg_zero_truth.c
+!probe_final_four.c
+!repro_float_store.c
+!run_regression.sh
+!src/part1.c
+!src/part3.c
+!src/part4.c
+!src/zkaedi_fpx.c
+!src/zkaedi_fpx.h

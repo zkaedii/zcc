@@ -262,6 +262,21 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
             strncpy(stype->tag, tag, MAX_IDENT - 1);
             register_struct(cc, stype);
         }
+        /* Consume pending attribute flags immediately on creation (ATTR-UNKNOWN-001)
+         * Must happen here, not at the '{' boundary, to prevent leakage from
+         * __attribute__ annotations inside #include'd system headers. */
+        if (cc->pending_packed) {
+            stype->is_packed = 1;
+            cc->pending_packed = 0;
+        }
+        if (cc->pending_aligned_n) {
+            stype->explicit_align = cc->pending_aligned_n;
+            cc->pending_aligned_n = 0;
+        }
+    } else {
+        /* Existing struct found — discard any stale pending flags */
+        cc->pending_packed = 0;
+        cc->pending_aligned_n = 0;
     }
 
     expect(cc, TK_LBRACE);
@@ -306,8 +321,8 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
                 field->offset = 0;
                 if (type_size(ftype) > max_size) max_size = type_size(ftype);
             } else {
-                /* align offset */
-                if (falign > 1) {
+                /* align offset — skip when struct is packed (ATTR-UNKNOWN-001) */
+                if (!stype->is_packed && falign > 1) {
                     offset = (offset + falign - 1) & ~(falign - 1);
                 }
                 field->offset = offset;
@@ -346,7 +361,8 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
                     field2->offset = 0;
                     if (type_size(ftype2) > max_size) max_size = type_size(ftype2);
                 } else {
-                    if (falign2 > 1) {
+                    /* skip alignment when packed (ATTR-UNKNOWN-001) */
+                    if (!stype->is_packed && falign2 > 1) {
                         offset = (offset + falign2 - 1) & ~(falign2 - 1);
                     }
                     field2->offset = offset;
@@ -360,16 +376,22 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
             expect(cc, TK_SEMI);
         }
 
-            if (is_union) {
+        if (is_union) {
             stype->size = max_size;
         } else {
             stype->size = offset;
         }
-        /* align total size */
-        if (max_align > 1) {
+        /* align total size — skip trailing padding when packed; apply explicit_align if set */
+        if (stype->explicit_align > 0) {
+            int ea = stype->explicit_align;
+            stype->size = (stype->size + ea - 1) & ~(ea - 1);
+            stype->align = ea;
+        } else if (!stype->is_packed && max_align > 1) {
             stype->size = (stype->size + max_align - 1) & ~(max_align - 1);
+            stype->align = max_align;
+        } else {
+            stype->align = stype->is_packed ? 1 : max_align;
         }
-        stype->align = max_align;
         stype->is_complete = 1;
     }
 
@@ -808,7 +830,12 @@ Node *parse_primary(Compiler *cc) {
     }
 
     if (cc->tk == TK_FLIT) {
+        /* CG-FLOAT-007: lexer sets tk_text[0]='F' for f/F suffix literals.
+         * Value was already rounded to float precision by the lexer.
+         * Use ty_float so the AST node carries the correct type. */
+        int is_float_suffix = (cc->tk_text[0] == 'F');
         n = node_flit(cc, cc->tk_fval, line);
+        if (is_float_suffix) n->type = cc->ty_float;
         next_token(cc);
         return n;
     }
@@ -1946,9 +1973,18 @@ Node *parse_stmt(Compiler *cc) {
         next_token(cc);
         ret = node_new(cc, ND_RETURN, line);
         if (cc->tk != TK_SEMI) {
-            ret->lhs = parse_expr(cc);
+            Node *ret_expr = parse_expr(cc);
+            /* CG-FLOAT-005: coerce return value to declared return type.
+             * Prevents e.g. ND_FLIT (ty_double) being returned raw from a
+             * float-returning function — low 32 bits of double = 0.0 */
+            if (cc->current_func[0]) {
+                Symbol *fsym = scope_find(cc, cc->current_func);
+                if (fsym && fsym->type && fsym->type->ret)
+                    ret_expr = ensure_type(cc, ret_expr, fsym->type->ret);
+            }
+            ret->lhs = ret_expr;
         }
-            expect(cc, TK_SEMI);
+        expect(cc, TK_SEMI);
         return ret;
     }
 
@@ -2376,7 +2412,8 @@ Node *parse_stmt(Compiler *cc) {
                                         deref->type = elem_type;
                                         asgn = node_new(cc, ND_ASSIGN, line);
                                         asgn->lhs = deref;
-                                        asgn->rhs = inits[idx];
+                                        /* CG-FLOAT-006: coerce array element initializer */
+                                        asgn->rhs = ensure_type(cc, inits[idx], elem_type);
                                         asgn->type = elem_type;
                                         block->stmts[cnt] = asgn;
                                         cnt++;
@@ -2461,7 +2498,8 @@ Node *parse_stmt(Compiler *cc) {
                                         }
                                         asgn_n = node_new(cc, ND_ASSIGN, line);
                                         asgn_n->lhs = mem_n;
-                                        asgn_n->rhs = inits_s[fi];
+                                        /* CG-FLOAT-006: coerce struct field initializer */
+                                        asgn_n->rhs = ensure_type(cc, inits_s[fi], mem_n->type);
                                         asgn_n->type = mem_n->type;
                                         /* Grow block if needed */
                                         if (cnt >= cap) {
@@ -2540,7 +2578,7 @@ Node *parse_stmt(Compiler *cc) {
                             var->type = vtype;
                             asgn = node_new(cc, ND_ASSIGN, line);
                             asgn->lhs = var;
-                            asgn->rhs = parse_assign(cc);
+                            asgn->rhs = ensure_type(cc, parse_assign(cc), vtype);
                             asgn->type = vtype;
                             if (cnt < cap) {
                                 block->stmts[cnt] = asgn;

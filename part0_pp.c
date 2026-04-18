@@ -578,12 +578,62 @@ static void pp_expand_ident(PPState *state, const char *ident) {
         return;
     }
     
+    /* ATTR-UNKNOWN-001: handle __attribute__ specially — intercept BEFORE macro lookup
+     * so the empty #define __attribute__(x) never fires for this identifier.
+     * We parse (( attrname )) directly from the stream and emit __zcc_attr_packed__
+     * for 'packed', consume everything else silently. */
+    if (strcmp(ident, "__attribute__") == 0 || strcmp(ident, "__attribute") == 0) {
+        /* consume whitespace then (( */
+        while (pp_peek(state)==' '||pp_peek(state)=='\t'||pp_peek(state)=='\n') pp_next(state);
+        if (pp_peek(state)=='(') pp_next(state);
+        while (pp_peek(state)==' '||pp_peek(state)=='\t') pp_next(state);
+        if (pp_peek(state)=='(') pp_next(state);
+        while (pp_peek(state)==' '||pp_peek(state)=='\t') pp_next(state);
+        /* read attribute name */
+        {
+            char attr_name[64]; int ai = 0;
+            while (pp_peek(state)!=0 && ai<63) {
+                char ac = pp_peek(state);
+                if ((ac>='a'&&ac<='z')||(ac>='A'&&ac<='Z')||(ac>='0'&&ac<='9')||ac=='_') {
+                    attr_name[ai++] = pp_next(state);
+                } else break;
+            }
+            attr_name[ai] = 0;
+            /* strip __ prefix/suffix (GCC __packed__ etc.) */
+            {
+                char *an = attr_name; int alen = ai;
+                if (alen>4 && an[0]=='_'&&an[1]=='_'&&an[alen-1]=='_'&&an[alen-2]=='_') {
+                    an[alen-2]=0; an+=2;
+                }
+                if (strcmp(an, "packed") == 0) {
+                    pp_emit_str(state, " __zcc_attr_packed__ ", 21);
+                }
+                /* aligned(N): silently drop for now; add __zcc_attr_aligned_N__ later */
+                /* all other attributes: silently consumed */
+            }
+        }
+        /* consume remaining content up to and including the closing ))
+         * After reading the attribute name, we've consumed:  (  (  attrname
+         * Still in stream:      [args...]  )  )
+         * Strategy: balance-count from current position, stop when we've
+         * seen 2 more ')' than '(' (the two closes we opened above). */
+        {
+            int need = 2;  /* we pre-consumed two '(' — need two matching ')' */
+            while (pp_peek(state) != 0 && need > 0) {
+                char ac = pp_next(state);
+                if (ac == '(') need++;
+                else if (ac == ')') { need--; }
+            }
+        }
+        return;
+    }
+
     m = pp_find_macro(state, ident);
     if (!m) {
         pp_emit_str(state, ident, strlen(ident));
         return;
     }
-    
+
     if (!m->is_function_like) {
         m->active = 0;
         pp_push_input(state, m->body, NULL, m);

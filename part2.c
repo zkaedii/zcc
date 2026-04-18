@@ -677,15 +677,19 @@ again:
                but we need to advance cc->pos. */
             cc->pos = cc->pos + len;
             cc->col = cc->col + len;
+            /* CG-FLOAT-007: record f/F suffix in tk_text[0] for parse_primary */
+            cc->tk_text[0] = 0;
             if (cc->pos < cc->source_len) {
                 char sc = cc->source[cc->pos];
-                if (sc == 'f' || sc == 'F' || sc == 'l' || sc == 'L') {
+                if (sc == 'f' || sc == 'F') {
+                    cc->pos++; cc->col++;
+                    cc->tk_text[0] = 'F';  /* tag as float literal */
+                } else if (sc == 'l' || sc == 'L') {
                     cc->pos++; cc->col++;
                 }
             }
             cc->tk = TK_FLIT;
             cc->tk_fval = fval;
-            cc->tk_text[0] = 0;
             return;
         }
 
@@ -844,20 +848,91 @@ again:
         if (kw) {
             cc->tk = kw;
         } else {
+            /* ATTR-UNKNOWN-001: preprocessor emits __zcc_attr_packed__ for __attribute__((packed)).
+             * Set the pending flag and loop to the next real token. */
+            if (strcmp(ident_buf, "__zcc_attr_packed__") == 0) {
+                cc->pending_packed = 1;
+                goto again;
+            }
             if (strcmp(ident_buf, "__attribute__") == 0 || strcmp(ident_buf, "__attribute") == 0) {
-                int pcount = 0;
-                int started = 0;
-                while (cc->pos < cc->source_len) {
-                    char ac = cc->source[cc->pos];
-                    if (ac == '(') { pcount++; started = 1; }
-                    else if (ac == ')') {
-                        pcount--;
-                        if (started && pcount == 0) { cc->pos++; cc->col++; break; }
+                /* Two-pass attribute handler (handles any __attribute__ that leaks through PP) */
+                int pos0 = cc->pos;  /* save position right after __attribute__ */
+                {
+                    /* --- Pass 1: find attribute name --- */
+                    int p = pos0;
+                    char attr_name[64];
+                    int ai = 0;
+                    char *src = cc->source;
+                    int slen = cc->source_len;
+                    /* skip whitespace then opening (( */
+                    while (p < slen && (src[p]==' '||src[p]=='\t'||src[p]=='\n'||src[p]=='\r')) p++;
+                    if (p < slen && src[p] == '(') p++;
+                    while (p < slen && (src[p]==' '||src[p]=='\t')) p++;
+                    if (p < slen && src[p] == '(') p++;
+                    while (p < slen && (src[p]==' '||src[p]=='\t')) p++;
+                    /* read attribute name identifier */
+                    while (p < slen && ai < 63) {
+                        char ac = src[p];
+                        if ((ac>='a'&&ac<='z')||(ac>='A'&&ac<='Z')||(ac>='0'&&ac<='9')||ac=='_') {
+                            attr_name[ai++] = ac; p++;
+                        } else break;
                     }
-                    cc->pos++; cc->col++;
+                    attr_name[ai] = 0;
+                    /* strip __ prefix/suffix (GCC __packed__ style) */
+                    {
+                        char *an = attr_name;
+                        int alen = ai;
+                        if (alen > 4 && an[0]=='_' && an[1]=='_' && an[alen-1]=='_' && an[alen-2]=='_') {
+                            an[alen-2] = 0; an += 2; alen -= 4;
+                        }
+                        if (strcmp(an, "packed") == 0) {
+                            cc->pending_packed = 1;
+                        } else if (strcmp(an, "aligned") == 0) {
+                            /* find (N) argument */
+                            while (p < slen && src[p] != '(' && src[p] != ')') p++;
+                            if (p < slen && src[p] == '(') {
+                                int n = 0;
+                                p++;
+                                while (p < slen && src[p] >= '0' && src[p] <= '9') {
+                                    n = n * 10 + (src[p] - '0'); p++;
+                                }
+                                if (n > 0) cc->pending_aligned_n = n;
+                            }
+                        } else if (an[0] != 0) {
+                            /* Unknown attribute — warn and drop (GCC -Wunknown-attributes) */
+                            /* NOTE: suppress noisy stdio.h attrs to keep output readable */
+                            if (strcmp(an, "nothrow") != 0 && strcmp(an, "leaf") != 0 &&
+                                strcmp(an, "nonnull") != 0 && strcmp(an, "malloc") != 0 &&
+                                strcmp(an, "warn_unused_result") != 0 && strcmp(an, "deprecated") != 0 &&
+                                strcmp(an, "format") != 0 && strcmp(an, "noreturn") != 0 &&
+                                strcmp(an, "sentinel") != 0 && strcmp(an, "artificial") != 0) {
+                                fprintf(stderr, "%s:%d: warning: unknown attribute '%s' ignored [-Wunknown-attributes]\n",
+                                        cc->filename ? cc->filename : "<input>", cc->line, an);
+                            }
+                        }
+                    }
+                }
+                /* --- Pass 2: rewind to pos0 and gobble entire __attribute__((...)) --- */
+                {
+                    int pcount = 0;
+                    int started = 0;
+                    cc->pos = pos0;
+                    while (cc->pos < cc->source_len) {
+                        char ac = cc->source[cc->pos];
+                        cc->pos++;
+                        if (ac == '(') { pcount++; started = 1; }
+                        else if (ac == ')') {
+                            pcount--;
+                            if (started && pcount == 0) break;
+                        }
+                    }
                 }
                 goto again;
             }
+
+
+
+
             if (strcmp(ident_buf, "__extension__") == 0) {
                 goto again;
             }
@@ -952,15 +1027,19 @@ again:
             if (len <= 0) len = 1;
             cc->pos = cc->pos - 1 + len;
             cc->col = cc->col - 1 + len;
+            /* CG-FLOAT-007: record f/F suffix in tk_text[0] for parse_primary */
+            cc->tk_text[0] = 0;
             if (cc->pos < cc->source_len) {
                 char sc = cc->source[cc->pos];
-                if (sc == 'f' || sc == 'F' || sc == 'l' || sc == 'L') {
+                if (sc == 'f' || sc == 'F') {
+                    cc->pos++; cc->col++;
+                    cc->tk_text[0] = 'F';  /* tag as float literal */
+                } else if (sc == 'l' || sc == 'L') {
                     cc->pos++; cc->col++;
                 }
             }
             cc->tk = TK_FLIT;
             cc->tk_fval = fval;
-            cc->tk_text[0] = 0;
             return;
         }
         if (peek_char(cc) == '.') {

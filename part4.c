@@ -2123,12 +2123,32 @@ void codegen_expr(Compiler *cc, Node *node) {
 
       switch (node->cast_type->size) {
       case 1:
+        if (node->lhs && node->lhs->type && is_float_type(node->lhs->type)) {
+            /* float/double -> char/uchar: truncating convert first, then narrow */
+            if (node->lhs->type->kind == TY_FLOAT) {
+                fprintf(cc->out, "    movd %%eax, %%xmm0\n");
+                fprintf(cc->out, "    cvttss2si %%xmm0, %%rax\n");
+            } else {
+                fprintf(cc->out, "    movq %%rax, %%xmm0\n");
+                fprintf(cc->out, "    cvttsd2si %%xmm0, %%rax\n");
+            }
+        }
         if (node->cast_type->kind == TY_UCHAR)
           fprintf(cc->out, "    movzbl %%al, %%eax\n");
         else
           fprintf(cc->out, "    movsbl %%al, %%eax\n");
         break;
       case 2:
+        if (node->lhs && node->lhs->type && is_float_type(node->lhs->type)) {
+            /* float/double -> short/ushort: truncating convert first, then narrow */
+            if (node->lhs->type->kind == TY_FLOAT) {
+                fprintf(cc->out, "    movd %%eax, %%xmm0\n");
+                fprintf(cc->out, "    cvttss2si %%xmm0, %%rax\n");
+            } else {
+                fprintf(cc->out, "    movq %%rax, %%xmm0\n");
+                fprintf(cc->out, "    cvttsd2si %%xmm0, %%rax\n");
+            }
+        }
         if (node->cast_type->kind == TY_USHORT)
           fprintf(cc->out, "    movzwl %%ax, %%eax\n");
         else

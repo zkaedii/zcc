@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #define PP_MAX_MACROS 4096
 #define PP_MAX_PARAMS 16
+static int _warned_pp_max_params = 0;
 #define PP_MAX_BODY   16384
 #define PP_MAX_INCLUDE_DEPTH 32
 
@@ -351,6 +352,7 @@ static void pp_parse_params(PPState *state, PPMacro *m) {
             if (m->num_params < PP_MAX_PARAMS) {
                 pp_parse_ident(state, m->params[m->num_params++], 64);
             } else {
+                if (!_warned_pp_max_params) { printf("zcc: warning: PP_MAX_PARAMS (%d) exceeded at %s:%d — subsequent macro params silently discarded\n", PP_MAX_PARAMS, state->filename ? state->filename : "?", state->line); _warned_pp_max_params = 1; }
                 char dummy[64];
                 pp_parse_ident(state, dummy, 64);
             }
@@ -672,7 +674,10 @@ static void pp_expand_ident(PPState *state, const char *ident) {
                 args[p_count][arg_idx++] = c;
                 args[p_count][arg_idx++] = pp_next(state);
                 args[p_count][arg_idx] = 0;
-            } else { pp_next(state); }
+            } else {
+                if (!_warned_pp_max_params && p_count >= PP_MAX_PARAMS) { printf("zcc: warning: PP_MAX_PARAMS (%d) exceeded at %s:%d — subsequent macro args silently discarded\n", PP_MAX_PARAMS, state->filename ? state->filename : "?", state->line); _warned_pp_max_params = 1; }
+                pp_next(state);
+            }
             continue;
         }
         
@@ -699,6 +704,8 @@ static void pp_expand_ident(PPState *state, const char *ident) {
         if (p_count < PP_MAX_PARAMS && arg_idx < 255) {
             args[p_count][arg_idx++] = c;
             args[p_count][arg_idx] = 0;
+        } else if (p_count >= PP_MAX_PARAMS) {
+            if (!_warned_pp_max_params) { printf("zcc: warning: PP_MAX_PARAMS (%d) exceeded at %s:%d — subsequent macro args silently discarded\n", PP_MAX_PARAMS, state->filename ? state->filename : "?", state->line); _warned_pp_max_params = 1; }
         }
         pp_next(state);
     }

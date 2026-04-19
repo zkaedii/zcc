@@ -285,6 +285,7 @@ struct Type {
   char tag[MAX_IDENT];
   StructField *fields;
   int is_complete;
+  int is_tbfp; /* Reserved for TBFP integration; currently unused. */
 };
 
 struct StringEntry {
@@ -429,6 +430,9 @@ char *zcc_preprocess(const char *source, int source_len, const char *filename,
  * sync"); */
 /* _Static_assert(ND_SWITCH == ZCC_ND_SWITCH, "zcc_ast_bridge.h: ND_SWITCH out
  * of sync"); */
+
+/* Forward declaration for structural parsing (resolves part3.c recursion) */
+static Type *parse_struct_or_union_body(Compiler *cc, Type *stype, int is_union);
 
 /* Bridge accessors: Node* → IR bridge (Option A copy boundary). */
 int is_pointer(Type *t);
@@ -575,6 +579,7 @@ struct Compiler {
   /* peek token (for lookahead) */
   int has_peek;
   int peek_tk;
+  int pending_tbfp; /* Reserved for TBFP integration; currently unused. */
   long long peek_val;
   double peek_fval;
   char peek_text[MAX_IDENT];

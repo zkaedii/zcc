@@ -94,6 +94,7 @@ static void init_compiler(Compiler *cc) {
         t_va->size = 24;
         t_va->align = 8;
         t_va->is_complete = 1;
+        t_va->is_tbfp = 0;
         sym = scope_add(cc, "__builtin_va_list", type_array(cc, t_va, 1));
     }
     sym->is_typedef = 1;
@@ -529,7 +530,39 @@ static int is_rax_moved(const char *line) {
   return 0;
 }
 
-static void security_nullderef_scan(char *filename) {
+int g_emit_anomalies = 0;
+
+/* Tiered type-to-string mapping for anomaly metadata.
+ * Shorthand "ptr" covers all pointer/array/function types.
+ * Aggregates are flagged for propose-only by returning their category.
+ * char/bool both default to return 0/false; documented here as compatible. */
+static const char *type_to_str(Type *ty) {
+  if (!ty) return "unknown";
+  switch (ty->kind) {
+    case TY_VOID:   return "void";
+    case TY_INT:    return "int";
+    case TY_CHAR:   return "char";
+    case TY_SHORT:  return "short";
+    case TY_LONG:   return "long";
+    case TY_LONGLONG: return "long long";
+    case TY_UINT:   return "uint";
+    case TY_UCHAR:  return "uchar";
+    case TY_USHORT: return "ushort";
+    case TY_ULONG:  return "ulong";
+    case TY_ULONGLONG: return "ulonglong";
+    case TY_FLOAT:  return "float";
+    case TY_DOUBLE: return "double";
+    case TY_PTR:
+    case TY_ARRAY:
+    case TY_FUNC:   return "ptr";
+    case TY_STRUCT: return "struct";
+    case TY_UNION:  return "union";
+    case TY_ENUM:   return "enum";
+    default:        return "unknown";
+  }
+}
+
+static void security_nullderef_scan(Compiler *cc, char *filename) {
   FILE *fp;
   int nlines = 0;
   int findings = 0;
@@ -610,11 +643,21 @@ static void security_nullderef_scan(char *filename) {
         if ((strstr(lp[j], deref_pat) || strstr(lp[j], "(%rax)")) &&
             !saw_null_check) {
           findings++;
-          printf("[--security-476] CWE-476 WARNING: unchecked %s return "
-                 "dereferenced via %s in %s() (asm lines %d->%d)\n",
-                 call_name, tracked_reg,
-                 current_func[0] ? current_func : "<unknown>",
-                 i + 1, j + 1);
+          if (g_emit_anomalies) {
+              Symbol *sym = scope_find(cc, current_func);
+              const char *ret_type = "unknown";
+              if (sym && sym->type && sym->type->kind == TY_FUNC) {
+                  ret_type = type_to_str(sym->type->ret);
+              }
+              printf("{\"type\":\"ir_anomaly\", \"kind\":\"CWE-476\", \"site\":\"%s:%d\", \"severity\":0.7, \"variable\":\"%s\", \"return_type\":\"%s\"}\n",
+                     current_func[0] ? current_func : "unknown", i + 1, tracked_reg, ret_type);
+          } else {
+              printf("[--security-476] CWE-476 WARNING: unchecked %s return "
+                     "dereferenced via %s in %s() (asm lines %d->%d)\n",
+                     call_name, tracked_reg,
+                     current_func[0] ? current_func : "<unknown>",
+                     i + 1, j + 1);
+          }
           break;
         }
         /* Stop at label or ret - different basic block */
@@ -711,6 +754,9 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[i], "--security-signext") == 0) {
       g_security_signext = 1;
     } else if (strcmp(argv[i], "--security-476") == 0) {
+      g_security_476 = 1;
+    } else if (strcmp(argv[i], "--emit-anomalies") == 0) {
+      g_emit_anomalies = 1;
       g_security_476 = 1;
     } else if (strncmp(argv[i], "-l", 2) == 0 || strncmp(argv[i], "-L", 2) == 0 || strncmp(argv[i], "-O", 2) == 0) {
       /* ignore linker flags */
@@ -859,7 +905,7 @@ int main(int argc, char **argv) {
 
   /* security pass: null-deref detection */
   if (g_security_476) {
-    security_nullderef_scan(asm_file);
+    security_nullderef_scan(cc, asm_file);
   }
 
   /* assemble and link if not stopping at assembly */

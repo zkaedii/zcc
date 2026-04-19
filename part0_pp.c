@@ -5,7 +5,7 @@
 #define PP_MAX_MACROS 4096
 #define PP_MAX_PARAMS 16
 static int _warned_pp_max_params = 0;
-#define PP_MAX_BODY   16384
+#define PP_MAX_BODY   65536
 #define PP_MAX_INCLUDE_DEPTH 32
 
 typedef struct {
@@ -13,7 +13,8 @@ typedef struct {
     int  is_function_like;
     int  num_params;
     char params[PP_MAX_PARAMS][64];
-    char body[PP_MAX_BODY];
+    char *body;
+    int  body_cap;
     int  active;
 } PPMacro;
 
@@ -51,6 +52,7 @@ typedef struct {
     PPInputCtx input_stack[32];
     int input_depth;
     char *alloc_buf;
+    int pop_barrier;
 } PPState;
 
 static const char *zcc_stddef_text = 
@@ -136,7 +138,7 @@ static char pp_peek(PPState *state) {
         printf("DEBUG zcc2 pp_peek_cnt=%d pos=%d line=%d\n", pp_peek_cnt, state->pos, state->line);
         fflush(stdout);
     }
-    while (state->pos >= state->len && state->input_depth > 0) {
+    while (state->pos >= state->len && state->input_depth > state->pop_barrier) {
         if (state->alloc_buf) free(state->alloc_buf);
         state->input_depth--;
         if (state->input_stack[state->input_depth].expanding_macro) {
@@ -216,6 +218,8 @@ static PPMacro *pp_add_macro(PPState *state, const char *name) {
     memset(m_macro, 0, sizeof(PPMacro));
     strncpy(m_macro->name, name, 127);
     m_macro->active = 1;
+    m_macro->body_cap = 256;
+    m_macro->body = (char *)calloc(1, m_macro->body_cap);
     return m_macro;
 }
 
@@ -247,6 +251,47 @@ static void pp_read_line(PPState *state, char *buf, int max) {
         if (!in_comment && c != '\n') buf[i++] = c;
     }
     buf[i] = 0;
+}
+
+static void pp_read_macro_body(PPState *state, PPMacro *m, int max_limit) {
+    int i = 0;
+    int in_comment = 0;
+    if (!m->body) {
+        m->body_cap = 256;
+        m->body = (char *)calloc(1, m->body_cap);
+    }
+    
+    while (pp_peek(state) != 0) {
+        if (i >= m->body_cap - 2) {
+            m->body_cap *= 2;
+            m->body = (char *)realloc(m->body, m->body_cap);
+        }
+        if (i >= max_limit - 1) {
+            fprintf(stderr, "zcc: macro body exceeds PP_MAX_BODY (%d bytes)\n", max_limit);
+            exit(1);
+        }
+        char c = pp_peek(state);
+        if (c == '\n' && !in_comment) break;
+        if (c == '\\' && state->src[state->pos + 1] == '\n') {
+            pp_next(state); pp_next(state);
+            continue;
+        }
+        if (!in_comment && c == '/' && state->src[state->pos + 1] == '/') {
+            while (pp_peek(state) != '\n' && pp_peek(state) != 0) pp_next(state);
+            break;
+        }
+        if (!in_comment && c == '/' && state->src[state->pos + 1] == '*') {
+            in_comment = 1; pp_next(state); pp_next(state);
+            continue;
+        }
+        if (in_comment && c == '*' && state->src[state->pos + 1] == '/') {
+            in_comment = 0; pp_next(state); pp_next(state);
+            continue;
+        }
+        pp_next(state);
+        if (!in_comment && c != '\n') m->body[i++] = c;
+    }
+    m->body[i] = 0;
 }
 
 static int pp_is_active(PPState *state) {
@@ -529,10 +574,10 @@ static void pp_parse_directive(PPState *state) {
                 m->is_function_like = 1;
                 pp_parse_params(state, m);
                 pp_skip_whitespace(state);
-                pp_read_line(state, m->body, PP_MAX_BODY);
+                pp_read_macro_body(state, m, PP_MAX_BODY);
             } else {
                 pp_skip_whitespace(state);
-                pp_read_line(state, m->body, PP_MAX_BODY);
+                pp_read_macro_body(state, m, PP_MAX_BODY);
             }
         } else if (strcmp(dir, "undef") == 0) {
             char name[128];
@@ -572,7 +617,12 @@ static void pp_parse_directive(PPState *state) {
 static void pp_expand_ident(PPState *state, const char *ident) {
     PPMacro *m;
     int i, p_count;
-    char args[PP_MAX_PARAMS][256];
+    char *args[PP_MAX_PARAMS];
+    int arg_caps[PP_MAX_PARAMS];
+    for (i = 0; i < PP_MAX_PARAMS; i++) {
+        arg_caps[i] = 256;
+        args[i] = (char *)malloc(arg_caps[i]);
+    }
     char c;
     
     if (strcmp(ident, "defined") == 0) {
@@ -670,7 +720,11 @@ static void pp_expand_ident(PPState *state, const char *ident) {
         if (c == '\\') {
             pp_next(state);
             if (pp_peek(state) == '\n') { pp_next(state); continue; }
-            if (p_count < PP_MAX_PARAMS && arg_idx < 254) {
+            if (p_count < PP_MAX_PARAMS) {
+                if (arg_idx >= arg_caps[p_count] - 2) {
+                    arg_caps[p_count] *= 2;
+                    args[p_count] = (char *)realloc(args[p_count], arg_caps[p_count]);
+                }
                 args[p_count][arg_idx++] = c;
                 args[p_count][arg_idx++] = pp_next(state);
                 args[p_count][arg_idx] = 0;
@@ -701,7 +755,11 @@ static void pp_expand_ident(PPState *state, const char *ident) {
             }
         }
         
-        if (p_count < PP_MAX_PARAMS && arg_idx < 255) {
+        if (p_count < PP_MAX_PARAMS) {
+            if (arg_idx >= arg_caps[p_count] - 1) {
+                arg_caps[p_count] *= 2;
+                args[p_count] = (char *)realloc(args[p_count], arg_caps[p_count]);
+            }
             args[p_count][arg_idx++] = c;
             args[p_count][arg_idx] = 0;
         } else if (p_count >= PP_MAX_PARAMS) {
@@ -711,31 +769,56 @@ static void pp_expand_ident(PPState *state, const char *ident) {
     }
     
     /* PRE-EXPAND ARGUMENTS */
-    char expanded_args[PP_MAX_PARAMS][1024];
+    char *expanded_args[PP_MAX_PARAMS];
+    int expanded_cap[PP_MAX_PARAMS];
+    for (i = 0; i < p_count; i++) {
+        expanded_cap[i] = 1024;
+        expanded_args[i] = (char *)malloc(expanded_cap[i]);
+    }
     for (i = 0; i < p_count; i++) { /* using p_count which is correctly set */
+        /* Save */
+        int old_barrier = state->pop_barrier;
         char *old_out = state->out;
         int old_out_len = state->out_len;
         int old_out_cap = state->out_cap;
         
+        /* Raise barrier before pushing arg stream */
+        state->pop_barrier = state->input_depth;
         state->out = expanded_args[i];
         state->out_len = 0;
-        state->out_cap = 1023;
+        state->out_cap = expanded_cap[i] - 1;
         
-        /* Evaluate arg[i] as an independent parsing stream */
         pp_push_input(state, args[i], NULL, NULL);
-        pp_parse_target_depth(state, state->input_depth); 
+        pp_parse_target_depth(state, state->input_depth);
+        
+        /* Force-drain residual frames under the barrier */
+        while (state->input_depth > state->pop_barrier) {
+            if (state->alloc_buf) free(state->alloc_buf);
+            state->input_depth--;
+            if (state->input_stack[state->input_depth].expanding_macro)
+                state->input_stack[state->input_depth].expanding_macro->active = 1;
+            state->src       = state->input_stack[state->input_depth].src;
+            state->pos       = state->input_stack[state->input_depth].pos;
+            state->len       = state->input_stack[state->input_depth].len;
+            state->alloc_buf = state->input_stack[state->input_depth].alloc_buf;
+        }
+        
+        /* Sync heap pointer back — realloc may have moved it */
+        expanded_args[i] = state->out;
+        expanded_cap[i] = state->out_cap + 1;
         expanded_args[i][state->out_len] = 0;
         
-        /* restore */
+        /* Restore */
         state->out = old_out;
         state->out_len = old_out_len;
         state->out_cap = old_out_cap;
+        state->pop_barrier = old_barrier;
     }
     
     /* substitute */
     int len = strlen(m->body);
-    int est_len = len + (p_count * 256) + 1;
-    char *subst = (char *)malloc(est_len);
+    int subst_cap = 1024;
+    char *subst = (char *)malloc(subst_cap);
     int subst_idx = 0;
     
     for (i = 0; i < len; i++) {
@@ -770,13 +853,27 @@ static void pp_expand_ident(PPState *state, const char *ident) {
             }
             
             if (found >= 0 && found < p_count) {
+                int exp_len = strlen(expanded_args[found]);
+                if (subst_idx + exp_len + 128 > subst_cap) {
+                    subst_cap = (subst_idx + exp_len + 1024) * 2;
+                    subst = (char *)realloc(subst, subst_cap);
+                }
                 strcpy(subst + subst_idx, expanded_args[found]);
-                subst_idx += strlen(expanded_args[found]);
+                subst_idx += exp_len;
             } else {
+                int param_len = strlen(param_name);
+                if (subst_idx + param_len + 128 > subst_cap) {
+                    subst_cap = (subst_idx + param_len + 1024) * 2;
+                    subst = (char *)realloc(subst, subst_cap);
+                }
                 strcpy(subst + subst_idx, param_name);
-                subst_idx += strlen(param_name);
+                subst_idx += param_len;
             }
         } else {
+            if (subst_idx + 128 > subst_cap) {
+                subst_cap *= 2;
+                subst = (char *)realloc(subst, subst_cap);
+            }
             subst[subst_idx++] = m->body[i];
         }
     }
@@ -785,6 +882,13 @@ static void pp_expand_ident(PPState *state, const char *ident) {
     /* Standard C preprocessor hide-set logic */
     m->active = 0;
     pp_push_input(state, subst, subst, m);
+
+    for (i = 0; i < PP_MAX_PARAMS; i++) {
+        if (args[i]) free(args[i]);
+    }
+    for (i = 0; i < p_count; i++) {
+        if (expanded_args[i]) free(expanded_args[i]);
+    }
 }
 
 static void pp_parse_target_depth(PPState *state, int target_depth) {
@@ -887,6 +991,13 @@ char *zcc_preprocess(const char *source, int source_len,
     pp_emit(state, 0);
     if (out_len) *out_len = state->out_len - 1;
     result = state->out;
+    for (int i = 0; i < state->num_macros; i++) {
+        if (state->macros[i].body) {
+            free(state->macros[i].body);
+            state->macros[i].body = NULL;
+            state->macros[i].body_cap = 0;
+        }
+    }
     free(state);
     return result;
 }

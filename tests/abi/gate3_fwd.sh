@@ -1,0 +1,13 @@
+# tests/abi/gate3_fwd.sh
+set -e
+cd /mnt/h/__DOWNLOADS/zcc_github_upload
+echo "Starting Gate 3: Forward Inter-op"
+for t in ret_int_int ret_sse_sse ret_sse_int ret_int_sse ret_tvalue; do
+    echo "Testing $t..."
+    ./zcc -c tests/abi/${t}_lib.c -o ${t}.o
+    gcc tests/abi/${t}_main.c ${t}.o -o ${t}_fwd -lm
+    ./${t}_fwd
+    echo "PASS: $t forward"
+    rm -f ${t}.o ${t}_fwd
+done
+echo "Gate 3: ALL PASS"

@@ -509,6 +509,7 @@ struct Compiler {
     int pending_packed;     /* __attribute__((packed)) seen before struct keyword */
     int pending_aligned_n;  /* __attribute__((aligned(N))) value, 0 = none */
     int debug_abi_classes;  /* -fdebug-abi-classes flag */
+    int abi_scratch_offset; /* %rbp-relative offset to 16-byte aggregate return scratch (CG-IR-019) */
 };
 
 typedef struct TargetBackend {

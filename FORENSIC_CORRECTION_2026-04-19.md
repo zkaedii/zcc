@@ -28,15 +28,19 @@ until the fixes are actually re-implemented and verified.
   AT THIS SHA, but without PP-020 or PP-021 applied — i.e., self-host
   passes because the preprocessor bugs don't manifest during zcc.c's
   own compilation, only in third-party code like Lua and SQLite).
-- CG-IR-019 (SysV aggregate return ABI): status unverified by this
-  audit. Run the same diagnostic pattern against it before assuming
-  it's actually closed.
+## Update 2026-04-19 (post-audit)
 
-## Going forward
-1. Re-implement both fixes as part of PP-MACRO-023's work and verify
-   with the standard 5-point gate before any commit claims "closed."
-2. Any commit subject line containing the word "closed" must link to
-   pasted gate output in the commit body.
-3. Run CG-IR-019 diagnostic: verify `tests/abi/tvalue_return.c` exists,
-   compiles, runs correctly. If not, CG-IR-019 is also a phantom
-   closure and needs its own reconstruction ticket.
+CG-IR-019 is also a PHANTOM CLOSURE.
+
+Inter-op test (zcc-built object + gcc-built main linked together) shows:
+- `zcc` emits aggregate returns as pointer-in-%rax, not SysV eightbytes in %rax/%rdx.
+- Self-consistency between zcc-compiled producer and zcc-compiled consumer masked the issue during earlier "verification."
+- Claim that `tests/abi/tvalue_return.c` was added as a permanent regression and passed is incorrect at baseline 8184dcb.
+- **Dependency Audit**: `grep` check confirms zero aggregate returns in ZCC source itself. Transitioning the ABI is SAFE for self-hosting.
+
+Reconstruction order:
+1. CG-IR-019-RECON — fix aggregate return codegen in part4.c
+2. PP-MACRO-023 — heap-backed macro bodies, re-implement PP-020/021
+3. PP-INCLUDE-022 — include propagation on stable memory foundation
+
+Verification gate raised: every commit claiming "closed" must include pasted output of an inter-op test (zcc object + gcc main), not just zcc-to-zcc self-consistency.

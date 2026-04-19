@@ -2790,6 +2790,22 @@ void codegen_expr(Compiler *cc, Node *node) {
         return;
       }
       codegen_expr_checked(cc, node->args[i]);
+      Type *atype = node->args[i]->type;
+      if (atype && (atype->kind == TY_STRUCT || atype->kind == TY_UNION)) {
+          abi_class_t eb[2];
+          classify_aggregate(atype, eb);
+          if (eb[0] != CLASS_MEMORY) {
+              /* Small aggregate: push by value (eightbytes) */
+              fprintf(cc->out, "    movq %%rax, %%r10\n");
+              if (type_size(atype) > 8) {
+                  fprintf(cc->out, "    pushq 8(%%r10)\n");
+                  cc->stack_depth++;
+              }
+              fprintf(cc->out, "    pushq 0(%%r10)\n");
+              cc->stack_depth++;
+              continue;
+          }
+      }
       ir_save_result(&args_ir_1d[i * 32]);
       ZCC_EMIT_ARG(ir_map_type(node->args[i] ? node->args[i]->type : 0), &args_ir_1d[i * 32], node->line);
       push_reg(cc, "rax");
@@ -2810,49 +2826,64 @@ void codegen_expr(Compiler *cc, Node *node) {
         else if (lt->kind == TY_PTR && lt->base && lt->base->kind == TY_FUNC)
           callee_ftype = lt->base;
       }
-      for (i = 0; i < nargs; i++) {
-        if (node->args[i] && node->args[i]->type && is_float_type(node->args[i]->type)) {
+       for (i = 0; i < nargs; i++) {
+        Type *atype = node->args[i]->type;
+        if (atype && (atype->kind == TY_STRUCT || atype->kind == TY_UNION)) {
+            abi_class_t eb[2];
+            classify_aggregate(atype, eb);
+            if (eb[0] != CLASS_MEMORY) {
+                /* Small aggregate: pop eightbytes into correct registers. */
+                /* Pop eightbyte 0 */
+                if (eb[0] == CLASS_SSE) {
+                    if (fp_idx < 8) {
+                        fprintf(cc->out, "    popq %%rax\n");
+                        cc->stack_depth--;
+                        fprintf(cc->out, "    movq %%rax, %%xmm%d\n", fp_idx++);
+                    }
+                } else {
+                    if (gp_idx < 6) {
+                        pop_reg(cc, argregs[gp_idx++]);
+                    }
+                }
+                /* Pop eightbyte 1 */
+                if (type_size(atype) > 8) {
+                    if (eb[1] == CLASS_SSE) {
+                        if (fp_idx < 8) {
+                            fprintf(cc->out, "    popq %%rax\n");
+                            cc->stack_depth--;
+                            fprintf(cc->out, "    movq %%rax, %%xmm%d\n", fp_idx++);
+                        }
+                    } else {
+                        if (gp_idx < 6) {
+                            pop_reg(cc, argregs[gp_idx++]);
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+        if (atype && is_float_type(atype)) {
           if (fp_idx < 8) {
             fprintf(cc->out, "    popq %%rax\n");
             cc->stack_depth--;
             fprintf(cc->out, "    movq %%rax, %%xmm%d\n", fp_idx);
-            /* Check callee's declared param type; if float, convert double->float.
-             * Rules:
-             * - Fixed-param call with TY_FLOAT param → cvtsd2ss (ABI requires float in xmm low 32)
-             * - Variadic '...' args → NO conversion (C promotes float→double)
-             * - Function pointer (callee_ftype == 0) → NO conversion (assume variadic-safe)
-             * - K&R no-prototype → NO conversion (default promotion) */
+            /* Check callee's declared param type... (keep existing conversion logic) */
             {
-              int arg_is_float = (node->args[i]->type->kind == TY_FLOAT);
+              int arg_is_float = (atype->kind == TY_FLOAT);
               if (arg_is_float) {
-                /* New path: arg was a ty_float FLIT or float-typed expression.
-                 * xmm has 32-bit float bits loaded via movss.
-                 * Determine destination: */
                 int in_fixed_float_param = 0;
-                int in_fixed_double_param = 0;
                 if (callee_ftype && callee_ftype->params && i < callee_ftype->num_params) {
-                  if (callee_ftype->params[i]->kind == TY_FLOAT)
-                    in_fixed_float_param = 1;
-                  else if (callee_ftype->params[i]->kind == TY_DOUBLE)
-                    in_fixed_double_param = 1;
+                  if (callee_ftype->params[i]->kind == TY_FLOAT) in_fixed_float_param = 1;
                 }
-                if (in_fixed_float_param) {
-                  /* callee expects float — already in xmm as 32-bit, nothing to do */
-                } else {
-                  /* variadic, fptr, K&R, or double param: C default promotes float→double */
+                if (!in_fixed_float_param) {
                   fprintf(cc->out, "    cvtss2sd %%xmm%d, %%xmm%d\n", fp_idx, fp_idx);
-                  (void)in_fixed_double_param;
                 }
               } else {
-                /* arg is ty_double */
                 int need_cvt = 0;
                 if (callee_ftype && callee_ftype->params && i < callee_ftype->num_params) {
-                  if (callee_ftype->params[i] && callee_ftype->params[i]->kind == TY_FLOAT)
-                    need_cvt = 1;
+                  if (callee_ftype->params[i] && callee_ftype->params[i]->kind == TY_FLOAT) need_cvt = 1;
                 }
-                if (need_cvt) {
-                  fprintf(cc->out, "    cvtsd2ss %%xmm%d, %%xmm%d\n", fp_idx, fp_idx);
-                }
+                if (need_cvt) fprintf(cc->out, "    cvtsd2ss %%xmm%d, %%xmm%d\n", fp_idx, fp_idx);
               }
             }
             fp_idx++;
@@ -2911,7 +2942,37 @@ void codegen_expr(Compiler *cc, Node *node) {
       }
     }
 
-    if (node->type && is_float_type(node->type)) {
+    /* CG-IR-019: System V aggregate return capture */
+    if (node->type && (node->type->kind == TY_STRUCT || node->type->kind == TY_UNION)) {
+        abi_class_t eb[2];
+        classify_aggregate(node->type, eb);
+        if (eb[0] != CLASS_MEMORY) {
+            /* Small aggregate: capture registers into scratch buffer immediately post-call.
+             * This must happen before any stack cleanup or other register clobbering. */
+            fprintf(cc->out, "    # SysV spill for %s\n", node->type->tag[0] ? node->type->tag : "<anon>");
+            
+            int cur_gp = 0, cur_fp = 0;
+            char *ret_gpregs[] = { "rax", "rdx" };
+
+            /* Eightbyte 0 */
+            if (eb[0] == CLASS_SSE) {
+                fprintf(cc->out, "    movq %%xmm%d, %d(%%rbp)\n", cur_fp++, cc->abi_scratch_offset);
+            } else {
+                fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", ret_gpregs[cur_gp++], cc->abi_scratch_offset);
+            }
+
+            /* Eightbyte 1 */
+            if (type_size(node->type) > 8) {
+                if (eb[1] == CLASS_SSE) {
+                    fprintf(cc->out, "    movq %%xmm%d, %d(%%rbp)\n", cur_fp++, cc->abi_scratch_offset + 8);
+                } else {
+                    fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", ret_gpregs[cur_gp++], cc->abi_scratch_offset + 8);
+                }
+            }
+            /* Set %rax to the address of the scratch buffer for downstream consumption. */
+            fprintf(cc->out, "    leaq %d(%%rbp), %%rax\n", cc->abi_scratch_offset);
+        }
+    } else if (node->type && is_float_type(node->type)) {
         fprintf(cc->out, "    movq %%xmm0, %%rax\n");
     } else if (node->type && !node_type_unsigned(node)) {
         if (node->type->size == 4) { if (!backend_ops) fprintf(cc->out, "    cltq\n"); }
@@ -2979,6 +3040,42 @@ void codegen_stmt(Compiler *cc, Node *node) {
   case ND_RETURN:
     if (node->lhs) {
       codegen_expr_checked(cc, node->lhs);
+      /* CG-IR-019: System V aggregate return support */
+      Type *ty = node->lhs->type;
+      if (ty && (ty->kind == TY_STRUCT || ty->kind == TY_UNION)) {
+        abi_class_t eb[2];
+        classify_aggregate(ty, eb);
+        if (eb[0] != CLASS_MEMORY) {
+          /* Small aggregate return: classify and load into registers.
+           * Use %r10 as a temporary base to avoid clobbering %rax (the result address). */
+          fprintf(cc->out, "    movq %%rax, %%r10\n");
+          
+          int cur_gp = 0, cur_fp = 0;
+          char *ret_gpregs[] = { "rax", "rdx" };
+
+          /* Eightbyte 0 */
+          if (eb[0] == CLASS_SSE) {
+            fprintf(cc->out, "    movq 0(%%r10), %%xmm%d\n", cur_fp++);
+          } else {
+            fprintf(cc->out, "    movq 0(%%r10), %%%s\n", ret_gpregs[cur_gp++]);
+          }
+          
+          /* Eightbyte 1 (optional) */
+          if (type_size(ty) > 8) {
+            if (eb[1] == CLASS_SSE) {
+              fprintf(cc->out, "    movq 8(%%r10), %%xmm%d\n", cur_fp++);
+            } else {
+              fprintf(cc->out, "    movq 8(%%r10), %%%s\n", ret_gpregs[cur_gp++]);
+            }
+          }
+          
+          /* Jump directly to epilogue */
+          if (backend_ops) fprintf(cc->out, "    b .Lfunc_end_%d\n", cc->func_end_label);
+          else fprintf(cc->out, "    jmp .Lfunc_end_%d\n", cc->func_end_label);
+          return;
+        }
+      }
+
       {
         char ret_tmp[32];
         ir_save_result(ret_tmp);
@@ -3561,6 +3658,8 @@ void codegen_func(Compiler *cc, Node *func) {
       backend_ops->emit_prologue(cc, func);
   } else {
       stack_size = func->stack_size + 40; /* reserve 5x8 byte push slots */
+      stack_size += 16;                   /* ABI: 16-byte scratch for aggregate returns (CG-IR-019) */
+      cc->abi_scratch_offset = -stack_size;
       if (func->func_type && func->func_type->is_variadic) {
           stack_size += 176;
       }
@@ -3602,15 +3701,36 @@ void codegen_func(Compiler *cc, Node *func) {
   int gp_idx = 0;
   if (!backend_ops) {
   for (i = 0; i < func->num_params; i++) {
-    int sz = type_size(func->param_types[i]);
+    Type *ptype = func->param_types[i];
+    int sz = type_size(ptype);
     if (sz < 8) sz = 8;
     param_offset -= sz;
     
-    if (func->param_types[i]->kind == TY_STRUCT || func->param_types[i]->kind == TY_UNION) {
-        if (i < 6) {
+    if (ptype->kind == TY_STRUCT || ptype->kind == TY_UNION) {
+        abi_class_t eb[2];
+        classify_aggregate(ptype, eb);
+        if (eb[0] != CLASS_MEMORY) {
+            /* Small aggregate in registers: load each eightbyte from correct register set. */
+            if (eb[0] == CLASS_SSE) {
+                if (f_idx < 8) fprintf(cc->out, "    movq %%xmm%d, %d(%%rbp)\n", f_idx++, param_offset);
+            } else {
+                if (gp_idx < 6) fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx++], param_offset);
+            }
+            if (type_size(ptype) > 8) {
+                if (eb[1] == CLASS_SSE) {
+                    if (f_idx < 8) fprintf(cc->out, "    movq %%xmm%d, %d(%%rbp)\n", f_idx++, param_offset + 8);
+                } else {
+                    if (gp_idx < 6) fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx++], param_offset + 8);
+                }
+            }
+            continue;
+        }
+        /* MEMORY class: pointer is passed in next available GPR or on stack. */
+        if (gp_idx < 6) {
           fprintf(cc->out, "    movq %%%s, %%r10\n", argregs[gp_idx]);
           gp_idx++;
         } else {
+          /* Fallback for many-args: ZCC simplified stack handling */
           fprintf(cc->out, "    movq %d(%%rbp), %%r10\n", 16 + (i - 6) * 8);
         }
         int j;
@@ -3618,20 +3738,17 @@ void codegen_func(Compiler *cc, Node *func) {
             fprintf(cc->out, "    movb %d(%%r10), %%al\n", j);
             fprintf(cc->out, "    movb %%al, %d(%%rbp)\n", param_offset + j);
         }
-    } else if (is_float_type(func->param_types[i])) {
+    } else if (is_float_type(ptype)) {
         if (f_idx < 8) {
-            if (func->param_types[i]->kind == TY_FLOAT) {
-                fprintf(cc->out, "    movss %%xmm%d, %d(%%rbp)\n", f_idx, param_offset);
-            } else {
-                fprintf(cc->out, "    movsd %%xmm%d, %d(%%rbp)\n", f_idx, param_offset);
-            }
+            if (ptype->kind == TY_FLOAT) fprintf(cc->out, "    movss %%xmm%d, %d(%%rbp)\n", f_idx, param_offset);
+            else fprintf(cc->out, "    movsd %%xmm%d, %d(%%rbp)\n", f_idx, param_offset);
+            f_idx++;
         } else {
             fprintf(cc->out, "    movq %d(%%rbp), %%rax\n", 16 + (i - 6) * 8);
             fprintf(cc->out, "    movq %%rax, %d(%%rbp)\n", param_offset);
         }
-        f_idx++;
     } else {
-        if (i < 6) {
+        if (gp_idx < 6) {
           fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx], param_offset);
           gp_idx++;
         } else {

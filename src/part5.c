@@ -691,6 +691,14 @@ static void security_nullderef_scan(Compiler *cc, char *filename) {
           findings++;
           char *reported_var = current_owner[0] ? current_owner : clean_call;
           if (g_emit_anomalies) {
+              /* Option 1: JSON consumers (like the mutation applier) require a valid
+               * lvalue owner to synthesize a guard. If missing (e.g. member assignment),
+               * suppress the anomaly entirely to prevent unactionable reports.
+               * Human reviewers (--security-476) still see the function-name fallback.
+               */
+              if (!current_owner[0]) {
+                  break;
+              }
               Symbol *sym = scope_find(cc, current_func);
               const char *ret_type = "unknown";
               if (sym && sym->type && sym->type->kind == TY_FUNC) {

@@ -36,14 +36,14 @@ void *cc_alloc(Compiler *cc, int size) {
             return p;
         }
         if (!a->next) {
-            if (block_count >= 512) {
+            if (block_count >= 8192) {
                 printf("zcc: too many arena blocks (%d) — possible infinite loop or corrupt AST (last alloc size=%d)\n", block_count, size);
                 if (cc) {
                     printf("zcc: stuck near token kind=%d line=%d text=%.127s\n", cc->tk, cc->tk_line, cc->tk_text);
                 }
                 exit(1);
             }
-            if (block_count >= 500 && cc) {
+            if (block_count >= 8000 && cc) {
                 printf("zcc: near block limit block_count=%d token=%d line=%d size=%d text=%.127s\n", block_count, cc->tk, cc->tk_line, size, cc->tk_text);
             }
             block_count++;
@@ -1053,6 +1053,7 @@ again:
 
     /* unknown character — skip */
     goto again;
+
 }
 
 /* Token enum in part1 runs 0..TK_HASH. Stage2 may compile enums to different values (75-81 seen); use 128 so we only flag obvious garbage. */
@@ -1066,7 +1067,7 @@ static const char *token_name(int t) {
         "IF", "ELSE", "WHILE", "FOR", "DO", "RETURN", "BREAK", "CONTINUE", "GOTO",
         "SWITCH", "CASE", "DEFAULT", "STRUCT", "UNION", "ENUM", "TYPEDEF",
         "SIZEOF", "STATIC", "EXTERN", "CONST", "VOLATILE", "AUTO", "REGISTER", "INLINE",
-        "BUILTIN_VA_ARG",
+        "ASM", "BUILTIN_VA_ARG", "TYPEOF", "AUTO_TYPE",
         "PLUS", "MINUS", "STAR", "SLASH", "PERCENT", "AMP", "PIPE", "CARET", "TILDE", "BANG",
         "ASSIGN", "EQ", "NE", "LT", "GT", "LE", "GE", "LAND", "LOR", "SHL", "SHR",
         "INC", "DEC", "ARROW", "DOT", "QUESTION", "COLON",
@@ -1075,7 +1076,7 @@ static const char *token_name(int t) {
         "LPAREN", "RPAREN", "LBRACE", "RBRACE", "LBRACKET", "RBRACKET",
         "SEMI", "COMMA", "ELLIPSIS", "HASH"
     };
-    if (t >= 0 && t < 85) return names[t];  /* 85 = number of token names; avoid sizeof for stage2 parse */
+    if (t >= 0 && t < 88) return names[t];  /* 88 = number of token names */
     return "?";
 }
 

@@ -122,6 +122,7 @@ static const char *zcc_stddef_text =
 "#define __builtin_types_compatible_p(x, y) 0\n"
 "#define __builtin_unreachable()\n"
 "#define __x86_64__ 1\n"
+"#define LUA_USE_JUMPTABLE 0\n"
 "#define __GNUC__ 1\n"
 "#define __attribute__(x)\n"
 "#define __declspec(x)\n"

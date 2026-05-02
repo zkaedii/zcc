@@ -1,0 +1,3 @@
+error[RUST-UNS-E0408]: unsupported Rust feature: reference types (`&T`, `&mut T`)
+  --> tests/rust/unsupported-reference.rs:1:9
+  hint: only `i32` and `bool` value types are supported; references are planned for P5

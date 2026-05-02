@@ -281,7 +281,6 @@ static char *read_file(char *path, int *out_len) {
   char *buf;
   int nr;
 
-  fprintf(stderr, "read_file: path = '%s' (addr: %p)\n", path, path);
   fp = fopen(path, "rb");
   if (!fp)
     return 0;

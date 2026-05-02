@@ -26,15 +26,15 @@
 
 enum {
     MAX_IDENT   = 128,
-    MAX_STR     = 4096,
+    MAX_STR     = 16384,
     MAX_STRINGS = 262144,
     MAX_GLOBALS = 262144,
     MAX_STRUCTS = 65536,
     MAX_PARAMS  = 128,
     MAX_CALL_ARGS = 256,
     MAX_CASES   = 4096,
-    MAX_INIT    = 262144,
-    ARENA_SIZE  = 67108864
+    MAX_INIT    = 1048576,
+    ARENA_SIZE  = 536870912
 };
 
 /* ================================================================ */
@@ -138,6 +138,8 @@ typedef struct Compiler Compiler;
 typedef struct ArenaBlock ArenaBlock;
 typedef struct StringEntry StringEntry;
 typedef struct StructField StructField;
+typedef struct RustAst RustAst;
+typedef struct RustDiag RustDiag;
 
 /* ================================================================ */
 /* DATA STRUCTURES                                                   */
@@ -176,6 +178,7 @@ struct Type {
     int is_complete;
     int is_packed;   /* __attribute__((packed)) — suppress field alignment */
     int explicit_align; /* __attribute__((aligned(N))) — override total align, 0 = none */
+    int is_tbfp;     /* transparent bitfield packing (tbfp) marker */
 };
 
 struct StringEntry {
@@ -258,6 +261,9 @@ struct Node {
     int num_params;
     Node *body;
     int stack_size;
+    /* param capture arrays (used by parse_func_def in part3.c) */
+    Type *param_types[MAX_PARAMS];
+    char param_names_buf[MAX_PARAMS][MAX_IDENT];
 
     /* ND_MEMBER */
     char member_name[MAX_IDENT];
@@ -304,20 +310,7 @@ char *zcc_preprocess(const char *source, int source_len, const char *filename, c
 #include "zcc_ast_bridge.h"
 
 /* Keep nd_to_znd mapping in sync with this file's enum. */
-/* _Static_assert(ND_NUM == ZCC_ND_NUM, "zcc_ast_bridge.h: ND_NUM out of sync"); */
-/* _Static_assert(ND_STR == ZCC_ND_STR, "zcc_ast_bridge.h: ND_STR out of sync"); */
-/* _Static_assert(ND_WHILE == ZCC_ND_WHILE, "zcc_ast_bridge.h: ND_WHILE out of sync"); */
-/* _Static_assert(ND_CAST == ZCC_ND_CAST, "zcc_ast_bridge.h: ND_CAST out of sync"); */
-/* _Static_assert(ND_CALL == ZCC_ND_CALL, "zcc_ast_bridge.h: ND_CALL out of sync"); */
-/* _Static_assert(ND_NOP == ZCC_ND_NOP, "zcc_ast_bridge.h: ND_NOP out of sync"); */
-/* _Static_assert(ND_GT == ZCC_ND_GT, "zcc_ast_bridge.h: ND_GT out of sync"); */
-/* _Static_assert(ND_GE == ZCC_ND_GE, "zcc_ast_bridge.h: ND_GE out of sync"); */
-/* _Static_assert(ND_EQ == ZCC_ND_EQ, "zcc_ast_bridge.h: ND_EQ out of sync"); */
-/* _Static_assert(ND_NE == ZCC_ND_NE, "zcc_ast_bridge.h: ND_NE out of sync"); */
-/* _Static_assert(ND_MOD == ZCC_ND_MOD, "zcc_ast_bridge.h: ND_MOD out of sync"); */
-/* _Static_assert(ND_ADDR == ZCC_ND_ADDR, "zcc_ast_bridge.h: ND_ADDR out of sync"); */
-/* _Static_assert(ND_DEREF == ZCC_ND_DEREF, "zcc_ast_bridge.h: ND_DEREF out of sync"); */
-/* _Static_assert(ND_SWITCH == ZCC_ND_SWITCH, "zcc_ast_bridge.h: ND_SWITCH out of sync"); */
+#include "zcc_ast_bridge_asserts.inc"
 
 /* Bridge accessors: Node* → IR bridge (Option A copy boundary). */
 int is_pointer(Type *t);
@@ -513,6 +506,7 @@ struct Compiler {
     /* pending __attribute__ flags — set by lexer, consumed by parse_struct_or_union */
     int pending_packed;     /* __attribute__((packed)) seen before struct keyword */
     int pending_aligned_n;  /* __attribute__((aligned(N))) value, 0 = none */
+    int pending_tbfp;       /* transparent bitfield packing flag, consumed by parse_struct_or_union */
     int debug_abi_classes;  /* -fdebug-abi-classes flag */
     int abi_scratch_offset; /* %rbp-relative offset to 16-byte aggregate return scratch (CG-IR-019) */
     int used_regs_mask;     /* for telemetry tracking */
@@ -529,6 +523,70 @@ typedef struct TargetBackend {
     void (*emit_store_stack)(Compiler *cc, int offset, const char *reg);
     void (*emit_float_binop)(Compiler *cc, int op);
 } TargetBackend;
+
+typedef enum {
+    FRONTEND_LANG_C = 0,
+    FRONTEND_LANG_RUST = 1
+} FrontendLang;
+
+typedef unsigned int RustSymbolId;
+typedef enum {
+    RUST_SYMBOL_INVALID = 0
+} RustSymbolConst;
+
+typedef enum {
+    RUST_SYMBOL_FUNCTION = 0,
+    RUST_SYMBOL_LOCAL,
+    RUST_SYMBOL_PARAM
+} RustSymbolKind;
+
+typedef struct RustSymbol {
+    RustSymbolId id;
+    RustSymbolKind kind;
+    const char *name;
+    int line;
+    int col;
+    unsigned scope_depth;
+} RustSymbol;
+
+typedef struct RustResolveContext {
+    const char *filename;
+    RustAst *ast;
+    RustDiag *diags;
+    int *num_diags;
+    int max_diags;
+    RustSymbol *symbols;
+    int symbol_count;
+    int symbol_capacity;
+    int had_error;
+} RustResolveContext;
+
+typedef struct RustTypecheckContext {
+    const char *filename;
+    RustAst *ast;
+    RustDiag *diags;
+    int *num_diags;
+    int max_diags;
+    const RustSymbol *symbols;
+    int symbol_count;
+    int *symbol_types;
+    int symbol_types_len;
+    int strict_let_annotations;
+    int strict_function_signatures;
+    int had_error;
+} RustTypecheckContext;
+
+typedef struct RustLowerContext {
+    const char *filename;
+    RustAst *ast;
+    const RustSymbol *symbols;
+    int symbol_count;
+    RustDiag *diags;
+    int *num_diags;
+    int max_diags;
+    int had_error;
+    int dump_ir;
+} RustLowerContext;
 
 extern TargetBackend *backend_ops;
 extern int ZCC_POINTER_WIDTH;
@@ -591,6 +649,11 @@ int peek_token(Compiler *cc);
 void error(Compiler *cc, char *msg);
 void error_at(Compiler *cc, int line, char *msg);
 void classify_aggregate(Type *agg, abi_class_t eb[2]);
+int rust_frontend_compile_file(const char *filename, const char *source, int source_len, int dump_ast, int dump_ast_with_symbols, int dump_symbol_table, int dump_ir, int strict_let_annotations, int strict_function_signatures, int rust_dump_phase);
+int rust_backend_bridge_compile_file(const char *filename, const char *source, int source_len, const char *output_file, int compile_only, int strict_let_annotations, int strict_function_signatures, int rust_dump_phase);
+int rust_resolve_names(RustResolveContext *ctx);
+int rust_typecheck(RustTypecheckContext *ctx);
+int rust_lower_to_ir(RustLowerContext *ctx);
 
 /* ZKAEDI FORCE RENDER CACHE INVALIDATION */
 /* part0_pp.c -- ZCC Preprocessor */
@@ -705,11 +768,12 @@ static const char *zcc_stddef_text =
 "#define asm(a,b,c,d,e)\n"
 "typedef struct { unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area; } __va_list_struct[1];\n"
 "#define __builtin_va_list __va_list_struct\n"
-"#define __builtin_va_end(v)\n"
+"void __builtin_va_start(__builtin_va_list ap, ...);\n"
+"void __builtin_va_end(__builtin_va_list ap);\n"
 "/* PP-STUB-024B: route va_* to ZCC builtins so va_arg(ap,type) is parsed correctly */\n"
 "#define va_list __builtin_va_list\n"
-"#define va_start(ap, last) ((void)0)\n"
-"#define va_end(ap)         ((void)0)\n"
+"#define va_start(ap, last) __builtin_va_start(ap, last)\n"
+"#define va_end(ap)         __builtin_va_end(ap)\n"
 "#define va_copy(dst, src)  ((dst)[0] = (src)[0])\n"
 "#define va_arg(ap, type)   __builtin_va_arg(ap, type)\n"
 "#define __builtin_expect(exp, c) (exp)\n"
@@ -743,9 +807,44 @@ static const char *zcc_stddef_text =
 "typedef unsigned long uintptr_t;\n"
 "/* PP-STUB-024: signal.h / setjmp.h / stdint primitives for Lua internals */\n"
 "typedef int sig_atomic_t;\n"
-"typedef unsigned int jmp_buf[14];\n"
+"typedef long jmp_buf[25];  /* x86-64 glibc: __jmp_buf(64) + mask_saved(4) + sigset(128) + pad = 200 bytes */\n"
 "typedef struct _IO_FILE FILE;\n"
 "extern FILE *stdin, *stdout, *stderr;\n"
+"char *getenv(const char *name);\n"
+"int setenv(const char *name, const char *value, int overwrite);\n"
+"int unsetenv(const char *name);\n"
+"unsigned long long strtoull(const char *s, char **end, int base);\n"
+"long long strtoll(const char *s, char **end, int base);\n"
+"long strtol(const char *s, char **end, int base);\n"
+"unsigned long strtoul(const char *s, char **end, int base);\n"
+"double strtod(const char *s, char **end);\n"
+"int abs(int n);\n"
+"long labs(long n);\n"
+"long long llabs(long long n);\n"
+"void abort(void);\n"
+"int atexit(void (*fn)(void));\n"
+"int atoi(const char *s);\n"
+"long atol(const char *s);\n"
+"double atof(const char *s);\n"
+"void *bsearch(const void *key, const void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *));\n"
+"void qsort(void *base, size_t n, size_t sz, int (*cmp)(const void *, const void *));\n"
+"int system(const char *cmd);\n"
+"/* string.h extras needed by Lua */\n"
+"int memcmp(const void *a, const void *b, size_t n);\n"
+"void *memmove(void *dst, const void *src, size_t n);\n"
+"char *strncpy(char *dst, const char *src, size_t n);\n"
+"char *strncat(char *dst, const char *src, size_t n);\n"
+"int strncmp(const char *a, const char *b, size_t n);\n"
+"char *strchr(const char *s, int c);\n"
+"char *strrchr(const char *s, int c);\n"
+"size_t strspn(const char *s, const char *accept);\n"
+"size_t strcspn(const char *s, const char *reject);\n"
+"char *strpbrk(const char *s, const char *accept);\n"
+"char *strstr(const char *haystack, const char *needle);\n"
+"int strcoll(const char *a, const char *b);\n"
+"size_t strxfrm(char *dst, const char *src, size_t n);\n"
+"char *strtok(char *s, const char *delim);\n"
+"char *strerror(int errnum);\n"
 "#endif\n";
 
 static void pp_emit(PPState *state, char c) {
@@ -779,12 +878,27 @@ static char pp_peek(PPState *state) {
         state->alloc_buf = state->input_stack[state->input_depth].alloc_buf;
     }
     if (state->pos >= state->len) return 0;
+    if (state->src[state->pos] == '\r') return '\n';
     return state->src[state->pos];
+}
+
+static int pp_is_line_continuation(PPState *state) {
+    if (state->pos + 1 >= state->len) return 0;
+    if (state->src[state->pos] != '\\') return 0;
+    if (state->src[state->pos + 1] == '\n') return 1;
+    if (state->src[state->pos + 1] == '\r') return 1;
+    return 0;
 }
 
 static char pp_next(PPState *state) {
     char c = pp_peek(state);
     if (c) {
+        if (c == '\r') {
+            if (state->input_depth == 0) state->line++;
+            state->pos++;
+            if (state->pos < state->len && state->src[state->pos] == '\n') state->pos++;
+            return '\n';
+        }
         if (c == '\n' && state->input_depth == 0) state->line++;
         state->pos++;
     }
@@ -857,11 +971,12 @@ static void pp_read_line(PPState *state, char *buf, int max) {
     int in_comment = 0;
     while (pp_peek(state) != 0 && i < max - 1) {
         char c = pp_peek(state);
-        if (c == '\n' && !in_comment) {
+        if ((c == '\n' || c == '\r') && !in_comment) {
             break;
         }
-        if (c == '\\' && state->src[state->pos + 1] == '\n') {
-            pp_next(state); pp_next(state);
+        if (pp_is_line_continuation(state)) {
+            pp_next(state);
+            if (pp_peek(state) == '\n' || pp_peek(state) == '\r') pp_next(state);
             continue;
         }
         if (!in_comment && c == '/' && state->src[state->pos + 1] == '/') {
@@ -877,7 +992,7 @@ static void pp_read_line(PPState *state, char *buf, int max) {
             continue;
         }
         pp_next(state);
-        if (!in_comment && c != '\n') buf[i++] = c;
+        if (!in_comment && c != '\n' && c != '\r') buf[i++] = c;
     }
     buf[i] = 0;
 }
@@ -900,9 +1015,10 @@ static void pp_read_macro_body(PPState *state, PPMacro *m, int max_limit) {
             exit(1);
         }
         char c = pp_peek(state);
-        if (c == '\n' && !in_comment) break;
-        if (c == '\\' && state->src[state->pos + 1] == '\n') {
-            pp_next(state); pp_next(state);
+        if ((c == '\n' || c == '\r') && !in_comment) break;
+        if (pp_is_line_continuation(state)) {
+            pp_next(state);
+            if (pp_peek(state) == '\n' || pp_peek(state) == '\r') pp_next(state);
             continue;
         }
         if (!in_comment && c == '/' && state->src[state->pos + 1] == '/') {
@@ -918,7 +1034,7 @@ static void pp_read_macro_body(PPState *state, PPMacro *m, int max_limit) {
             continue;
         }
         pp_next(state);
-        if (!in_comment && c != '\n') m->body[i++] = c;
+        if (!in_comment && c != '\n' && c != '\r') m->body[i++] = c;
     }
     m->body[i] = 0;
 }
@@ -946,6 +1062,19 @@ static char *pp_read_file(const char *path, int *out_len) {
     if (!buf) { fclose(fp); return 0; }
     
     nr = fread(buf, 1, len, fp);
+    {
+        long r = 0, w = 0;
+        while (r < nr) {
+            char c = buf[r++];
+            if (c == '\r') {
+                if (r < nr && buf[r] == '\n') r++;
+                buf[w++] = '\n';
+            } else {
+                buf[w++] = c;
+            }
+        }
+        nr = w;
+    }
     buf[nr] = 0;
     fclose(fp);
     
@@ -1924,11 +2053,27 @@ char *zcc_preprocess(const char *source, int source_len,
                      const char *include_paths,
                      int *out_len) {
     PPState *state = (PPState *)malloc(sizeof(PPState));
+    char *normalized_src = (char *)malloc(source_len + 1);
     char *result;
+    int normalized_len = 0;
     memset(state, 0, sizeof(PPState));
-    
-    state->src = source;
-    state->len = source_len;
+
+    {
+        int r = 0;
+        while (r < source_len) {
+            char c = source[r++];
+            if (c == '\r') {
+                if (r < source_len && source[r] == '\n') r++;
+                normalized_src[normalized_len++] = '\n';
+            } else {
+                normalized_src[normalized_len++] = c;
+            }
+        }
+        normalized_src[normalized_len] = 0;
+    }
+
+    state->src = normalized_src;
+    state->len = normalized_len;
     state->filename = filename;
     state->include_paths = include_paths;
     state->line = 1;
@@ -2000,6 +2145,7 @@ char *zcc_preprocess(const char *source, int source_len,
             state->macros[i].body_cap = 0;
         }
     }
+    free(normalized_src);
     free(state);
     return result;
 }
@@ -3175,19 +3321,9 @@ int peek_token(Compiler *cc) {
 #include "part1.c"
 #endif
 
-/* C99/POSIX support for curl graduation — see commit 262bd08 */
 /* ================================================================ */
 /* PARSER                                                            */
 /* ================================================================ */
-
-/* CG-HARDEN-SILENT-001: per-cap warning flags (one warning per cap per compilation) */
-static int _warned_max_structs = 0;
-static int _warned_max_params = 0;
-static int _warned_max_strings = 0;
-static int _warned_max_call_args = 0;
-static int _warned_max_cases = 0;
-static int _warned_max_init = 0;
-static int _warned_max_globals = 0;
 
 static int is_type_token(Compiler *cc) {
     if (cc->tk >= TK_INT && cc->tk <= TK_DOUBLE) return 1;
@@ -3202,10 +3338,7 @@ static int is_type_token(Compiler *cc) {
         Symbol *sym;
         sym = scope_find(cc, cc->tk_text);
         if (sym) {
-            if (sym->is_typedef) {
-                if (getenv("ZCC_DEBUG")) printf("!!! %s is a TYPEDEF !!!\n", cc->tk_text);
-                return 1;
-            }
+            if (sym->is_typedef) return 1;
         }
     }
     return 0;
@@ -3223,8 +3356,6 @@ static void register_struct(Compiler *cc, Type *t) {
     if (cc->num_structs < MAX_STRUCTS) {
         cc->structs[cc->num_structs] = t;
         cc->num_structs++;
-    } else {
-        if (!_warned_max_structs) { printf("zcc: warning: MAX_STRUCTS (%d) exceeded at %s:%d — subsequent struct types silently discarded\n", MAX_STRUCTS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_structs = 1; }
     }
 }
 
@@ -3385,13 +3516,6 @@ static long long parse_const_expr_primary(Compiler *cc) {
     if (cc->tk == TK_LPAREN) {
         long long val;
         next_token(cc);
-        /* Handle casts: (int)expr, (unsigned long)expr, etc. */
-        if (is_type_token(cc)) {
-            /* Skip the type and closing paren, then evaluate the expression */
-            while (cc->tk != TK_RPAREN && cc->tk != TK_EOF) next_token(cc);
-            expect(cc, TK_RPAREN);
-            return parse_const_expr_unary(cc);
-        }
         val = parse_const_expr(cc);
         expect(cc, TK_RPAREN);
         return val;
@@ -3414,6 +3538,8 @@ static long long parse_const_expr_primary(Compiler *cc) {
     next_token(cc);
     return 0;
 }
+
+static Type *parse_struct_or_union_body(Compiler *cc, Type *stype, int is_union);
 
 static Type *parse_struct_or_union(Compiler *cc, int is_union) {
     Type *stype;
@@ -3452,27 +3578,31 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
     }
     if (!stype) {
         stype = type_new(cc, is_union ? TY_UNION : TY_STRUCT);
+        if (cc->pending_tbfp) {
+            stype->is_tbfp = 1;
+            cc->pending_tbfp = 0;
+        }
         if (has_tag) {
             strncpy(stype->tag, tag, MAX_IDENT - 1);
             register_struct(cc, stype);
         }
-        /* Consume pending attribute flags immediately on creation (ATTR-UNKNOWN-001)
-         * Must happen here, not at the '{' boundary, to prevent leakage from
-         * __attribute__ annotations inside #include'd system headers. */
-        if (cc->pending_packed) {
-            stype->is_packed = 1;
-            cc->pending_packed = 0;
-        }
-        if (cc->pending_aligned_n) {
-            stype->explicit_align = cc->pending_aligned_n;
-            cc->pending_aligned_n = 0;
-        }
-    } else {
-        /* Existing struct found — discard any stale pending flags */
-        cc->pending_packed = 0;
-        cc->pending_aligned_n = 0;
+    } else if (cc->pending_tbfp) {
+        stype->is_tbfp = 1;
+        cc->pending_tbfp = 0;
     }
 
+    return parse_struct_or_union_body(cc, stype, is_union);
+}
+
+static int get_member_size(Type *stype, Type *ftype) {
+    if (stype && stype->is_tbfp) {
+        if (ftype->kind == TY_FLOAT) return 2;
+        if (ftype->kind == TY_DOUBLE) return 5;
+    }
+    return type_size(ftype);
+}
+
+static Type *parse_struct_or_union_body(Compiler *cc, Type *stype, int is_union) {
     expect(cc, TK_LBRACE);
 
     {
@@ -3515,8 +3645,8 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
                 field->offset = 0;
                 if (type_size(ftype) > max_size) max_size = type_size(ftype);
             } else {
-                /* align offset — skip when struct is packed (ATTR-UNKNOWN-001) */
-                if (!stype->is_packed && falign > 1) {
+                /* align offset */
+                if (falign > 1) {
                     offset = (offset + falign - 1) & ~(falign - 1);
                 }
                 field->offset = offset;
@@ -3555,8 +3685,7 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
                     field2->offset = 0;
                     if (type_size(ftype2) > max_size) max_size = type_size(ftype2);
                 } else {
-                    /* skip alignment when packed (ATTR-UNKNOWN-001) */
-                    if (!stype->is_packed && falign2 > 1) {
+                    if (falign2 > 1) {
                         offset = (offset + falign2 - 1) & ~(falign2 - 1);
                     }
                     field2->offset = offset;
@@ -3570,35 +3699,20 @@ static Type *parse_struct_or_union(Compiler *cc, int is_union) {
             expect(cc, TK_SEMI);
         }
 
-        if (is_union) {
+            if (is_union) {
             stype->size = max_size;
         } else {
             stype->size = offset;
         }
-        /* align total size — skip trailing padding when packed; apply explicit_align if set */
-        if (stype->explicit_align > 0) {
-            int ea = stype->explicit_align;
-            stype->size = (stype->size + ea - 1) & ~(ea - 1);
-            stype->align = ea;
-        } else if (!stype->is_packed && max_align > 1) {
+        /* align total size */
+        if (max_align > 1) {
             stype->size = (stype->size + max_align - 1) & ~(max_align - 1);
-            stype->align = max_align;
-        } else {
-            stype->align = stype->is_packed ? 1 : max_align;
         }
+        stype->align = max_align;
         stype->is_complete = 1;
     }
 
     expect(cc, TK_RBRACE);
-    
-    if (cc->debug_abi_classes && stype->is_complete) {
-        abi_class_t eb[2];
-        classify_aggregate(stype, eb);
-        printf("ABI-CLASS: %s (size=%d, align=%d) -> lo:%d, hi:%d\n",
-               stype->tag[0] ? stype->tag : "<anon>",
-               stype->size, stype->align, (int)eb[0], (int)eb[1]);
-    }
-
     if (stype->tag[0] && (strcmp(stype->tag, "yyStackEntry") == 0 || strcmp(stype->tag, "yyParser") == 0 || strcmp(stype->tag, "Walker") == 0)) {
         int n = 0;
         StructField *f = stype->fields;
@@ -3911,8 +4025,6 @@ Type *parse_declarator(Compiler *cc, Type *base, char *name_out) {
                             if (ftype->num_params < MAX_PARAMS) {
                                 ftype->params[ftype->num_params] = ptype;
                                 ftype->num_params++;
-                            } else {
-                                if (!_warned_max_params) { printf("zcc: warning: MAX_PARAMS (%d) exceeded at %s:%d — subsequent params silently discarded\n", MAX_PARAMS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_params = 1; }
                             }
                             if (cc->tk == TK_COMMA) {
                                 next_token(cc);
@@ -3985,8 +4097,6 @@ Type *parse_declarator(Compiler *cc, Type *base, char *name_out) {
                     if (ftype->num_params < MAX_PARAMS) {
                         ftype->params[ftype->num_params] = ptype;
                         ftype->num_params++;
-                    } else {
-                        if (!_warned_max_params) { printf("zcc: warning: MAX_PARAMS (%d) exceeded at %s:%d — subsequent params silently discarded\n", MAX_PARAMS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_params = 1; }
                     }
 
                     if (cc->tk == TK_COMMA) {
@@ -4037,12 +4147,7 @@ Node *parse_primary(Compiler *cc) {
     }
 
     if (cc->tk == TK_FLIT) {
-        /* CG-FLOAT-007: lexer sets tk_text[0]='F' for f/F suffix literals.
-         * Value was already rounded to float precision by the lexer.
-         * Use ty_float so the AST node carries the correct type. */
-        int is_float_suffix = (cc->tk_text[0] == 'F');
         n = node_flit(cc, cc->tk_fval, line);
-        if (is_float_suffix) n->type = cc->ty_float;
         next_token(cc);
         return n;
     }
@@ -4063,11 +4168,9 @@ Node *parse_primary(Compiler *cc) {
             se = &cc->strings[sid];
             se->data = cc_strdup(cc, cc->tk_str);
             se->len = cc->tk_str_len;
-            se->label_id = cc->str_label_count;
-            cc->str_label_count++;
+            se->label_id = cc->label_count;
+            cc->label_count++;
             cc->num_strings++;
-        } else {
-            if (!_warned_max_strings) { printf("zcc: warning: MAX_STRINGS (%d) exceeded at %s:%d — subsequent string literals silently discarded\n", MAX_STRINGS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_strings = 1; }
         }
         n = node_new(cc, ND_STR, line);
         n->str_id = sid;
@@ -4111,6 +4214,13 @@ Node *parse_primary(Compiler *cc) {
             if (strcmp(n->name, "stdin") == 0 || strcmp(n->name, "stdout") == 0 || strcmp(n->name, "stderr") == 0) {
                 n->type = type_ptr(cc, cc->ty_char);
             } else {
+                /* ZCC SCOPING HARDENING: undeclared identifiers must be rejected    */
+                /* at AST build time. The old silent int decay caused CWE-476 healer */
+                /* mutations (guards inserted before decl) to survive bootstrap,     */
+                /* masking invalid C as applied_survived in the mutation log.        */
+                char _ud_buf[256];
+                sprintf(_ud_buf, "use of undeclared identifier '%s'", n->name);
+                error(cc, _ud_buf);
                 n->type = cc->ty_int;
             }
         }
@@ -4302,6 +4412,7 @@ Node *parse_postfix(Compiler *cc) {
                 if (f) {
                     member->member_offset = accumulated_offset;
                     member->type = f->type;
+                    member->member_size = get_member_size(n->type, f->type);
                     member->member_size = type_size(f->type);
                 } else {
                     char buf[256];
@@ -4347,7 +4458,7 @@ Node *parse_postfix(Compiler *cc) {
                 if (f) {
                     n->member_offset = accumulated_offset;
                     n->type = f->type;
-                    n->member_size = type_size(f->type);
+                    n->member_size = get_member_size(deref->type, f->type);
                 } else {
                     char buf[256];
                     sprintf(buf, "unknown struct member '%s' after -> in struct '%s' (type=%p, fields=%p)", cc->tk_text, (deref->type && deref->type->tag[0]) ? deref->type->tag : "<anon>", (void*)deref->type, deref->type ? (void*)deref->type->fields : NULL);
@@ -4383,7 +4494,6 @@ Node *parse_postfix(Compiler *cc) {
                         call->args[call->num_args] = parse_assign(cc);
                         call->num_args = call->num_args + 1;
                     } else {
-                        if (!_warned_max_call_args) { printf("zcc: warning: MAX_CALL_ARGS (%d) exceeded at %s:%d — subsequent call args silently discarded\n", MAX_CALL_ARGS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_call_args = 1; }
                         parse_assign(cc);
                     }
                     if (cc->tk == TK_COMMA) {
@@ -4401,6 +4511,19 @@ Node *parse_postfix(Compiler *cc) {
                                 call->type = sym->type->ret;
                             } else {
                                 call->type = cc->ty_int;
+                            }
+                            /* ZKAEDI: Implicitly coerce arguments to parameter types */
+                            for (int k = 0; k < call->num_args; k++) {
+                                if (k < sym->type->num_params && sym->type->params && sym->type->params[k]) {
+                                    Type *pty = sym->type->params[k];
+                                    if (call->args[k] && call->args[k]->type && call->args[k]->type != pty) {
+                                        Node *c = node_new(cc, ND_CAST, line);
+                                        c->lhs = call->args[k];
+                                        c->cast_type = pty;
+                                        c->type = pty;
+                                        call->args[k] = c;
+                                    }
+                                }
                             }
                         } else {
                             call->type = cc->ty_int;
@@ -4429,7 +4552,6 @@ Node *parse_postfix(Compiler *cc) {
                         call->args[call->num_args] = parse_assign(cc);
                         call->num_args = call->num_args + 1;
                     } else {
-                        if (!_warned_max_call_args) { printf("zcc: warning: MAX_CALL_ARGS (%d) exceeded at %s:%d — subsequent call args silently discarded\n", MAX_CALL_ARGS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_call_args = 1; }
                         parse_assign(cc);
                     }
                     if (cc->tk == TK_COMMA) {
@@ -4443,8 +4565,32 @@ Node *parse_postfix(Compiler *cc) {
                 if (n->type) {
                     if (n->type->kind == TY_FUNC) {
                         call->type = n->type->ret ? n->type->ret : cc->ty_int;
+                        for (int k = 0; k < call->num_args; k++) {
+                            if (k < n->type->num_params && n->type->params && n->type->params[k]) {
+                                Type *pty = n->type->params[k];
+                                if (call->args[k] && call->args[k]->type && call->args[k]->type != pty) {
+                                    Node *c = node_new(cc, ND_CAST, line);
+                                    c->lhs = call->args[k];
+                                    c->cast_type = pty;
+                                    c->type = pty;
+                                    call->args[k] = c;
+                                }
+                            }
+                        }
                     } else if (n->type->kind == TY_PTR && n->type->base && n->type->base->kind == TY_FUNC) {
                         call->type = n->type->base->ret ? n->type->base->ret : cc->ty_int;
+                        for (int k = 0; k < call->num_args; k++) {
+                            if (k < n->type->base->num_params && n->type->base->params && n->type->base->params[k]) {
+                                Type *pty = n->type->base->params[k];
+                                if (call->args[k] && call->args[k]->type && call->args[k]->type != pty) {
+                                    Node *c = node_new(cc, ND_CAST, line);
+                                    c->lhs = call->args[k];
+                                    c->cast_type = pty;
+                                    c->type = pty;
+                                    call->args[k] = c;
+                                }
+                            }
+                        }
                     } else {
                         call->type = cc->ty_int;
                     }
@@ -4553,7 +4699,7 @@ Node *parse_unary(Compiler *cc) {
             if (cc->tk == TK_LBRACE) {
                 Symbol *sym;
                 char tmp_name[32];
-                sprintf(tmp_name, ".LS_comp_%d", cc->str_label_count++);
+                sprintf(tmp_name, ".L_comp_%d", cc->label_count++);
                 sym = scope_add_local(cc, tmp_name, cast_type);
 
                 Node *var_n_final = node_new(cc, ND_VAR, line);
@@ -4716,15 +4862,6 @@ Node *parse_unary(Compiler *cc) {
         n = node_new(cc, ND_ADDR, line);
         n->lhs = parse_unary(cc);
         n->type = type_ptr(cc, n->lhs->type);
-        return n;
-    }
-    if (cc->tk == TK_LAND) {
-        /* GNU C Extension: address of label &&label */
-        next_token(cc);
-        n = node_new(cc, ND_ADDR_LABEL, line);
-        strncpy(n->label_name, cc->tk_text, MAX_IDENT - 1);
-        expect(cc, TK_IDENT);
-        n->type = type_ptr(cc, cc->ty_void); /* void * */
         return n;
     }
     if (cc->tk == TK_INC) {
@@ -5117,49 +5254,29 @@ Node *parse_stmt(Compiler *cc) {
     line = cc->tk_line;
 
     /* Skip __asm__(...) / asm(...) / __asm(...) statements */
-    if (cc->tk == TK_IDENT) {
-        if (strcmp(cc->tk_text, "__asm__") == 0 ||
-            strcmp(cc->tk_text, "asm") == 0 ||
-            strcmp(cc->tk_text, "__asm") == 0) {
-            next_token(cc); /* consume asm keyword */
-            /* skip optional volatile qualifier */
-            if (cc->tk == TK_IDENT && (strcmp(cc->tk_text, "__volatile__") == 0 ||
-                strcmp(cc->tk_text, "volatile") == 0)) {
-                next_token(cc);
-            }
-            if (cc->tk == TK_VOLATILE) next_token(cc);
-            if (cc->tk == TK_LPAREN) {
-                int depth = 1;
-                next_token(cc);
-                while (depth > 0 && cc->tk != TK_EOF) {
-                    if (cc->tk == TK_LPAREN) depth++;
-                    else if (cc->tk == TK_RPAREN) depth--;
-                    if (depth > 0) next_token(cc);
-                }
-                if (cc->tk == TK_RPAREN) next_token(cc);
-            }
-            if (cc->tk == TK_SEMI) next_token(cc);
-            return node_new(cc, ND_NOP, line);
-        }
-    }
-
-    /* inline assembly */
-    if (cc->tk == TK_ASM) {
-        Node *n;
-        next_token(cc);
-        if (cc->tk == TK_VOLATILE) next_token(cc);
-        expect(cc, TK_LPAREN);
-        n = node_new(cc, ND_ASM, line);
-        if (cc->tk == TK_STR) {
-            n->asm_string = cc_strdup(cc, cc->tk_str);
+    if (cc->tk == TK_ASM || (cc->tk == TK_IDENT && (
+        strcmp(cc->tk_text, "__asm__") == 0 ||
+        strcmp(cc->tk_text, "asm") == 0 ||
+        strcmp(cc->tk_text, "__asm") == 0))) {
+        next_token(cc); /* consume asm keyword */
+        /* skip optional volatile qualifier */
+        if (cc->tk == TK_IDENT && (strcmp(cc->tk_text, "__volatile__") == 0 ||
+            strcmp(cc->tk_text, "volatile") == 0)) {
             next_token(cc);
-        } else {
-            error(cc, "expected string literal in asm");
-            n->asm_string = "";
         }
-        expect(cc, TK_RPAREN);
-        expect(cc, TK_SEMI);
-        return n;
+        if (cc->tk == TK_VOLATILE) next_token(cc);
+        if (cc->tk == TK_LPAREN) {
+            int depth = 1;
+            next_token(cc);
+            while (depth > 0 && cc->tk != TK_EOF) {
+                if (cc->tk == TK_LPAREN) depth++;
+                else if (cc->tk == TK_RPAREN) depth--;
+                if (depth > 0) next_token(cc);
+            }
+            if (cc->tk == TK_RPAREN) next_token(cc);
+        }
+        if (cc->tk == TK_SEMI) next_token(cc);
+        return node_new(cc, ND_NOP, line);
     }
 
     /* block */
@@ -5220,18 +5337,9 @@ Node *parse_stmt(Compiler *cc) {
         next_token(cc);
         ret = node_new(cc, ND_RETURN, line);
         if (cc->tk != TK_SEMI) {
-            Node *ret_expr = parse_expr(cc);
-            /* CG-FLOAT-005: coerce return value to declared return type.
-             * Prevents e.g. ND_FLIT (ty_double) being returned raw from a
-             * float-returning function — low 32 bits of double = 0.0 */
-            if (cc->current_func[0]) {
-                Symbol *fsym = scope_find(cc, cc->current_func);
-                if (fsym && fsym->type && fsym->type->ret)
-                    ret_expr = ensure_type(cc, ret_expr, fsym->type->ret);
-            }
-            ret->lhs = ret_expr;
+            ret->lhs = parse_expr(cc);
         }
-        expect(cc, TK_SEMI);
+            expect(cc, TK_SEMI);
         return ret;
     }
 
@@ -5353,7 +5461,7 @@ Node *parse_stmt(Compiler *cc) {
         expect(cc, TK_COLON);
 
         cn = node_new(cc, ND_LABEL, line);
-        sprintf(cn->label_name, "__zc_%llx_%d", (unsigned long long)val, cc->label_count++);
+        sprintf(cn->label_name, "__zc_%llx_%d", (unsigned long long)val, line);
         cn->lhs = parse_stmt(cc);
 
         if (current_sw && current_sw->num_cases < MAX_CASES) {
@@ -5363,8 +5471,6 @@ Node *parse_stmt(Compiler *cc) {
             strncpy(gto->label_name, cn->label_name, MAX_IDENT - 1);
             cnode->case_body = gto;
             current_sw->cases[current_sw->num_cases++] = cnode;
-        } else if (current_sw) {
-            if (!_warned_max_cases) { printf("zcc: warning: MAX_CASES (%d) exceeded at %s:%d — subsequent case labels silently discarded\n", MAX_CASES, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_cases = 1; }
         }
         return cn;
     }
@@ -5377,7 +5483,7 @@ Node *parse_stmt(Compiler *cc) {
         expect(cc, TK_COLON);
 
         dn = node_new(cc, ND_LABEL, line);
-        sprintf(dn->label_name, "__zc_def_%d", cc->label_count++);
+        sprintf(dn->label_name, "__zc_def_%d", line);
         dn->lhs = parse_stmt(cc);
 
         if (current_sw) {
@@ -5412,13 +5518,6 @@ Node *parse_stmt(Compiler *cc) {
     if (cc->tk == TK_GOTO) {
         Node *gto;
         next_token(cc);
-        if (cc->tk == TK_STAR) {
-            next_token(cc); /* consume * */
-            gto = node_new(cc, ND_GOTO_COMPUTED, line);
-            gto->lhs = parse_expr(cc);
-            expect(cc, TK_SEMI);
-            return gto;
-        }
         gto = node_new(cc, ND_GOTO, line);
         strncpy(gto->label_name, cc->tk_text, MAX_IDENT - 1);
         next_token(cc);
@@ -5473,7 +5572,7 @@ Node *parse_stmt(Compiler *cc) {
                         sym->is_typedef = 1;
                     } else if (is_static_local) {
                         char mangled[MAX_IDENT];
-                        sprintf(mangled, "%s__%s__S_%d", cc->current_func, vname, cc->str_label_count++);
+                        sprintf(mangled, "%s__%s__%d", cc->current_func, vname, cc->label_count++);
                         sym = scope_add_local(cc, vname, vtype);
                         sym->is_local = 0;
                         sym->is_global = 1;
@@ -5491,10 +5590,8 @@ Node *parse_stmt(Compiler *cc) {
                                 Node *init_list;
                                 Node **inits;
                                 int count;
-                                int init_cap;
                                 init_list = node_new(cc, ND_INIT_LIST, line);
-                                init_cap = 64;
-                                inits = (Node **)cc_alloc(cc, sizeof(Node *) * init_cap);
+                                inits = (Node **)cc_alloc(cc, sizeof(Node *) * MAX_INIT);
                                 count = 0;
                                 next_token(cc); /* skip { */
                                 int depth = 1;
@@ -5521,14 +5618,11 @@ Node *parse_stmt(Compiler *cc) {
                                         next_token(cc);
                                     } else {
                                         skip_tk = cc->tk;
-                                        if (count >= init_cap) {
-                                            Node **old_inits = inits;
-                                            int gi;
-                                            init_cap *= 2;
-                                            inits = (Node **)cc_alloc(cc, sizeof(Node *) * init_cap);
-                                            for (gi = 0; gi < count; gi++) inits[gi] = old_inits[gi];
+                                        if (count < MAX_INIT) {
+                                            inits[count++] = parse_assign(cc);
+                                        } else {
+                                            parse_assign(cc);
                                         }
-                                        inits[count++] = parse_assign(cc);
                                         if (cc->tk == skip_tk) {
                                             if (cc->tk != TK_EOF) next_token(cc);
                                         }
@@ -5566,8 +5660,7 @@ Node *parse_stmt(Compiler *cc) {
                             }
                         }
 
-                        if (cc->num_globals < MAX_GLOBALS) { cc->globals[cc->num_globals++] = gvar; }
-                        else { if (!_warned_max_globals) { printf("zcc: warning: MAX_GLOBALS (%d) exceeded at %s:%d — subsequent globals silently discarded\n", MAX_GLOBALS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_globals = 1; } }
+                        if (cc->num_globals < MAX_GLOBALS) cc->globals[cc->num_globals++] = gvar;
                     } else {
                         sym = scope_add_local(cc, vname, vtype);
 
@@ -5674,8 +5767,7 @@ Node *parse_stmt(Compiler *cc) {
                                         deref->type = elem_type;
                                         asgn = node_new(cc, ND_ASSIGN, line);
                                         asgn->lhs = deref;
-                                        /* CG-FLOAT-006: coerce array element initializer */
-                                        asgn->rhs = ensure_type(cc, inits[idx], elem_type);
+                                        asgn->rhs = inits[idx];
                                         asgn->type = elem_type;
                                         block->stmts[cnt] = asgn;
                                         cnt++;
@@ -5760,8 +5852,7 @@ Node *parse_stmt(Compiler *cc) {
                                         }
                                         asgn_n = node_new(cc, ND_ASSIGN, line);
                                         asgn_n->lhs = mem_n;
-                                        /* CG-FLOAT-006: coerce struct field initializer */
-                                        asgn_n->rhs = ensure_type(cc, inits_s[fi], mem_n->type);
+                                        asgn_n->rhs = inits_s[fi];
                                         asgn_n->type = mem_n->type;
                                         /* Grow block if needed */
                                         if (cnt >= cap) {
@@ -5840,7 +5931,7 @@ Node *parse_stmt(Compiler *cc) {
                             var->type = vtype;
                             asgn = node_new(cc, ND_ASSIGN, line);
                             asgn->lhs = var;
-                            asgn->rhs = ensure_type(cc, parse_assign(cc), vtype);
+                            asgn->rhs = parse_assign(cc);
                             asgn->type = vtype;
                             if (cnt < cap) {
                                 block->stmts[cnt] = asgn;
@@ -5898,7 +5989,6 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
 
     line = cc->tk_line;
     func = node_new(cc, ND_FUNC_DEF, line);
-    func->func_params = cc_alloc(cc, sizeof(struct FuncParams));
     strncpy(func->func_def_name, name, MAX_IDENT - 1);
     func->is_static = is_static;
 
@@ -5937,12 +6027,10 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
                 if (ptype->kind == TY_ARRAY) ptype = type_ptr(cc, ptype->base);
 
                 if (func->num_params < MAX_PARAMS) {
-                    func->func_params->types[func->num_params] = ptype;
-                    strncpy(func->func_params->names[func->num_params], pname, MAX_IDENT - 1);
+                    func->param_types[func->num_params] = ptype;
+                    strncpy(func->param_names_buf[func->num_params], pname, MAX_IDENT - 1);
                     psym = scope_add_local(cc, pname, ptype);
                     func->num_params++;
-                } else {
-                    if (!_warned_max_params) { printf("zcc: warning: MAX_PARAMS (%d) exceeded at %s:%d — subsequent function params silently discarded\n", MAX_PARAMS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_params = 1; }
                 }
 
                 if (cc->tk == TK_COMMA) {
@@ -5954,10 +6042,7 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
                     if (cc->tk == TK_ARROW) {
                         error(cc, "unexpected '->' in parameter list (missing ',' or ')'?)");
                     } else {
-                        if (getenv("ZCC_DEBUG")) printf("!!! parse_fparams ERROR !!! func='%s' param_idx=%d tk_text='%s' tk=%d prev_pname='%s'\n", func->func_def_name, func->num_params, cc->tk_text, cc->tk, func->num_params > 0 ? func->func_params->names[func->num_params - 1] : "NONE");
-                        char buf[256];
-                        sprintf(buf, "expected ',' or ')' after parameter [at token '%s']", cc->tk_text);
-                        error(cc, buf);
+                        error(cc, "expected ',' or ')' after parameter");
                     }
                     while (cc->tk != TK_RPAREN && cc->tk != TK_EOF) next_token(cc);
                     break;
@@ -5966,6 +6051,20 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
         }
     }
     expect(cc, TK_RPAREN);
+
+    /* Populate func->func_params from the inline capture arrays so
+     * codegen_func (part4.c) can safely do func->func_params->types[i].
+     * cc_alloc uses the arena so this is lifetime-safe. */
+    {
+        struct FuncParams *fp = (struct FuncParams *)cc_alloc(cc, sizeof(struct FuncParams));
+        int k;
+        for (k = 0; k < func->num_params && k < MAX_PARAMS; k++) {
+            fp->types[k] = func->param_types[k];
+            strncpy(fp->names[k], func->param_names_buf[k], MAX_IDENT - 1);
+            fp->names[k][MAX_IDENT - 1] = '\0';
+        }
+        func->func_params = fp;
+    }
 
     /* CG-IR-VARARGS: Reserve the first 48 bytes exclusively for reg_save_area */
     if (is_variadic && cc->local_offset > -48) {
@@ -5982,7 +6081,7 @@ static Node *parse_func_def(Compiler *cc, Type *ret_type, char *name, int is_sta
         if (func->num_params > 0) {
             ftype->params = (Type **)cc_alloc(cc, sizeof(Type *) * func->num_params);
             for (int k = 0; k < func->num_params; k++) {
-                ftype->params[k] = func->func_params->types[k];
+                ftype->params[k] = func->param_types[k];
             }
         }
         func->func_type = ftype;
@@ -6080,9 +6179,8 @@ Node *parse_program(Compiler *cc) {
             if (cc->tk == TK_LPAREN) {
                 int gpk;
                 gpk = peek_token(cc);
-                if (gpk == TK_STAR || gpk == TK_IDENT) {
+                if (gpk == TK_STAR) {
                     /* function pointer: typedef int (*name)(params); or int (*fp)(int); */
-                    /* also handles parenthesized identifiers: LUA_API int (lua_gettop)(lua_State *L) */
                     int gptr;
                     int arr_lens[8];
                     int arr_num;
@@ -6150,8 +6248,6 @@ Node *parse_program(Compiler *cc) {
                                     if (ftype->num_params < MAX_PARAMS) {
                                         ftype->params[ftype->num_params] = ptype;
                                         ftype->num_params++;
-                                    } else {
-                                        if (!_warned_max_params) { printf("zcc: warning: MAX_PARAMS (%d) exceeded at %s:%d — subsequent params silently discarded\n", MAX_PARAMS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_params = 1; }
                                     }
                                     if (cc->tk == TK_COMMA) {
                                         next_token(cc);
@@ -6179,14 +6275,18 @@ Node *parse_program(Compiler *cc) {
                     }
                     /* fall through to typedef / global var handling */
                     goto after_name;
-                } else if (is_typedef_kw && gpk == TK_IDENT) {
-                    /* typedef returntype (Name)(params) — function type typedef
-                     * e.g. typedef ssize_t (Curl_send)(struct X *, int, ...); */
+                } else if (gpk == TK_IDENT) {
+                    /* parenthesized name: type (name)(params)
+                     * Used pervasively in Lua 5.4.6 API headers:
+                     *   extern lua_State *(lua_newstate)(lua_Alloc f, void *ud);
+                     *   extern void       (lua_close)(lua_State *L);
+                     * Consume (name) then parse trailing (params). */
                     next_token(cc); /* consume ( */
-                    strncpy(name, cc->tk_text, MAX_IDENT - 1);
-                    next_token(cc); /* consume Name */
-                    expect(cc, TK_RPAREN); /* consume ) */
-                    /* Now parse the parameter list */
+                    if (cc->tk == TK_IDENT) {
+                        strncpy(name, cc->tk_text, MAX_IDENT - 1);
+                        next_token(cc);
+                    }
+                    expect(cc, TK_RPAREN);
                     if (cc->tk == TK_LPAREN) {
                         Type *ftype;
                         next_token(cc);
@@ -6195,35 +6295,16 @@ Node *parse_program(Compiler *cc) {
                         ftype->num_params = 0;
                         ftype->is_variadic = 0;
                         if (cc->tk != TK_RPAREN) {
-                            if (cc->tk == TK_VOID) {
-                                int vpk3 = peek_token(cc);
-                                if (vpk3 == TK_RPAREN) {
-                                    next_token(cc);
-                                } else {
-                                    goto parse_ft_params;
-                                }
+                            if (cc->tk == TK_VOID && peek_token(cc) == TK_RPAREN) {
+                                next_token(cc);
                             } else {
-                                parse_ft_params:
-                                while (cc->tk != TK_RPAREN) {
-                                    Type *ptype;
-                                    char pname[128];
-                                    if (cc->tk == TK_ELLIPSIS) {
-                                        ftype->is_variadic = 1;
-                                        next_token(cc);
-                                        break;
-                                    }
-                                    if (cc->tk == TK_EOF) break;
+                                while (cc->tk != TK_RPAREN && cc->tk != TK_EOF) {
+                                    Type *ptype; char pname[MAX_IDENT]; pname[0] = 0;
+                                    if (cc->tk == TK_ELLIPSIS) { ftype->is_variadic = 1; next_token(cc); break; }
                                     ptype = parse_type(cc);
                                     ptype = parse_declarator(cc, ptype, pname);
-                                    if (ftype->num_params < MAX_PARAMS) {
-                                        ftype->params[ftype->num_params] = ptype;
-                                        ftype->num_params++;
-                                    }
-                                    if (cc->tk == TK_COMMA) {
-                                        next_token(cc);
-                                    } else {
-                                        break;
-                                    }
+                                    if (ftype->num_params < MAX_PARAMS) ftype->params[ftype->num_params++] = ptype;
+                                    if (cc->tk == TK_COMMA) next_token(cc); else break;
                                 }
                             }
                         }
@@ -6235,6 +6316,7 @@ Node *parse_program(Compiler *cc) {
                     goto after_name;
                 }
             }
+
             if (cc->tk == TK_IDENT) {
                 strncpy(name, cc->tk_text, MAX_IDENT - 1);
                 next_token(cc);
@@ -6335,10 +6417,8 @@ Node *parse_program(Compiler *cc) {
                     Node *init_list;
                     Node **inits;
                     int count;
-                    int init_cap;
                     init_list = node_new(cc, ND_INIT_LIST, line);
-                    init_cap = 64;
-                    inits = (Node **)cc_alloc(cc, sizeof(Node *) * init_cap);
+                    inits = (Node **)cc_alloc(cc, sizeof(Node *) * MAX_INIT);
                     count = 0;
                     next_token(cc); /* skip { */
                     int depth = 1;
@@ -6365,14 +6445,11 @@ Node *parse_program(Compiler *cc) {
                             next_token(cc);
                         } else {
                             skip_tk = cc->tk;
-                            if (count >= init_cap) {
-                                Node **old_inits = inits;
-                                int gi;
-                                init_cap *= 2;
-                                inits = (Node **)cc_alloc(cc, sizeof(Node *) * init_cap);
-                                for (gi = 0; gi < count; gi++) inits[gi] = old_inits[gi];
+                            if (count < MAX_INIT) {
+                                inits[count++] = parse_assign(cc);
+                            } else {
+                                parse_assign(cc); /* discard if over limit */
                             }
-                            inits[count++] = parse_assign(cc);
                             if (cc->tk == skip_tk) {
                                 if (cc->tk != TK_EOF) next_token(cc);
                             }
@@ -6418,8 +6495,6 @@ Node *parse_program(Compiler *cc) {
             if (cc->num_globals < MAX_GLOBALS) {
                 cc->globals[cc->num_globals] = gvar;
                 cc->num_globals++;
-            } else {
-                if (!_warned_max_globals) { printf("zcc: warning: MAX_GLOBALS (%d) exceeded at %s:%d — subsequent globals silently discarded\n", MAX_GLOBALS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_globals = 1; }
             }
 
             /* handle multiple declarators: int a, b; */
@@ -6448,8 +6523,6 @@ Node *parse_program(Compiler *cc) {
                 if (cc->num_globals < MAX_GLOBALS) {
                     cc->globals[cc->num_globals] = gvar2;
                     cc->num_globals++;
-                } else {
-                    if (!_warned_max_globals) { printf("zcc: warning: MAX_GLOBALS (%d) exceeded at %s:%d — subsequent globals silently discarded\n", MAX_GLOBALS, cc->filename ? cc->filename : "?", cc->tk_line); _warned_max_globals = 1; }
                 }
             }
 
@@ -9827,6 +9900,7 @@ void codegen_expr(Compiler *cc, Node *node) {
     int alignment_pad;
     int cleanup_bytes;
     char args_ir_1d[2048];
+    int arg_is_stack[64];
 
     /* System V AMD64 (Linux): 6 register args: RDI, RSI, RDX, RCX, R8, R9; 7th+
      * on stack */
@@ -9855,14 +9929,51 @@ void codegen_expr(Compiler *cc, Node *node) {
     /* System V AMD64: no shadow space required. Space for 7th+ gp args and 9th+ fp args is left on the stack. */
     {
       int temp_gp = 0, temp_fp = 0;
-      for (i = 0; i < nargs; i++) {
-        if (node->args[i] && node->args[i]->type && is_float_type(node->args[i]->type)) {
-          if (temp_fp < 8) temp_fp++;
-        } else {
-          if (temp_gp < 6) temp_gp++;
-        }
+      int stack_slots = 0;
+      /* Resolve callee type early for arg classification */
+      Symbol *pre_sym = node->func_name[0] ? scope_find(cc, node->func_name) : 0;
+      Type *pre_ftype = (pre_sym && pre_sym->type && pre_sym->type->kind == TY_FUNC) ? pre_sym->type : 0;
+      if (!pre_ftype && node->lhs && node->lhs->type) {
+        Type *plt = node->lhs->type;
+        if (plt->kind == TY_FUNC) pre_ftype = plt;
+        else if (plt->kind == TY_PTR && plt->base && plt->base->kind == TY_FUNC) pre_ftype = plt->base;
       }
-      args_on_stack = nargs - (temp_gp + temp_fp);
+      for (i = 0; i < nargs; i++) {
+        Type *at = (node->args[i] && node->args[i]->type) ? node->args[i]->type : 0;
+        int is_stack = 0;
+        if (at && (at->kind == TY_STRUCT || at->kind == TY_UNION)) {
+            abi_class_t eb[2];
+            classify_aggregate(at, eb);
+            if (eb[0] == CLASS_MEMORY) {
+                is_stack = 1;
+            } else {
+                int needed_gp = 0, needed_fp = 0;
+                if (eb[0] == CLASS_SSE) needed_fp++; else needed_gp++;
+                if (type_size(at) > 8) {
+                    if (eb[1] == CLASS_SSE) needed_fp++; else needed_gp++;
+                }
+                if (temp_gp + needed_gp <= 6 && temp_fp + needed_fp <= 8) {
+                    temp_gp += needed_gp;
+                    temp_fp += needed_fp;
+                } else {
+                    is_stack = 1;
+                }
+            }
+        } else {
+            int is_fp = (at && is_float_type(at));
+            if (!is_fp && pre_ftype && pre_ftype->params && i < pre_ftype->num_params &&
+                pre_ftype->params[i] && is_float_type(pre_ftype->params[i])) is_fp = 1;
+            
+            if (is_fp) {
+                if (temp_fp < 8) temp_fp++; else is_stack = 1;
+            } else {
+                if (temp_gp < 6) temp_gp++; else is_stack = 1;
+            }
+        }
+        arg_is_stack[i] = is_stack;
+        if (is_stack) stack_slots += (at ? (type_size(at) + 7) / 8 : 1);
+      }
+      args_on_stack = stack_slots;
     }
     /* We must ensure that AFTER the args are on the stack, %rsp is 16-byte
      * aligned. */
@@ -9895,24 +10006,34 @@ void codegen_expr(Compiler *cc, Node *node) {
       }
       codegen_expr_checked(cc, node->args[i]);
       Type *atype = node->args[i]->type;
-      if (atype && (atype->kind == TY_STRUCT || atype->kind == TY_UNION)) {
-          abi_class_t eb[2];
-          classify_aggregate(atype, eb);
-          if (eb[0] != CLASS_MEMORY) {
-              /* Small aggregate: push by value (eightbytes) */
+      if (arg_is_stack[i]) {
+          if (atype && (atype->kind == TY_STRUCT || atype->kind == TY_UNION)) {
+              /* Move aggregate data to stack in 8-byte chunks */
+              int j, n_slots = (type_size(atype) + 7) / 8;
               fprintf(cc->out, "    movq %%rax, %%r10\n");
-              if (type_size(atype) > 8) {
-                  fprintf(cc->out, "    pushq 8(%%r10)\n");
+              for (j = n_slots - 1; j >= 0; j--) {
+                  fprintf(cc->out, "    pushq %d(%%r10)\n", j * 8);
                   cc->stack_depth++;
               }
-              fprintf(cc->out, "    pushq 0(%%r10)\n");
-              cc->stack_depth++;
-              continue;
+          } else {
+              push_reg(cc, "rax");
           }
+          continue;
+      }
+      /* REG arg: push placeholders for register loading pass */
+      if (atype && (atype->kind == TY_STRUCT || atype->kind == TY_UNION)) {
+          fprintf(cc->out, "    movq %%rax, %%r10\n");
+          if (type_size(atype) > 8) {
+              fprintf(cc->out, "    pushq 8(%%r10)\n");
+              cc->stack_depth++;
+          }
+          fprintf(cc->out, "    pushq 0(%%r10)\n");
+          cc->stack_depth++;
+      } else {
+          push_reg(cc, "rax");
       }
       ir_save_result(&args_ir_1d[i * 32]);
       ZCC_EMIT_ARG(ir_map_type(node->args[i] ? node->args[i]->type : 0), &args_ir_1d[i * 32], node->line);
-      push_reg(cc, "rax");
     }
 
     /* pop args into correct registers: floats->xmm, ints->gpregs independently */
@@ -9931,40 +10052,31 @@ void codegen_expr(Compiler *cc, Node *node) {
           callee_ftype = lt->base;
       }
        for (i = 0; i < nargs; i++) {
+        if (arg_is_stack[i]) continue;
         Type *atype = node->args[i]->type;
         if (atype && (atype->kind == TY_STRUCT || atype->kind == TY_UNION)) {
             abi_class_t eb[2];
             classify_aggregate(atype, eb);
-            if (eb[0] != CLASS_MEMORY) {
-                /* Small aggregate: pop eightbytes into correct registers. */
-                /* Pop eightbyte 0 */
-                if (eb[0] == CLASS_SSE) {
-                    if (fp_idx < 8) {
-                        fprintf(cc->out, "    popq %%rax\n");
-                        cc->stack_depth--;
-                        fprintf(cc->out, "    movq %%rax, %%xmm%d\n", fp_idx++);
-                    }
-                } else {
-                    if (gp_idx < 6) {
-                        pop_reg(cc, argregs[gp_idx++]);
-                    }
-                }
-                /* Pop eightbyte 1 */
-                if (type_size(atype) > 8) {
-                    if (eb[1] == CLASS_SSE) {
-                        if (fp_idx < 8) {
-                            fprintf(cc->out, "    popq %%rax\n");
-                            cc->stack_depth--;
-                            fprintf(cc->out, "    movq %%rax, %%xmm%d\n", fp_idx++);
-                        }
-                    } else {
-                        if (gp_idx < 6) {
-                            pop_reg(cc, argregs[gp_idx++]);
-                        }
-                    }
-                }
-                continue;
+            /* Small aggregate: pop eightbytes into correct registers. */
+            /* Pop eightbyte 0 */
+            if (eb[0] == CLASS_SSE) {
+                fprintf(cc->out, "    popq %%rax\n");
+                cc->stack_depth--;
+                fprintf(cc->out, "    movq %%rax, %%xmm%d\n", fp_idx++);
+            } else {
+                pop_reg(cc, argregs[gp_idx++]);
             }
+            /* Pop eightbyte 1 */
+            if (type_size(atype) > 8) {
+                if (eb[1] == CLASS_SSE) {
+                    fprintf(cc->out, "    popq %%rax\n");
+                    cc->stack_depth--;
+                    fprintf(cc->out, "    movq %%rax, %%xmm%d\n", fp_idx++);
+                } else {
+                    pop_reg(cc, argregs[gp_idx++]);
+                }
+            }
+            continue;
         }
         if (atype && is_float_type(atype)) {
           if (fp_idx < 8) {
@@ -9989,6 +10101,22 @@ void codegen_expr(Compiler *cc, Node *node) {
                 }
                 if (need_cvt) fprintf(cc->out, "    cvtsd2ss %%xmm%d, %%xmm%d\n", fp_idx, fp_idx);
               }
+            }
+            fp_idx++;
+          }
+        } else if (callee_ftype && callee_ftype->params && i < callee_ftype->num_params &&
+                   callee_ftype->params[i] && is_float_type(callee_ftype->params[i])) {
+          /* CG-FLOAT-ABI-FIX: implicit int-to-float/double conversion at call site.
+           * The arg expression is integer but the callee declares this param as
+           * float/double. SysV ABI requires float/double args in xmm registers.
+           * Convert the integer value and route to xmm instead of GP. */
+          if (fp_idx < 8) {
+            fprintf(cc->out, "    popq %%rax\n");
+            cc->stack_depth--;
+            if (callee_ftype->params[i]->kind == TY_FLOAT) {
+              fprintf(cc->out, "    cvtsi2ss %%eax, %%xmm%d\n", fp_idx);
+            } else {
+              fprintf(cc->out, "    cvtsi2sd %%rax, %%xmm%d\n", fp_idx);
             }
             fp_idx++;
           }
@@ -10626,8 +10754,13 @@ static void compute_liveness(Node *n) {
     }
   }
 
-  compute_liveness(n->lhs);
-  compute_liveness(n->rhs);
+  if (n->kind == ND_ASSIGN) {
+    compute_liveness(n->rhs);
+    compute_liveness(n->lhs);
+  } else {
+    compute_liveness(n->lhs);
+    compute_liveness(n->rhs);
+  }
   compute_liveness(n->cond);
   compute_liveness(n->then_body);
   compute_liveness(n->else_body);
@@ -10814,65 +10947,57 @@ void codegen_func(Compiler *cc, Node *func) {
 
   scope_push(cc);
 
-  /* Store params from registers to their stack locations... */
+  /* Store params using System V ABI classification rules §3.2.3. */
   int param_offset = 0;
   int f_idx = 0;
   int gp_idx = 0;
+  int stack_arg_off = 16; /* args on stack start at 16(%rbp) */
   if (!backend_ops) {
   for (i = 0; i < func->num_params; i++) {
     Type *ptype = func->func_params->types[i];
     int sz = type_size(ptype);
-    if (sz < 8) sz = 8;
-    param_offset -= sz;
+    int slots = (sz + 7) / 8;
+    param_offset -= (slots * 8); // Always 8-byte aligned slots in the local frame
     
     if (ptype->kind == TY_STRUCT || ptype->kind == TY_UNION) {
         abi_class_t eb[2];
         classify_aggregate(ptype, eb);
-        if (eb[0] != CLASS_MEMORY) {
-            /* Small aggregate in registers: load each eightbyte from correct register set. */
-            if (eb[0] == CLASS_SSE) {
-                if (f_idx < 8) fprintf(cc->out, "    movq %%xmm%d, %d(%%rbp)\n", f_idx++, param_offset);
-            } else {
-                if (gp_idx < 6) fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx++], param_offset);
+        int fits = (eb[0] != CLASS_MEMORY);
+        if (fits) {
+            int needed_gp = 0, needed_fp = 0;
+            if (eb[0] == CLASS_SSE) needed_fp++; else needed_gp++;
+            if (sz > 8) { if (eb[1] == CLASS_SSE) needed_fp++; else needed_gp++; }
+            if (gp_idx + needed_gp > 6 || f_idx + needed_fp > 8) fits = 0;
+        }
+
+        if (fits) {
+            /* Registers */
+            if (eb[0] == CLASS_SSE) fprintf(cc->out, "    movq %%xmm%d, %d(%%rbp)\n", f_idx++, param_offset);
+            else fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx++], param_offset);
+            if (sz > 8) {
+                if (eb[1] == CLASS_SSE) fprintf(cc->out, "    movq %%xmm%d, %d(%%rbp)\n", f_idx++, param_offset + 8);
+                else fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx++], param_offset + 8);
             }
-            if (type_size(ptype) > 8) {
-                if (eb[1] == CLASS_SSE) {
-                    if (f_idx < 8) fprintf(cc->out, "    movq %%xmm%d, %d(%%rbp)\n", f_idx++, param_offset + 8);
-                } else {
-                    if (gp_idx < 6) fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx++], param_offset + 8);
-                }
+        } else {
+            /* Memory: data is directly on stack at stack_arg_off */
+            for (int j = 0; j < slots; j++) {
+                fprintf(cc->out, "    movq %d(%%rbp), %%rax\n", stack_arg_off + j * 8);
+                fprintf(cc->out, "    movq %%rax, %d(%%rbp)\n", param_offset + j * 8);
             }
-            continue;
-        }
-        /* MEMORY class: pointer is passed in next available GPR or on stack. */
-        if (gp_idx < 6) {
-          fprintf(cc->out, "    movq %%%s, %%r10\n", argregs[gp_idx]);
-          gp_idx++;
-        } else {
-          /* Fallback for many-args: ZCC simplified stack handling */
-          fprintf(cc->out, "    movq %d(%%rbp), %%r10\n", 16 + (i - 6) * 8);
-        }
-        int j;
-        for (j = 0; j < sz; j++) {
-            fprintf(cc->out, "    movb %d(%%r10), %%al\n", j);
-            fprintf(cc->out, "    movb %%al, %d(%%rbp)\n", param_offset + j);
-        }
-    } else if (is_float_type(ptype)) {
-        if (f_idx < 8) {
-            if (ptype->kind == TY_FLOAT) fprintf(cc->out, "    movss %%xmm%d, %d(%%rbp)\n", f_idx, param_offset);
-            else fprintf(cc->out, "    movsd %%xmm%d, %d(%%rbp)\n", f_idx, param_offset);
-            f_idx++;
-        } else {
-            fprintf(cc->out, "    movq %d(%%rbp), %%rax\n", 16 + (i - 6) * 8);
-            fprintf(cc->out, "    movq %%rax, %d(%%rbp)\n", param_offset);
+            stack_arg_off += slots * 8;
         }
     } else {
-        if (gp_idx < 6) {
-          fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx], param_offset);
-          gp_idx++;
+        int is_fp = is_float_type(ptype);
+        if (is_fp && f_idx < 8) {
+            if (ptype->kind == TY_FLOAT) fprintf(cc->out, "    movss %%xmm%d, %d(%%rbp)\n", f_idx++, param_offset);
+            else fprintf(cc->out, "    movsd %%xmm%d, %d(%%rbp)\n", f_idx++, param_offset);
+        } else if (!is_fp && gp_idx < 6) {
+            fprintf(cc->out, "    movq %%%s, %d(%%rbp)\n", argregs[gp_idx++], param_offset);
         } else {
-          fprintf(cc->out, "    movq %d(%%rbp), %%rax\n", 16 + (i - 6) * 8);
-          fprintf(cc->out, "    movq %%rax, %d(%%rbp)\n", param_offset);
+            /* Pass on stack */
+            fprintf(cc->out, "    movq %d(%%rbp), %%rax\n", stack_arg_off);
+            fprintf(cc->out, "    movq %%rax, %d(%%rbp)\n", param_offset);
+            stack_arg_off += 8;
         }
     }
   }
@@ -11124,6 +11249,13 @@ static void emit_global_var(Compiler *cc, Node *gvar) {
 
   if (gvar->is_extern)
     return; /* no emission for extern */
+
+  /* Skip .comm for function declarations — they must not create BSS symbols
+   * that shadow the real glibc implementations at link time. This catches
+   * complex declarations like signal() that the parser may treat as vars. */
+  if (gvar->type && (gvar->type->kind == TY_FUNC ||
+      (gvar->type->kind == TY_PTR && gvar->type->base && gvar->type->base->kind == TY_FUNC)))
+    return;
 
   size = type_size(gvar->type);
   if (size <= 0)
@@ -11656,7 +11788,6 @@ int node_ptr_elem_size(struct Node *n) {
 }
 
 
-/* C99/POSIX support for curl graduation — see commit 262bd08 */
 /* ================================================================ */
 /* COMPILER INITIALIZATION                                           */
 /* ================================================================ */
@@ -11671,6 +11802,24 @@ int node_ptr_elem_size(struct Node *n) {
  */
 #include "part1.c"
 #endif
+
+/* Global telemetry control */
+static int enable_telemetry_stdout = 0;
+extern void ir_telemetry_enable_stdout(void);
+
+/* Manifold engine globals (defined in ir_pass_manager.c) */
+extern int  g_manifold_enabled;
+extern char g_ir_export_path[256];
+
+/* Peephole globals (defined in ir_peephole.c) */
+extern int  g_peephole_enabled;
+extern int  g_peephole_deterministic;
+extern int  g_peephole_verbose;
+
+/* Security pass globals */
+static int  g_security_signext = 0;
+static int  g_security_476 = 0;
+static int  g_security_787 = 0;
 
 static void init_compiler(Compiler *cc) {
   /* zero everyt5555hing — cc was calloc'd */
@@ -11701,8 +11850,7 @@ static void init_compiler(Compiler *cc) {
   cc->col = 1;
   cc->pos = 0;
   cc->has_peek = 0;
-  cc->label_count = 0;
-  cc->str_label_count = 0;
+  cc->label_count = 100; /* start at 100 to avoid clashes */
   cc->errors = 0;
   cc->num_strings = 0;
   cc->num_structs = 0;
@@ -11736,6 +11884,7 @@ static void init_compiler(Compiler *cc) {
         t_va->size = 24;
         t_va->align = 8;
         t_va->is_complete = 1;
+        t_va->is_tbfp = 0;
         sym = scope_add(cc, "__builtin_va_list", type_array(cc, t_va, 1));
     }
     sym->is_typedef = 1;
@@ -11744,87 +11893,6 @@ static void init_compiler(Compiler *cc) {
     sym = scope_add(cc, "_Float128", cc->ty_double);
     sym->is_typedef = 1;
 
-    /* POSIX / system typedefs — needed for GCC-preprocessed code */
-    sym = scope_add(cc, "socklen_t", cc->ty_int);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "sa_family_t", cc->ty_ushort);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "in_port_t", cc->ty_ushort);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "in_addr_t", cc->ty_uint);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "pid_t", cc->ty_int);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "uid_t", cc->ty_uint);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "gid_t", cc->ty_uint);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "mode_t", cc->ty_uint);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "off_t", cc->ty_long);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "time_t", cc->ty_long);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "clock_t", cc->ty_long);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "suseconds_t", cc->ty_long);
-    sym->is_typedef = 1;
-    sym = scope_add(cc, "nfds_t", cc->ty_ulong);
-    sym->is_typedef = 1;
-
-    /* glibc internal __ typedefs — survive GCC preprocessing */
-    sym = scope_add(cc, "__time_t", cc->ty_long);   sym->is_typedef = 1;
-    sym = scope_add(cc, "__clock_t", cc->ty_long);   sym->is_typedef = 1;
-    sym = scope_add(cc, "__pid_t", cc->ty_int);      sym->is_typedef = 1;
-    sym = scope_add(cc, "__uid_t", cc->ty_uint);     sym->is_typedef = 1;
-    sym = scope_add(cc, "__gid_t", cc->ty_uint);     sym->is_typedef = 1;
-    sym = scope_add(cc, "__off_t", cc->ty_long);     sym->is_typedef = 1;
-    sym = scope_add(cc, "__off64_t", cc->ty_long);   sym->is_typedef = 1;
-    sym = scope_add(cc, "__mode_t", cc->ty_uint);    sym->is_typedef = 1;
-    sym = scope_add(cc, "__dev_t", cc->ty_ulong);    sym->is_typedef = 1;
-    sym = scope_add(cc, "__ino_t", cc->ty_ulong);    sym->is_typedef = 1;
-    sym = scope_add(cc, "__nlink_t", cc->ty_ulong);  sym->is_typedef = 1;
-    sym = scope_add(cc, "__blksize_t", cc->ty_long); sym->is_typedef = 1;
-    sym = scope_add(cc, "__blkcnt_t", cc->ty_long);  sym->is_typedef = 1;
-    sym = scope_add(cc, "__ssize_t", cc->ty_long);   sym->is_typedef = 1;
-    sym = scope_add(cc, "__socklen_t", cc->ty_int);  sym->is_typedef = 1;
-    sym = scope_add(cc, "__suseconds_t", cc->ty_long); sym->is_typedef = 1;
-    sym = scope_add(cc, "__syscall_slong_t", cc->ty_long); sym->is_typedef = 1;
-    sym = scope_add(cc, "__syscall_ulong_t", cc->ty_ulong); sym->is_typedef = 1;
-    sym = scope_add(cc, "__intmax_t", cc->ty_long);  sym->is_typedef = 1;
-    sym = scope_add(cc, "__uintmax_t", cc->ty_ulong); sym->is_typedef = 1;
-    sym = scope_add(cc, "__intptr_t", cc->ty_long);  sym->is_typedef = 1;
-    sym = scope_add(cc, "__sig_atomic_t", cc->ty_int); sym->is_typedef = 1;
-    sym = scope_add(cc, "__clockid_t", cc->ty_int);  sym->is_typedef = 1;
-    sym = scope_add(cc, "__timer_t", type_ptr(cc, cc->ty_void)); sym->is_typedef = 1;
-    sym = scope_add(cc, "__loff_t", cc->ty_long);    sym->is_typedef = 1;
-    sym = scope_add(cc, "__key_t", cc->ty_int);      sym->is_typedef = 1;
-    sym = scope_add(cc, "__id_t", cc->ty_uint);      sym->is_typedef = 1;
-    sym = scope_add(cc, "__useconds_t", cc->ty_uint); sym->is_typedef = 1;
-    sym = scope_add(cc, "__daddr_t", cc->ty_int);    sym->is_typedef = 1;
-    sym = scope_add(cc, "__caddr_t", type_ptr(cc, cc->ty_char)); sym->is_typedef = 1;
-    sym = scope_add(cc, "__fsblkcnt_t", cc->ty_ulong); sym->is_typedef = 1;
-    sym = scope_add(cc, "__fsfilcnt_t", cc->ty_ulong); sym->is_typedef = 1;
-    sym = scope_add(cc, "__fsword_t", cc->ty_long);  sym->is_typedef = 1;
-    sym = scope_add(cc, "__rlim_t", cc->ty_ulong);   sym->is_typedef = 1;
-    sym = scope_add(cc, "__quad_t", cc->ty_long);    sym->is_typedef = 1;
-    sym = scope_add(cc, "__u_quad_t", cc->ty_ulong); sym->is_typedef = 1;
-
-
-    /* fd_set — used by select(). glibc: struct with __fds_bits[16] (128 bytes) */
-    {
-        Type *t_fdset = type_new(cc, TY_STRUCT);
-        strncpy(t_fdset->tag, "fd_set", MAX_IDENT - 1);
-        t_fdset->size = 128;
-        t_fdset->align = 8;
-        t_fdset->is_complete = 1;
-        sym = scope_add(cc, "fd_set", t_fdset);
-        sym->is_typedef = 1;
-    }
-
-    /* curl_socket_t — typically int on POSIX */
-    sym = scope_add(cc, "curl_socket_t", cc->ty_int);
-    sym->is_typedef = 1;
 
     /* NULL as enum constant */
     sym = scope_add(cc, "NULL", cc->ty_long);
@@ -12014,11 +12082,6 @@ static void init_compiler(Compiler *cc) {
       sym = scope_add(cc, "inet_pton", ft);
       sym->is_global = 1;
 
-      /* strtod — returns double */
-      ft = type_func(cc, cc->ty_double);
-      sym = scope_add(cc, "strtod", ft);
-      sym->is_global = 1;
-
       /* ctype functions — all return int */
       ft = type_func(cc, cc->ty_int);
       sym = scope_add(cc, "isalpha", ft); sym->is_global = 1;
@@ -12118,6 +12181,72 @@ static void init_compiler(Compiler *cc) {
       ft = type_func(cc, cc->ty_int);
       sym = scope_add(cc, "gettimeofday", ft);
       sym->is_global = 1;
+
+      /* Math functions — return double */
+      ft = type_func(cc, cc->ty_double);
+      sym = scope_add(cc, "log", ft); sym->is_global = 1;
+      ft = type_func(cc, cc->ty_double);
+      sym = scope_add(cc, "cos", ft); sym->is_global = 1;
+      ft = type_func(cc, cc->ty_double);
+      sym = scope_add(cc, "exp", ft); sym->is_global = 1;
+      ft = type_func(cc, cc->ty_double);
+      sym = scope_add(cc, "fabs", ft); sym->is_global = 1;
+      ft = type_func(cc, cc->ty_double);
+      sym = scope_add(cc, "sqrt", ft); sym->is_global = 1;
+
+      /* snprintf — returns int, variadic */
+      ft = type_func(cc, cc->ty_int);
+      ft->is_variadic = 1;
+      sym = scope_add(cc, "snprintf", ft);
+      sym->is_global = 1;
+
+      /* fputc — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "fputc", ft);
+      sym->is_global = 1;
+
+      /* ferror — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "ferror", ft);
+      sym->is_global = 1;
+
+      /* qsort — returns void */
+      ft = type_func(cc, cc->ty_void);
+      sym = scope_add(cc, "qsort", ft);
+      sym->is_global = 1;
+
+      /* fflush — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "fflush", ft);
+      sym->is_global = 1;
+
+      /* strchr — returns char* */
+      ft = type_func(cc, type_ptr(cc, cc->ty_char));
+      sym = scope_add(cc, "strchr", ft);
+      sym->is_global = 1;
+
+      /* strtol — returns long */
+      ft = type_func(cc, cc->ty_long);
+      sym = scope_add(cc, "strtol", ft);
+      sym->is_global = 1;
+
+      /* atoi — returns int */
+      ft = type_func(cc, cc->ty_int);
+      sym = scope_add(cc, "atoi", ft);
+      sym->is_global = 1;
+
+      /* strcat, strncat — returns char* */
+      ft = type_func(cc, type_ptr(cc, cc->ty_char));
+      sym = scope_add(cc, "strcat", ft);
+      sym->is_global = 1;
+      ft = type_func(cc, type_ptr(cc, cc->ty_char));
+      sym = scope_add(cc, "strncat", ft);
+      sym->is_global = 1;
+
+      /* freopen — returns FILE* */
+      ft = type_func(cc, type_ptr(cc, cc->ty_void));
+      sym = scope_add(cc, "freopen", ft);
+      sym->is_global = 1;
     }
   }
 }
@@ -12132,7 +12261,6 @@ static char *read_file(char *path, int *out_len) {
   char *buf;
   int nr;
 
-  fprintf(stderr, "read_file: path = '%s' (addr: %p)\n", path, path);
   fp = fopen(path, "rb");
   if (!fp)
     return 0;
@@ -12164,7 +12292,6 @@ static char *read_file(char *path, int *out_len) {
 
 static char *line_buffer = 0;
 static char **line_ptrs = 0;
-static int  *line_skip = 0;
 
 static void peephole_optimize(char *filename) {
   FILE *fp;
@@ -12184,187 +12311,71 @@ static void peephole_optimize(char *filename) {
   if (!line_ptrs) {
     line_ptrs = (char **)malloc(MAX_PEEP_LINES * sizeof(char *));
   }
-  if (!line_skip) {
-    line_skip = (int *)malloc(MAX_PEEP_LINES * sizeof(int));
-  }
   line_buffer = (char *)malloc(file_size + MAX_PEEP_LINES * 128);
-  if (!line_buffer || !line_ptrs || !line_skip) {
+  if (!line_buffer || !line_ptrs) {
     fclose(fp);
     return;
   }
 
   while (nlines < MAX_PEEP_LINES && fgets(line_buffer + nlines * 128, 128, fp)) {
     line_ptrs[nlines] = line_buffer + nlines * 128;
-    line_skip[nlines] = 0;
     nlines++;
   }
   fclose(fp);
 
-  int changed;
-  char tmp1[64], tmp2[64];
-  char pop_reg[64];
-  char target[64], label[64];
-  char reg[64];
-  char src[64], dst1[64], dst2[64];
-  char imm_str[64];
-  long local_imm;
-  char val_str[32];
-
-peephole_loop:
-  changed = 0;
-
-  {
-    int out = 0;
-    int old_n = nlines;
-    for (i = 0; i < old_n; i++) {
-      if (line_skip[i] == 0 && line_ptrs[i][0] != '\n') {
-        line_ptrs[out] = line_ptrs[i];
-        line_skip[out] = 0;
-        out = out + 1;
-      }
-    }
-    for (i = out; i < old_n; i++) {
-      line_skip[i] = 0;
-    }
-    nlines = out;
-  }
-
   for (i = 0; i < nlines;) {
     char *l1 = line_ptrs[i];
-    int matched = 0;
 
     /* 1. Redundant Push/Pop */
     if (strncmp(l1, "    pushq ", 10) == 0 && i + 1 < nlines) {
       char *l2 = line_ptrs[i + 1];
       if (strncmp(l2, "    popq ", 9) == 0) {
+        char tmp1[64], tmp2[64];
         sscanf(l1, "    pushq %s", tmp1);
         sscanf(l2, "    popq %s", tmp2);
         if (strcmp(tmp1, tmp2) == 0) {
-          line_skip[i] = 1;
-          line_skip[i + 1] = 1;
+          line_ptrs[i][0] = 0;
+          line_ptrs[i + 1][0] = 0;
           eliminated += 2;
-          changed = 1;
           i += 2;
-          matched = 1;
+          continue;
         } else {
           sprintf(line_ptrs[i], "    movq %s, %s\n", tmp1, tmp2);
-          line_skip[i + 1] = 1;
+          line_ptrs[i + 1][0] = 0;
           eliminated += 2;
-          changed = 1;
           i += 2;
-          matched = 1;
+          continue;
         }
       }
     }
 
     /* 2. Arithmetic Nullification */
-    if (!matched && (strcmp(l1, "    addq $0, %rax\n") == 0 ||
+    if (strcmp(l1, "    addq $0, %rax\n") == 0 ||
         strcmp(l1, "    subq $0, %rax\n") == 0 ||
         strcmp(l1, "    addq $0, %rsp\n") == 0 ||
-        strcmp(l1, "    subq $0, %rsp\n") == 0)) {
-      line_skip[i] = 1;
+        strcmp(l1, "    subq $0, %rsp\n") == 0) {
+      line_ptrs[i][0] = 0;
       eliminated += 1;
-      changed = 1;
       i += 1;
-      matched = 1;
+      continue;
     }
 
     /* 3. Push/Lea/Pop Triad */
-    if (!matched && strncmp(l1, "    pushq %rax\n", 15) == 0 && i + 2 < nlines) {
+    if (strcmp(l1, "    pushq %rax\n") == 0 && i + 2 < nlines) {
       char *l2 = line_ptrs[i + 1];
       char *l3 = line_ptrs[i + 2];
-      int has_rax_dst = 0;
-      {
-        int si;
-        int l2len = 0;
-        while (l2[l2len]) l2len++;
-        for (si = 0; si + 5 < l2len; si++) {
-          if (l2[si] == ',' && l2[si+1] == ' ' && l2[si+2] == '%' &&
-              l2[si+3] == 'r' && l2[si+4] == 'a' && l2[si+5] == 'x') {
-            has_rax_dst = 1;
-            break;
-          }
-        }
-      }
-      if (strncmp(l2, "    leaq ", 9) == 0 && has_rax_dst &&
+      if (strncmp(l2, "    leaq ", 9) == 0 && strstr(l2, ", %rax") &&
           strncmp(l3, "    popq ", 9) == 0) {
+        char pop_reg[64];
         sscanf(l3, "    popq %s", pop_reg);
         sprintf(line_ptrs[i], "    movq %%rax, %s\n", pop_reg);
-        line_skip[i + 2] = 1;
+        line_ptrs[i + 2][0] = 0;
         eliminated += 3;
-        changed = 1;
         i += 3;
-        matched = 1;
+        continue;
       }
     }
-
-    /* 4. Branch Straightening */
-    if (!matched && strncmp(l1, "    jmp .L", 10) == 0 && i + 1 < nlines) {
-      if (sscanf(l1, "    jmp %63s", target) == 1) {
-        char *l2 = line_ptrs[i + 1];
-        if (l2[0] == '.' && l2[1] == 'L') {
-          if (sscanf(l2, "%63[^:]:", label) == 1 && strcmp(target, label) == 0) {
-            line_skip[i] = 1;
-            eliminated += 1;
-            changed = 1;
-            i += 1;
-            matched = 1;
-          }
-        }
-      }
-    }
-
-    /* 5. Zero-Test Optimization */
-    if (!matched && strncmp(l1, "    cmpq $0, %", 14) == 0) {
-      int ri;
-      strcpy(reg, l1 + 14);
-      /* Manually strip trailing newline — avoid strchr to prevent ZCC cltq bug */
-      for (ri = 0; ri < 63 && reg[ri]; ri++) {
-        if (reg[ri] == '\n') { reg[ri] = '\0'; break; }
-      }
-      strcpy(line_ptrs[i], "    testq %");
-      strcat(line_ptrs[i], reg);
-      strcat(line_ptrs[i], ", %");
-      strcat(line_ptrs[i], reg);
-      strcat(line_ptrs[i], "\n");
-      eliminated += 1;
-      changed = 1;
-      i += 1;
-      matched = 1;
-    }
-
-    /* 6. LEA Computation Fusion */
-    if (!matched && strncmp(l1, "    movq %", 10) == 0 && i + 1 < nlines) {
-      char *l2 = line_ptrs[i + 1];
-      if (strncmp(l2, "    addq $", 10) == 0) {
-        if (sscanf(l1, "    movq %%%[a-z0-9], %%%[a-z0-9]", src, dst1) == 2 &&
-            sscanf(l2, "    addq $%ld, %%%[a-z0-9]", &local_imm, dst2) == 2) {
-          if (strcmp(dst1, dst2) == 0) {
-            sprintf(val_str, "%ld", local_imm);
-            strcpy(line_ptrs[i], "    leaq ");
-            strcat(line_ptrs[i], val_str);
-            strcat(line_ptrs[i], "(%");
-            strcat(line_ptrs[i], src);
-            strcat(line_ptrs[i], "), %");
-            strcat(line_ptrs[i], dst1);
-            strcat(line_ptrs[i], "\n");
-
-            line_skip[i + 1] = 1;
-            eliminated += 2;
-            changed = 1;
-            i += 2;
-            matched = 1;
-          }
-        }
-      }
-    }
-
-    if (!matched) {
-      i++;
-    }
-  } 
-  if (changed) {
-      goto peephole_loop;
+    i++;
   }
 
   fp = fopen(filename, "w");
@@ -12373,13 +12384,456 @@ peephole_loop:
     return;
   }
   for (i = 0; i < nlines; i++) {
-    if (line_skip[i] == 0)
+    if (line_ptrs[i][0] != 0)
       fputs(line_ptrs[i], fp);
   }
   fclose(fp);
   free(line_buffer);
-  printf("[Phase 5] Native C Peephole Optimization... OK (%d elided)\n",
+  if (!enable_telemetry_stdout) printf("[Phase 5] Native C Peephole Optimization... OK (%d elided)\n",
          eliminated);
+}
+
+/* ================================================================ */
+/* SECURITY PASS: --security-signext (CWE-122)                       */
+/* Scans assembly for sign-extension (movsbl/movsbq) feeding         */
+/* memcpy/memset/memmove within a 15-instruction window.             */
+/* ================================================================ */
+
+/* Scan window: ZCC unoptimized codegen emits ~30-40 instructions of arg
+   setup between a sign-extending cast and the consuming memcpy call.
+   64 covers observed gaps (CVE-2023-38545: 34 lines) with margin. */
+#define SIGNEXT_WINDOW 64
+
+static void security_signext_scan(char *filename) {
+  FILE *fp;
+  int nlines = 0;
+  int findings = 0;
+  int i;
+  char current_func[128];
+  char *line_buf;
+  char **lp;
+  int max_lines = 32768;
+
+  fp = fopen(filename, "r");
+  if (!fp) return;
+
+  line_buf = (char *)malloc(max_lines * 128);
+  lp = (char **)malloc(max_lines * sizeof(char *));
+  if (!line_buf || !lp) { fclose(fp); return; }
+
+  current_func[0] = 0;
+  while (nlines < max_lines && fgets(line_buf + nlines * 128, 128, fp)) {
+    lp[nlines] = line_buf + nlines * 128;
+    nlines++;
+  }
+  fclose(fp);
+
+  for (i = 0; i < nlines; i++) {
+    /* Track current function */
+    if (lp[i][0] != ' ' && lp[i][0] != '\t' && lp[i][0] != '.' &&
+        lp[i][0] != '#' && lp[i][0] != '\n') {
+      int k = 0;
+      while (lp[i][k] && lp[i][k] != ':' && k < 127) {
+        current_func[k] = lp[i][k];
+        k++;
+      }
+      current_func[k] = 0;
+    }
+
+    /* Look for movsbl or movsbq (sign-extending byte to int/long) */
+    if (strstr(lp[i], "movsbl ") || strstr(lp[i], "movsbq ") ||
+        strstr(lp[i], "movswl ") || strstr(lp[i], "movswq ")) {
+      /* Scan forward within window for memcpy/memset/memmove call */
+      int j;
+      for (j = i + 1; j < nlines && j < i + SIGNEXT_WINDOW; j++) {
+        if (strstr(lp[j], "call memcpy") ||
+            strstr(lp[j], "call memset") ||
+            strstr(lp[j], "call memmove")) {
+          findings++;
+          printf("[--security-signext] CWE-122 WARNING: sign-extension at line %d "
+                 "feeds %s in %s() (asm lines %d->%d)\n",
+                 i + 1, strstr(lp[j], "call ") + 5,
+                 current_func[0] ? current_func : "<unknown>",
+                 i + 1, j + 1);
+          break;  /* don't double-report same sign-ext */
+        }
+        /* Stop at label or ret - different basic block */
+        if (lp[j][0] == '.' && lp[j][1] == 'L') break;
+        if (strstr(lp[j], "ret")) break;
+      }
+    }
+  }
+
+  free(line_buf);
+  free(lp);
+
+  if (findings) {
+    printf("[--security-signext] %d potential sign-extension overflow(s) found\n",
+           findings);
+  } else {
+    printf("[--security-signext] Clean: no sign-extension -> memcpy patterns\n");
+  }
+}
+
+/* ================================================================ */
+/* SECURITY PASS: --security-476 (CWE-476)                           */
+/* Scans assembly for nullable-return calls (malloc, calloc, realloc, */
+/* fopen, etc.) followed by dereference of %rax without null check.  */
+/* ================================================================ */
+
+#define NULLDEREF_WINDOW 30
+
+static int is_nullable_call(const char *line) {
+  return strstr(line, "call malloc") || strstr(line, "call calloc") ||
+         strstr(line, "call realloc") || strstr(line, "call fopen") ||
+         strstr(line, "call fdopen") || strstr(line, "call tmpfile") ||
+         strstr(line, "call strdup") || strstr(line, "call strndup") ||
+         strstr(line, "call mmap");
+}
+
+static int is_null_check(const char *line) {
+  /* testq %rax, %rax  or  cmpq $0, %rax */
+  return strstr(line, "testq %rax") || strstr(line, "cmpq $0, %rax") ||
+         strstr(line, "test %eax") || strstr(line, "cmp $0, %eax");
+}
+
+static int is_rax_deref(const char *line) {
+  /* (%rax) — memory access through %rax without offset guard */
+  return strstr(line, "(%rax)") != 0;
+}
+
+static int is_rax_moved(const char *line) {
+  /* movq %rax, %r.. — return value moved to another register */
+  if (strstr(line, "movq %rax, %r") && !strstr(line, "movq %rax, %rsp") &&
+      !strstr(line, "movq %rax, %rbp"))
+    return 1;
+  return 0;
+}
+
+int g_emit_anomalies = 0;
+
+/* Tiered type-to-string mapping for anomaly metadata.
+ * Shorthand "ptr" covers all pointer/array/function types.
+ * Aggregates are flagged for propose-only by returning their category.
+ * char/bool both default to return 0/false; documented here as compatible. */
+static const char *type_to_str(Type *ty) {
+  if (!ty) return "unknown";
+  switch (ty->kind) {
+    case TY_VOID:   return "void";
+    case TY_INT:    return "int";
+    case TY_CHAR:   return "char";
+    case TY_SHORT:  return "short";
+    case TY_LONG:   return "long";
+    case TY_LONGLONG: return "long long";
+    case TY_UINT:   return "uint";
+    case TY_UCHAR:  return "uchar";
+    case TY_USHORT: return "ushort";
+    case TY_ULONG:  return "ulong";
+    case TY_ULONGLONG: return "ulonglong";
+    case TY_FLOAT:  return "float";
+    case TY_DOUBLE: return "double";
+    case TY_PTR:
+    case TY_ARRAY:
+    case TY_FUNC:   return "ptr";
+    case TY_STRUCT: return "struct";
+    case TY_UNION:  return "union";
+    case TY_ENUM:   return "enum";
+    default:        return "unknown";
+  }
+}
+
+static void security_nullderef_scan(Compiler *cc, char *filename) {
+  FILE *fp;
+  int nlines = 0;
+  int findings = 0;
+  int i;
+  char current_func[128];
+  char *line_buf;
+  char **lp;
+  int max_lines = 32768;
+
+  fp = fopen(filename, "r");
+  if (!fp) return;
+
+  line_buf = (char *)malloc(max_lines * 128);
+  lp = (char **)malloc(max_lines * sizeof(char *));
+  if (!line_buf || !lp) { fclose(fp); return; }
+
+  current_func[0] = 0;
+  while (nlines < max_lines && fgets(line_buf + nlines * 128, 128, fp)) {
+    lp[nlines] = line_buf + nlines * 128;
+    nlines++;
+  }
+  fclose(fp);
+
+  for (i = 0; i < nlines; i++) {
+    /* Track current function */
+    if (lp[i][0] != ' ' && lp[i][0] != '\t' && lp[i][0] != '.' &&
+        lp[i][0] != '#' && lp[i][0] != '\n') {
+      int k = 0;
+      while (lp[i][k] && lp[i][k] != ':' && k < 127) {
+        current_func[k] = lp[i][k];
+        k++;
+      }
+      current_func[k] = 0;
+    }
+
+    /* Look for nullable-return function calls */
+    if (is_nullable_call(lp[i])) {
+      int j;
+      int saw_null_check = 0;
+      const char *call_name = strstr(lp[i], "call ") + 5;
+      char clean_call[64];
+      int c_idx = 0;
+      while (call_name[c_idx] && call_name[c_idx] != '\n' && call_name[c_idx] != '@' && call_name[c_idx] != ' ' && c_idx < 63) {
+          clean_call[c_idx] = call_name[c_idx];
+          c_idx++;
+      }
+      clean_call[c_idx] = '\0';
+
+      char tracked_reg[8];  /* register holding the return value */
+      char deref_pat[16];   /* "(%rXX)" pattern to search for */
+      char null_pat1[32];   /* "testq %rXX, %rXX" */
+      char null_pat2[32];   /* "cmpq $0, %rXX" */
+
+      strcpy(tracked_reg, "%rax");
+      strcpy(deref_pat, "(%rax)");
+      strcpy(null_pat1, "testq %rax");
+      strcpy(null_pat2, "cmpq $0, %rax");
+
+      char current_owner[128];
+      char current_file[128];
+      int current_line = 0;
+      current_owner[0] = 0;
+      current_file[0] = 0;
+
+      for (j = i + 1; j < nlines && j < i + NULLDEREF_WINDOW; j++) {
+        /* Parse latest ZCC_META for our tracked register */
+        /* Format: # ZCC_META %reg=owner@file:line */
+        char meta_pat[64];
+        sprintf(meta_pat, "# ZCC_META %s=", tracked_reg);
+        char *meta_match = strstr(lp[j], meta_pat);
+        if (meta_match) {
+           meta_match += strlen(meta_pat);
+           /* owner */
+           int k = 0;
+           while (meta_match[k] && meta_match[k] != '@' && k < 127) {
+               current_owner[k] = meta_match[k];
+               k++;
+           }
+           current_owner[k] = 0;
+           if (strcmp(current_owner, "_") == 0) current_owner[0] = 0;
+           
+           if (meta_match[k] == '@') {
+               meta_match += k + 1;
+               /* file */
+               k = 0;
+               while (meta_match[k] && meta_match[k] != ':' && k < 127) {
+                   current_file[k] = meta_match[k];
+                   k++;
+               }
+               current_file[k] = 0;
+               
+               if (meta_match[k] == ':') {
+                   current_line = atoi(meta_match + k + 1);
+               }
+           }
+        }
+
+        /* If we see a null check on tracked reg OR %rax, we're safe */
+        if (strstr(lp[j], null_pat1) || strstr(lp[j], null_pat2) ||
+            strstr(lp[j], "cmpq $0, %rax") || strstr(lp[j], "testq %rax")) {
+          saw_null_check = 1;
+          break;
+        }
+        /* If %rax is moved to another register, follow the copy */
+        if (strcmp(tracked_reg, "%rax") == 0 && is_rax_moved(lp[j])) {
+          /* Extract destination: "movq %rax, %rXX" */
+          char *dst = strstr(lp[j], ", %r");
+          if (dst) {
+            int k = 0;
+            dst += 2;  /* skip ", " */
+            while (dst[k] && dst[k] != '\n' && dst[k] != ' ' && k < 5) {
+              tracked_reg[k] = dst[k];
+              k++;
+            }
+            tracked_reg[k] = 0;
+            sprintf(deref_pat, "(%s)", tracked_reg);
+            sprintf(null_pat1, "testq %s", tracked_reg);
+            sprintf(null_pat2, "cmpq $0, %s", tracked_reg);
+          }
+          continue;  /* keep scanning with new register */
+        }
+        /* If there's a deref of the tracked register OR %rax (which
+         * may be a reload of the tracked register) without a null check */
+        if ((strstr(lp[j], deref_pat) || strstr(lp[j], "(%rax)")) &&
+            !saw_null_check) {
+          findings++;
+          char *reported_var = current_owner[0] ? current_owner : clean_call;
+          if (g_emit_anomalies) {
+              /* Option 1: JSON consumers (like the mutation applier) require a valid
+               * lvalue owner to synthesize a guard. If missing (e.g. member assignment),
+               * suppress the anomaly entirely to prevent unactionable reports.
+               * Human reviewers (--security-476) still see the function-name fallback.
+               */
+              if (!current_owner[0]) {
+                  break;
+              }
+              Symbol *sym = scope_find(cc, current_func);
+              const char *ret_type = "unknown";
+              if (sym && sym->type && sym->type->kind == TY_FUNC) {
+                  ret_type = type_to_str(sym->type->ret);
+              }
+              printf("{\"type\":\"ir_anomaly\", \"kind\":\"CWE-476\", \"site\":\"%s:%s:%d\", \"severity\":0.7, \"variable\":\"%s\", \"return_type\":\"%s\"}\n",
+                     current_file[0] ? current_file : (cc->filename ? cc->filename : "unknown"),
+                     current_func[0] ? current_func : "unknown",
+                     current_line, reported_var, ret_type);
+          } else {
+              printf("[--security-476] CWE-476 WARNING: unchecked %s return "
+                     "dereferenced via %s in %s() (asm lines %d->%d)\n",
+                     clean_call, reported_var,
+                     current_func[0] ? current_func : "<unknown>",
+                     i + 1, j + 1);
+          }
+          break;
+        }
+        /* Stop at label or ret - different basic block */
+        if (lp[j][0] == '.' && lp[j][1] == 'L') break;
+        if (strstr(lp[j], "ret")) break;
+        /* Stop at another call - %rax is clobbered */
+        if (strstr(lp[j], "call ")) break;
+      }
+    }
+  }
+
+  free(line_buf);
+  free(lp);
+
+  if (findings) {
+    printf("[--security-476] %d potential null-deref(s) found\n", findings);
+  } else {
+    printf("[--security-476] Clean: all nullable returns checked\n");
+  }
+}
+
+static void security_bounds_scan(Compiler *cc, char *filename) {
+  FILE *fp;
+  int nlines = 0;
+  int findings = 0;
+  int i;
+  char current_func[128];
+  char *line_buf;
+  char **lp;
+  int max_lines = 32768;
+
+  fp = fopen(filename, "r");
+  if (!fp) return;
+
+  line_buf = (char *)malloc(max_lines * 128);
+  lp = (char **)malloc(max_lines * sizeof(char *));
+  if (!line_buf || !lp) { fclose(fp); return; }
+
+  current_func[0] = 0;
+  while (nlines < max_lines && fgets(line_buf + nlines * 128, 128, fp)) {
+    lp[nlines] = line_buf + nlines * 128;
+    nlines++;
+  }
+  fclose(fp);
+
+  for (i = 0; i < nlines; i++) {
+    /* Track current function */
+    if (lp[i][0] != ' ' && lp[i][0] != '\t' && lp[i][0] != '.' &&
+        lp[i][0] != '#' && lp[i][0] != '\n') {
+      int k = 0;
+      while (lp[i][k] && lp[i][k] != ':' && k < 127) {
+        current_func[k] = lp[i][k];
+        k++;
+      }
+      current_func[k] = 0;
+    }
+
+    if (strstr(lp[i], "# ZCC_META_ARRAY")) {
+      char array_name[64] = "unknown";
+      char index_name[64] = "?";
+      char size_str[32] = "0";
+      char file_name[128] = "unknown";
+      int line_num = 0;
+
+      char *ptr = strstr(lp[i], "array=");
+      if (ptr) {
+          ptr += 6;
+          int k = 0;
+          while (ptr[k] && ptr[k] != ' ' && k < 63) array_name[k++] = ptr[k];
+          array_name[k] = 0;
+      }
+      
+      ptr = strstr(lp[i], "index=");
+      if (ptr) {
+          ptr += 6;
+          int k = 0;
+          while (ptr[k] && ptr[k] != ' ' && k < 63) index_name[k++] = ptr[k];
+          index_name[k] = 0;
+      }
+
+      ptr = strstr(lp[i], "size=");
+      if (ptr) {
+          ptr += 5;
+          int k = 0;
+          while (ptr[k] && ptr[k] != ' ' && k < 31) size_str[k++] = ptr[k];
+          size_str[k] = 0;
+      }
+      
+      ptr = strstr(lp[i], "@");
+      if (ptr) {
+          ptr += 1;
+          int k = 0;
+          while (ptr[k] && ptr[k] != ':' && k < 127) file_name[k++] = ptr[k];
+          file_name[k] = 0;
+          if (ptr[k] == ':') line_num = atoi(ptr + k + 1);
+      }
+
+      /* Do backwards walk looking for cmp bounds check */
+      int saw_size_cmp = 0;
+      int saw_cmp_instr = 0;
+      char size_pat[64];
+      sprintf(size_pat, "$%s", size_str);
+
+      int j;
+      for (j = i - 1; j >= 0 && j >= i - 30; j--) {
+          if (strstr(lp[j], "ret")) break;
+          if (strstr(lp[j], "call ")) break;
+          if (lp[j][0] != ' ' && lp[j][0] != '\t' && lp[j][0] != '.' && lp[j][0] != '#') break; /* Func def */
+
+          if (strstr(lp[j], size_pat)) saw_size_cmp = 1;
+          if (strstr(lp[j], "cmp")) saw_cmp_instr = 1;
+      }
+
+      if (!(saw_size_cmp && saw_cmp_instr)) {
+          findings++;
+          if (g_emit_anomalies) {
+               Symbol *sym = scope_find(cc, current_func);
+               const char *ret_type = "unknown";
+               if (sym && sym->type && sym->type->kind == TY_FUNC) {
+                   ret_type = type_to_str(sym->type->ret);
+               }
+               printf("{\"type\":\"ir_anomaly\", \"kind\":\"CWE-787\", \"site\":\"%s:%s:%d\", \"severity\":0.8, \"array\":\"%s\", \"index\":\"%s\", \"size\":%s, \"return_type\":\"%s\"}\n",
+                      file_name, current_func, line_num, array_name, index_name, size_str, ret_type);
+          } else {
+               printf("[--security-787] CWE-787 WARNING: unchecked array bounds for %s[%s] (size %s) in %s()\n",
+                      array_name, index_name, size_str, current_func);
+          }
+      }
+    }
+  }
+
+  free(line_buf);
+  free(lp);
+
+  if (findings) {
+    if (!g_emit_anomalies) printf("[--security-787] %d potential bounds-violation(s) found\n", findings);
+  } else {
+    if (!g_emit_anomalies) printf("[--security-787] Clean: all bounded arrays checked\n");
+  }
 }
 
 /* ================================================================ */
@@ -12392,12 +12846,14 @@ void ir_pm_run_default(void *mod_ptr, int verbose);
 
 int main(int argc, char **argv) {
   Compiler *cc;
+  FrontendLang frontend_lang;
   char *input_file;
   char *output_file;
   char *source;
   int source_len;
   char asm_file[256];
   char cmd[512];
+  char include_paths[4096];  /* -I paths, colon-separated */
   Node *prog;
   int ret;
   int i;
@@ -12405,17 +12861,27 @@ int main(int argc, char **argv) {
 
   input_file = 0;
   output_file = 0;
+  include_paths[0] = '\0';
+  strcat(include_paths, ".:./include");  /* default paths */
 
   int pp_only = 0;
 
   int zcc_verbose_flag = 0;
-  int debug_abi_classes_flag = 0;
+
+  int zcc_quiet_flag = 0;
 
   int compile_only = 0;
+  int dump_rust_ast = 0;
+  int dump_rust_ast_with_symbols = 0;
+  int dump_rust_symbol_table = 0;
+  int dump_rust_ir = 0;
+  int rust_backend_v1 = 0;
+  int rust_strict_let_annotations = 0;
+  int rust_strict_function_signatures = 0;
+  int rust_dump_phase = 0;
+  int rust_dump_mode = 0;
 
   int g_ir_primary = 0;
-
-  const char *include_paths = ".:./include";
 
   /* parse arguments */
   for (i = 1; i < argc; i++) {
@@ -12427,23 +12893,69 @@ int main(int argc, char **argv) {
       compile_only = 1;
     } else if (strcmp(argv[i], "--pp-only") == 0) {
       pp_only = 1;
+    } else if (strcmp(argv[i], "--dump-rust-ast") == 0) {
+      dump_rust_ast = 1;
+    } else if (strcmp(argv[i], "--dump-rust-ast-with-symbols") == 0) {
+      dump_rust_ast_with_symbols = 1;
+    } else if (strcmp(argv[i], "--dump-rust-symbol-table") == 0) {
+      dump_rust_symbol_table = 1;
+    } else if (strcmp(argv[i], "--dump-rust-ir") == 0) {
+      dump_rust_ir = 1;
+    } else if (strcmp(argv[i], "--rust-backend-v1") == 0) {
+      rust_backend_v1 = 1;
+    } else if (strcmp(argv[i], "--rust-strict-let-annotations") == 0) {
+      rust_strict_let_annotations = 1;
+    } else if (strcmp(argv[i], "--rust-strict-function-signatures") == 0) {
+      rust_strict_function_signatures = 1;
+    } else if (strcmp(argv[i], "--rust-strict") == 0) {
+      rust_strict_let_annotations = 1;
+      rust_strict_function_signatures = 1;
+    } else if (strcmp(argv[i], "--rust-dump-phase") == 0) {
+      rust_dump_phase = 1;
     } else if (strcmp(argv[i], "-v") == 0) {
       zcc_verbose_flag = 1;
-    } else if (strcmp(argv[i], "-fdebug-abi-classes") == 0) {
-      debug_abi_classes_flag = 1;
+    } else if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "-q") == 0) {
+      zcc_quiet_flag = 1;
     } else if (strcmp(argv[i], "--ir") == 0) {
       g_emit_ir = 1;
       g_ir_primary = 1;
+    } else if (strcmp(argv[i], "--telemetry") == 0) {
+      enable_telemetry_stdout = 1;
+      setenv("ZCC_EMIT_TELEMETRY", "1", 1);
+    } else if (strcmp(argv[i], "--manifold") == 0) {
+      g_manifold_enabled = 1;
+    } else if (strcmp(argv[i], "--manifold-deterministic") == 0) {
+      g_manifold_enabled = 1;
+      /* sigma=0 enforced inside ir_pass_manager via deterministic flag;
+       * set env so manifold engine sees it regardless of cfg path. */
+      setenv("ZCC_MANIFOLD_DET", "1", 1);
+    } else if (strncmp(argv[i], "--ir-export=", 12) == 0) {
+      strncpy(g_ir_export_path, argv[i] + 12, 255);
+      g_ir_export_path[255] = '\0';
+      g_manifold_enabled = 1;  /* export implies manifold active */
+    } else if (strcmp(argv[i], "--peephole") == 0) {
+      g_peephole_enabled = 1;
+    } else if (strcmp(argv[i], "--peephole-deterministic") == 0) {
+      g_peephole_enabled = 1;
+      g_peephole_deterministic = 1;
+    } else if (strcmp(argv[i], "--peephole-verbose") == 0) {
+      g_peephole_verbose = 1;
+    } else if (strcmp(argv[i], "--security-signext") == 0) {
+      g_security_signext = 1;
+    } else if (strcmp(argv[i], "--security-476") == 0) {
+      g_security_476 = 1;
+    } else if (strcmp(argv[i], "--security-787") == 0) {
+      g_security_787 = 1;
+    } else if (strcmp(argv[i], "--emit-anomalies") == 0) {
+      g_emit_anomalies = 1;
+      g_security_476 = 1;
+      g_security_787 = 1;
     } else if (strncmp(argv[i], "-I", 2) == 0) {
-      /* PP-INCLUDE-022: append -I path to include_paths */
-      const char *ipath = argv[i] + 2;
-      if (ipath[0] == '\0' && i + 1 < argc) { i++; ipath = argv[i]; }
+      /* include path: -Ipath or -I path */
+      const char *ipath = (argv[i][2] != '\0') ? argv[i] + 2 : ((i + 1 < argc) ? argv[++i] : "");
       if (ipath[0]) {
-        int olen = strlen(include_paths);
-        int nlen = strlen(ipath);
-        char *merged = (char *)malloc(olen + 1 + nlen + 1);
-        sprintf(merged, "%s:%s", include_paths, ipath);
-        include_paths = merged;
+        if (include_paths[0]) strncat(include_paths, ":", 4095 - (int)strlen(include_paths));
+        strncat(include_paths, ipath, 4095 - (int)strlen(include_paths));
       }
     } else if (strncmp(argv[i], "-l", 2) == 0 || strncmp(argv[i], "-L", 2) == 0 || strncmp(argv[i], "-O", 2) == 0) {
       /* ignore linker flags */
@@ -12452,7 +12964,9 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (!zcc_verbose_flag) {
+  /* Stderr policy: open by default, --quiet silences.
+   * -v adds extra diagnostic output but stderr is always open unless -q. */
+  if (zcc_quiet_flag) {
 #ifdef _WIN32
     freopen("nul", "w", stderr);
 #else
@@ -12461,14 +12975,34 @@ int main(int argc, char **argv) {
   }
 
   if (!input_file) {
-    printf("Usage: zcc <input.c> [-o output]\n");
+    printf("Usage: zcc <input.{c|rs}> [-o output] [options]\n");
+    printf("Options:\n");
+    printf("  --pp-only         print preprocessed C source and exit\n");
+    printf("  --dump-rust-ast   parse Rust and print deterministic AST\n");
+    printf("  --dump-rust-ast-with-symbols   parse Rust and print AST with symbol ids\n");
+    printf("  --dump-rust-symbol-table   parse Rust and print flat resolver symbol table\n");
+    printf("  --dump-rust-ir   lower typed Rust subset to textual IR form\n");
+    printf("  --rust-backend-v1   compile Rust via minimal backend bridge (main returns i32 literal)\n");
+    printf("  --rust-strict-let-annotations   require explicit type annotations on all let bindings\n");
+    printf("  --rust-strict-function-signatures   require explicit return type annotations on all functions\n");
+    printf("  --rust-strict   enable both strict let annotations and strict function signatures\n");
+    printf("  -c                compile only (C path)\n");
+    printf("  -q, --quiet       suppress diagnostics output\n");
     return 1;
   }
 
   if (!output_file)
     output_file = "a.out";
 
+  frontend_lang = FRONTEND_LANG_C;
+  if (strlen(input_file) >= 3 && strcmp(input_file + strlen(input_file) - 3, ".rs") == 0) {
+    frontend_lang = FRONTEND_LANG_RUST;
+  }
+
   ZCC_IR_INIT();
+  if (enable_telemetry_stdout) {
+      ir_telemetry_enable_stdout();
+  }
 
   /* read source file */
   source = read_file(input_file, &source_len);
@@ -12477,27 +13011,58 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  /* PREPROCESSOR HOOK */
-  {
-    int pp_len;
-    char *pp_source = zcc_preprocess(source, source_len, input_file, include_paths, &pp_len);
-    if (!pp_source) {
-      printf("zcc: preprocessing failed\n");
+  if (frontend_lang == FRONTEND_LANG_C) {
+    /* PREPROCESSOR HOOK */
+    {
+      int pp_len;
+      char *pp_source = zcc_preprocess(source, source_len, input_file, include_paths, &pp_len);
+      if (!pp_source) {
+        fprintf(stderr, "zcc: preprocessing failed\n");
+        return 1;
+      }
+      /* We leak original `source` here because we replaced it.
+         ZCC doesn't care much about leaking in main string allocations anyway. */
+      source = pp_source;
+      source_len = pp_len;
+    }
+  } else {
+    if (pp_only) {
+      printf("zcc: --pp-only is only valid for C sources\n");
+      free(source);
       return 1;
     }
-    source = pp_source;
-    source_len = pp_len;
+    rust_dump_mode = (dump_rust_ast || dump_rust_ast_with_symbols || dump_rust_symbol_table || dump_rust_ir);
+    if (rust_dump_mode) {
+      if (rust_frontend_compile_file(input_file, source, source_len, dump_rust_ast, dump_rust_ast_with_symbols, dump_rust_symbol_table, dump_rust_ir, rust_strict_let_annotations, rust_strict_function_signatures, rust_dump_phase) != 0) {
+        free(source);
+        return 1;
+      }
+    } else if (rust_backend_v1) {
+      if (rust_backend_bridge_compile_file(input_file, source, source_len, output_file, compile_only, rust_strict_let_annotations, rust_strict_function_signatures, rust_dump_phase) != 0) {
+        free(source);
+        return 1;
+      }
+      if (!enable_telemetry_stdout) printf("[OK] Rust backend bridge compilation completed.\n");
+      free(source);
+      return 0;
+    } else if (rust_frontend_compile_file(input_file, source, source_len, 0, 0, 0, 0, rust_strict_let_annotations, rust_strict_function_signatures, rust_dump_phase) != 0) {
+      free(source);
+      return 1;
+    }
+    if (!enable_telemetry_stdout && !rust_dump_mode) printf("[OK] Rust frontend parsed successfully.\n");
+    free(source);
+    return 0;
   }
 
   if (pp_only) {
-    printf("%s", source);
+    if (!enable_telemetry_stdout) printf("%s", source);
     return 0;
   }
 
   /* heap-allocate compiler state (too large for stack) */
   cc = (Compiler *)calloc(1, sizeof(Compiler));
   if (!cc) {
-    printf("zcc: out of memory\n");
+    if (!enable_telemetry_stdout) printf("zcc: out of memory\n");
     free(source);
     return 1;
   }
@@ -12507,7 +13072,6 @@ int main(int argc, char **argv) {
   cc->filename = input_file;
 
   init_compiler(cc);
-  cc->debug_abi_classes = debug_abi_classes_flag;
 
   /* generate asm file name */
   strncpy(asm_file, output_file, 250);
@@ -12527,34 +13091,34 @@ int main(int argc, char **argv) {
   /* open output */
   cc->out = fopen(asm_file, "w");
   if (!cc->out) {
-    printf("zcc: cannot write '%s'\n", asm_file);
+    if (!enable_telemetry_stdout) printf("zcc: cannot write '%s'\n", asm_file);
     free(source);
     free(cc);
     return 1;
   }
 
   /* lex first token */
-  printf("[Phase 1] Lexical Array Bootstrap... OK\n");
+  if (!enable_telemetry_stdout) printf("[Phase 1] Lexical Array Bootstrap... OK\n");
   next_token(cc);
 
   /* parse */
-  printf("[Phase 2] AST Topological Generation... ");
+  if (!enable_telemetry_stdout) printf("[Phase 2] AST Topological Generation... ");
   prog = parse_program(cc);
 
   if (cc->errors > 0) {
-    printf("\033[0;31mFAILED\033[0m\n");
-    printf("zcc: %d error(s)\n", cc->errors);
+    if (!enable_telemetry_stdout) printf("\033[0;31mFAILED\033[0m\n");
+    if (!enable_telemetry_stdout) printf("zcc: %d error(s)\n", cc->errors);
     fclose(cc->out);
     free(source);
     free(cc);
     return 1;
   }
 
-  printf("OK\n");
+  if (!enable_telemetry_stdout) printf("OK\n");
 
   /* generate code */
-  printf("[Phase 3] Native AST Constant Folding... OK\n");
-  printf("[Phase 4] SystemV ABI X86-64 Codegen... OK\n");
+  if (!enable_telemetry_stdout) printf("[Phase 3] Native AST Constant Folding... OK\n");
+  if (!enable_telemetry_stdout) printf("[Phase 4] SystemV ABI X86-64 Codegen... OK\n");
   fprintf(cc->out, "# ZCC asm begin\n");
   codegen_program(cc, prog);
   fclose(cc->out);
@@ -12566,10 +13130,10 @@ int main(int argc, char **argv) {
     for (ir_fi = 0; ir_fi < g_ir_module->func_count; ir_fi++) {
       ir_total_nodes += g_ir_module->funcs[ir_fi]->node_count;
     }
-    printf("[Phase IR] IR Pass Manager (%d funcs, %d nodes)...\n",
+    if (!enable_telemetry_stdout) printf("[Phase IR] IR Pass Manager (%d funcs, %d nodes)...\n",
            g_ir_module->func_count, ir_total_nodes);
     ir_pm_run_default(g_ir_module, 1);
-    printf("[Phase IR] Pass Manager Complete.\n");
+    if (!enable_telemetry_stdout) printf("[Phase IR] Pass Manager Complete.\n");
   }
 
   if (!g_ir_primary) {
@@ -12579,9 +13143,24 @@ int main(int argc, char **argv) {
   /* peephole optimize the emitted assembly safely out-of-bounds */
   peephole_optimize(asm_file);
 
+  /* security pass: sign-extension overflow detection */
+  if (g_security_signext) {
+    security_signext_scan(asm_file);
+  }
+
+  /* security pass: null-deref detection */
+  if (g_security_476) {
+    security_nullderef_scan(cc, asm_file);
+  }
+
+  /* security pass: array bounds detection */
+  if (g_security_787) {
+    security_bounds_scan(cc, asm_file);
+  }
+
   /* assemble and link if not stopping at assembly */
   if (!stop_at_asm) {
-    printf("[Phase 6] GCC Assembly/Linker Binding... ");
+    if (!enable_telemetry_stdout) printf("[Phase 6] GCC Assembly/Linker Binding... ");
     if (compile_only) {
       sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -c -o %s %s 2>&1", output_file, asm_file);
     } else if (strcmp(input_file, "zcc.c") == 0 || (strlen(input_file) >= 6 && strcmp(input_file + strlen(input_file) - 6, "/zcc.c") == 0)) {
@@ -12591,16 +13170,16 @@ int main(int argc, char **argv) {
     }
     ret = system(cmd);
     if (ret != 0) {
-      printf("FAILED\n");
-      printf("zcc: assembly/linking failed\n");
+      if (!enable_telemetry_stdout) printf("FAILED\n");
+      if (!enable_telemetry_stdout) printf("zcc: assembly/linking failed\n");
       free(source);
       free(cc);
       return 1;
     }
-    printf("OK\n");
+    if (!enable_telemetry_stdout) printf("OK\n");
   }
 
-  printf("[OK] ZCC Engine Compilation Terminated Successfully.\n");
+  if (!enable_telemetry_stdout) printf("[OK] ZCC Engine Compilation Terminated Successfully.\n");
 
   free(source);
   free(cc);
@@ -12608,6 +13187,3374 @@ int main(int argc, char **argv) {
 }
 
 /* ZKAEDI FORCE RENDER CACHE INVALIDATION */
+/* ================================================================ */
+/* RUST FRONTEND (FOUNDATION)                                       */
+/* ================================================================ */
+
+#ifndef ZCC_AST_BRIDGE_H
+#include "part1.c"
+#endif
+
+enum {
+    RUST_TK_EOF = 0,
+    RUST_TK_IDENT,
+    RUST_TK_NUM,
+    RUST_TK_FN,
+    RUST_TK_LET,
+    RUST_TK_RETURN,
+    RUST_TK_IF,
+    RUST_TK_ELSE,
+    RUST_TK_WHILE,
+    RUST_TK_TRUE,
+    RUST_TK_FALSE,
+    RUST_TK_I32,
+    RUST_TK_LPAREN,
+    RUST_TK_RPAREN,
+    RUST_TK_LBRACE,
+    RUST_TK_RBRACE,
+    RUST_TK_COLON,
+    RUST_TK_SEMI,
+    RUST_TK_COMMA,
+    RUST_TK_ASSIGN,
+    RUST_TK_PLUS,
+    RUST_TK_MINUS,
+    RUST_TK_STAR,
+    RUST_TK_SLASH,
+    RUST_TK_EQ,
+    RUST_TK_NE,
+    RUST_TK_LT,
+    RUST_TK_LE,
+    RUST_TK_GT,
+    RUST_TK_GE,
+    RUST_TK_LAND,
+    RUST_TK_LOR,
+    RUST_TK_BANG,
+    RUST_TK_ARROW,
+    RUST_TK_AMP
+};
+
+enum {
+    RUST_STMT_LET = 1,
+    RUST_STMT_RETURN,
+    RUST_STMT_EXPR,
+    RUST_STMT_IF,
+    RUST_STMT_WHILE,
+    RUST_STMT_ASSIGN
+};
+
+enum {
+    RUST_EXPR_IDENT = 1,
+    RUST_EXPR_NUM,
+    RUST_EXPR_BOOL,
+    RUST_EXPR_BINARY,
+    RUST_EXPR_UNARY,
+    RUST_EXPR_CALL
+};
+
+typedef enum RustTypeKind {
+    RUST_TYPE_ERROR = 0,
+    RUST_TYPE_I32,
+    RUST_TYPE_BOOL
+} RustTypeKind;
+
+typedef enum RustFlowKind {
+    RUST_FLOW_MAY_CONTINUE = 0,
+    RUST_FLOW_ALWAYS_RETURNS = 1
+} RustFlowKind;
+
+typedef struct RustToken {
+    int kind;
+    int line;
+    int col;
+    long long num;
+    char text[128];
+} RustToken;
+
+struct RustDiag {
+    int kind; /* 0=error, 1=note */
+    char code[32];
+    int line;
+    int col;
+    char message[256];
+    char hint[256];
+};
+
+typedef struct RustExpr {
+    int kind;
+    char text[128];
+    RustSymbolId symbol_id;
+    int line;
+    int col;
+    long long num;
+    int bool_val;
+    int op;
+    struct RustExpr *lhs;
+    struct RustExpr *rhs;
+    char call_callee[128];
+    RustSymbolId call_callee_symbol_id;
+    struct RustExpr **call_args;
+    int call_arg_count;
+} RustExpr;
+
+typedef struct RustStmt {
+    int kind;
+    int line;
+    int col;
+    char name[128];
+    RustSymbolId symbol_id;
+    int name_line;
+    int name_col;
+    char type_name[64];
+    int has_type_annotation;
+    int is_mut;
+    RustExpr *expr;
+    RustExpr *cond;
+    struct RustStmt *then_head;
+    struct RustStmt *else_head;
+    struct RustStmt *body_head;
+    struct RustStmt *next;
+} RustStmt;
+
+typedef struct RustFunction {
+    char name[128];
+    RustSymbolId symbol_id;
+    int name_line;
+    int name_col;
+    char ret_type[64];
+    int has_explicit_ret_type;
+    int num_params;
+    char param_names[MAX_PARAMS][128];
+    char param_types[MAX_PARAMS][64];
+    int param_lines[MAX_PARAMS];
+    int param_cols[MAX_PARAMS];
+    RustSymbolId param_symbol_ids[MAX_PARAMS];
+    RustStmt *body_head;
+    int stmt_count;
+    struct RustFunction *next;
+} RustFunction;
+
+struct RustAst {
+    RustFunction *functions;
+    int function_count;
+};
+
+typedef struct RustParser {
+    const char *filename;
+    const char *src;
+    int len;
+    int pos;
+    int line;
+    int col;
+    RustToken tk;
+    RustDiag diags[256];
+    int num_diags;
+    RustAst ast;
+} RustParser;
+
+static void rust_add_diag(RustParser *p, const char *code, int line, int col, const char *msg, const char *hint) {
+    RustDiag *d;
+    if (p->num_diags >= 256) return;
+    d = &p->diags[p->num_diags++];
+    d->kind = 0;
+    strncpy(d->code, code, 31);
+    d->code[31] = 0;
+    d->line = line;
+    d->col = col;
+    strncpy(d->message, msg, 255);
+    d->message[255] = 0;
+    if (hint) {
+        strncpy(d->hint, hint, 255);
+        d->hint[255] = 0;
+    } else {
+        d->hint[0] = 0;
+    }
+}
+
+static int rust_peek(RustParser *p) {
+    if (p->pos >= p->len) return 0;
+    return p->src[p->pos];
+}
+
+static int rust_read(RustParser *p) {
+    int c = rust_peek(p);
+    if (!c) return 0;
+    p->pos++;
+    if (c == '\n') {
+        p->line++;
+        p->col = 1;
+    } else {
+        p->col++;
+    }
+    return c;
+}
+
+static int rust_is_space(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static int rust_is_alpha(int c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+static int rust_is_digit(int c) {
+    return c >= '0' && c <= '9';
+}
+
+static void rust_skip_ws_comments(RustParser *p) {
+    int c;
+    for (;;) {
+        c = rust_peek(p);
+        while (rust_is_space(c)) {
+            rust_read(p);
+            c = rust_peek(p);
+        }
+        if (c == '/' && p->pos + 1 < p->len && p->src[p->pos + 1] == '/') {
+            while (c && c != '\n') c = rust_read(p);
+            continue;
+        }
+        break;
+    }
+}
+
+static int rust_kw(const char *s) {
+    if (strcmp(s, "fn") == 0) return RUST_TK_FN;
+    if (strcmp(s, "let") == 0) return RUST_TK_LET;
+    if (strcmp(s, "return") == 0) return RUST_TK_RETURN;
+    if (strcmp(s, "if") == 0) return RUST_TK_IF;
+    if (strcmp(s, "else") == 0) return RUST_TK_ELSE;
+    if (strcmp(s, "while") == 0) return RUST_TK_WHILE;
+    if (strcmp(s, "true") == 0) return RUST_TK_TRUE;
+    if (strcmp(s, "false") == 0) return RUST_TK_FALSE;
+    if (strcmp(s, "i32") == 0) return RUST_TK_I32;
+    return RUST_TK_IDENT;
+}
+
+static void rust_next(RustParser *p) {
+    int c;
+    int i;
+    rust_skip_ws_comments(p);
+    p->tk.kind = RUST_TK_EOF;
+    p->tk.text[0] = 0;
+    p->tk.num = 0;
+    p->tk.line = p->line;
+    p->tk.col = p->col;
+    c = rust_peek(p);
+    if (!c) return;
+    if (rust_is_alpha(c)) {
+        i = 0;
+        while (rust_is_alpha(rust_peek(p)) || rust_is_digit(rust_peek(p))) {
+            if (i < 127) p->tk.text[i++] = (char)rust_read(p);
+            else rust_read(p);
+        }
+        p->tk.text[i] = 0;
+        p->tk.kind = rust_kw(p->tk.text);
+        return;
+    }
+    if (rust_is_digit(c)) {
+        long long v = 0;
+        while (rust_is_digit(rust_peek(p))) {
+            v = v * 10 + (rust_read(p) - '0');
+        }
+        p->tk.kind = RUST_TK_NUM;
+        p->tk.num = v;
+        return;
+    }
+    if (c == '-' && p->pos + 1 < p->len && p->src[p->pos + 1] == '>') {
+        rust_read(p); rust_read(p);
+        p->tk.kind = RUST_TK_ARROW;
+        return;
+    }
+    if (c == '=' && p->pos + 1 < p->len && p->src[p->pos + 1] == '=') {
+        rust_read(p); rust_read(p);
+        p->tk.kind = RUST_TK_EQ;
+        return;
+    }
+    if (c == '!' && p->pos + 1 < p->len && p->src[p->pos + 1] == '=') {
+        rust_read(p); rust_read(p);
+        p->tk.kind = RUST_TK_NE;
+        return;
+    }
+    if (c == '<' && p->pos + 1 < p->len && p->src[p->pos + 1] == '=') {
+        rust_read(p); rust_read(p);
+        p->tk.kind = RUST_TK_LE;
+        return;
+    }
+    if (c == '&' && p->pos + 1 < p->len && p->src[p->pos + 1] == '&') {
+        rust_read(p); rust_read(p);
+        p->tk.kind = RUST_TK_LAND;
+        return;
+    }
+    if (c == '|' && p->pos + 1 < p->len && p->src[p->pos + 1] == '|') {
+        rust_read(p); rust_read(p);
+        p->tk.kind = RUST_TK_LOR;
+        return;
+    }
+    if (c == '&') {
+        rust_read(p);
+        p->tk.kind = RUST_TK_AMP;
+        return;
+    }
+    if (c == '>' && p->pos + 1 < p->len && p->src[p->pos + 1] == '=') {
+        rust_read(p); rust_read(p);
+        p->tk.kind = RUST_TK_GE;
+        return;
+    }
+    rust_read(p);
+    if (c == '(') p->tk.kind = RUST_TK_LPAREN;
+    else if (c == ')') p->tk.kind = RUST_TK_RPAREN;
+    else if (c == '{') p->tk.kind = RUST_TK_LBRACE;
+    else if (c == '}') p->tk.kind = RUST_TK_RBRACE;
+    else if (c == ':') p->tk.kind = RUST_TK_COLON;
+    else if (c == ';') p->tk.kind = RUST_TK_SEMI;
+    else if (c == ',') p->tk.kind = RUST_TK_COMMA;
+    else if (c == '=') p->tk.kind = RUST_TK_ASSIGN;
+    else if (c == '!') p->tk.kind = RUST_TK_BANG;
+    else if (c == '<') p->tk.kind = RUST_TK_LT;
+    else if (c == '>') p->tk.kind = RUST_TK_GT;
+    else if (c == '+') p->tk.kind = RUST_TK_PLUS;
+    else if (c == '-') p->tk.kind = RUST_TK_MINUS;
+    else if (c == '*') p->tk.kind = RUST_TK_STAR;
+    else if (c == '/') p->tk.kind = RUST_TK_SLASH;
+    else {
+        rust_add_diag(p, "RUSTLEX001", p->tk.line, p->tk.col, "unsupported character in Rust source", "remove or replace unsupported syntax");
+        p->tk.kind = RUST_TK_EOF;
+    }
+}
+
+static int rust_accept(RustParser *p, int kind) {
+    if (p->tk.kind == kind) {
+        rust_next(p);
+        return 1;
+    }
+    return 0;
+}
+
+static int rust_expect(RustParser *p, int kind, const char *msg, const char *hint) {
+    if (p->tk.kind == kind) {
+        rust_next(p);
+        return 1;
+    }
+    rust_add_diag(p, "RUSTPARSE001", p->tk.line, p->tk.col, msg, hint);
+    return 0;
+}
+
+static RustExpr *rust_new_expr(int kind) {
+    RustExpr *e = (RustExpr *)calloc(1, sizeof(RustExpr));
+    if (!e) exit(1);
+    e->kind = kind;
+    e->symbol_id = RUST_SYMBOL_INVALID;
+    return e;
+}
+
+static RustStmt *rust_new_stmt(int kind, int line) {
+    RustStmt *s = (RustStmt *)calloc(1, sizeof(RustStmt));
+    if (!s) exit(1);
+    s->kind = kind;
+    s->line = line;
+    s->symbol_id = RUST_SYMBOL_INVALID;
+    return s;
+}
+
+static RustExpr *rust_parse_expr(RustParser *p);
+static RustExpr *rust_parse_call_from_ident(RustParser *p, const char *callee_name, int line, int col);
+static RustExpr *rust_parse_cmp(RustParser *p);
+static RustExpr *rust_parse_add(RustParser *p);
+static RustExpr *rust_parse_lor(RustParser *p);
+static RustExpr *rust_parse_land(RustParser *p);
+static RustExpr *rust_parse_unary(RustParser *p);
+
+static RustExpr *rust_parse_primary(RustParser *p) {
+    RustExpr *e;
+    if (p->tk.kind == RUST_TK_NUM) {
+        e = rust_new_expr(RUST_EXPR_NUM);
+        e->num = p->tk.num;
+        e->line = p->tk.line;
+        e->col = p->tk.col;
+        rust_next(p);
+        return e;
+    }
+    if (p->tk.kind == RUST_TK_TRUE || p->tk.kind == RUST_TK_FALSE) {
+        e = rust_new_expr(RUST_EXPR_BOOL);
+        e->bool_val = (p->tk.kind == RUST_TK_TRUE) ? 1 : 0;
+        e->line = p->tk.line;
+        e->col = p->tk.col;
+        rust_next(p);
+        return e;
+    }
+    if (p->tk.kind == RUST_TK_IDENT) {
+        char ident_name[128];
+        int ident_line = p->tk.line;
+        int ident_col = p->tk.col;
+        strncpy(ident_name, p->tk.text, 127);
+        ident_name[127] = 0;
+        e = rust_new_expr(RUST_EXPR_IDENT);
+        strncpy(e->text, ident_name, 127);
+        e->text[127] = 0;
+        e->line = ident_line;
+        e->col = ident_col;
+        rust_next(p);
+        if (p->tk.kind == RUST_TK_LPAREN) {
+            return rust_parse_call_from_ident(p, ident_name, ident_line, ident_col);
+        }
+        return e;
+    }
+    if (rust_accept(p, RUST_TK_LPAREN)) {
+        e = rust_parse_expr(p);
+        rust_expect(p, RUST_TK_RPAREN, "expected ')' after expression", "close parenthesized expression");
+        return e;
+    }
+    rust_add_diag(p, "RUSTPARSE002", p->tk.line, p->tk.col, "expected expression", "use identifier, integer literal, bool literal, or parenthesized expression");
+    rust_next(p);
+    return rust_new_expr(RUST_EXPR_NUM);
+}
+
+static RustExpr *rust_parse_call_from_ident(RustParser *p, const char *callee_name, int line, int col) {
+    RustExpr *call = rust_new_expr(RUST_EXPR_CALL);
+    RustExpr **args = 0;
+    int arg_cap = 0;
+    strncpy(call->call_callee, callee_name, 127);
+    call->call_callee[127] = 0;
+    call->line = line;
+    call->col = col;
+    call->call_callee_symbol_id = RUST_SYMBOL_INVALID;
+    rust_expect(p, RUST_TK_LPAREN, "expected '(' after callee name", "call syntax is callee(arg1, arg2)");
+    while (p->tk.kind != RUST_TK_RPAREN && p->tk.kind != RUST_TK_EOF) {
+        RustExpr *arg = rust_parse_expr(p);
+        if (call->call_arg_count == arg_cap) {
+            int next_cap = arg_cap ? arg_cap * 2 : 4;
+            RustExpr **new_args = (RustExpr **)realloc(args, (size_t)next_cap * sizeof(RustExpr *));
+            if (!new_args) {
+                rust_add_diag(p, "RUSTPARSE011", p->tk.line, p->tk.col, "out of memory parsing call arguments", "simplify call expression");
+                break;
+            }
+            args = new_args;
+            arg_cap = next_cap;
+        }
+        args[call->call_arg_count++] = arg;
+        if (!rust_accept(p, RUST_TK_COMMA)) break;
+    }
+    rust_expect(p, RUST_TK_RPAREN, "expected ')' after call arguments", "close call argument list");
+    call->call_args = args;
+    return call;
+}
+
+static RustExpr *rust_parse_mul(RustParser *p) {
+    RustExpr *lhs = rust_parse_unary(p);
+    while (p->tk.kind == RUST_TK_STAR || p->tk.kind == RUST_TK_SLASH) {
+        RustExpr *bin = rust_new_expr(RUST_EXPR_BINARY);
+        bin->op = p->tk.kind;
+        bin->line = p->tk.line;
+        bin->col = p->tk.col;
+        rust_next(p);
+        bin->lhs = lhs;
+        bin->rhs = rust_parse_unary(p);
+        lhs = bin;
+    }
+    return lhs;
+}
+
+static RustExpr *rust_parse_expr(RustParser *p) {
+    return rust_parse_lor(p);
+}
+
+static RustExpr *rust_parse_lor(RustParser *p) {
+    RustExpr *lhs = rust_parse_land(p);
+    while (p->tk.kind == RUST_TK_LOR) {
+        RustExpr *bin = rust_new_expr(RUST_EXPR_BINARY);
+        bin->op = p->tk.kind;
+        bin->line = p->tk.line;
+        bin->col = p->tk.col;
+        rust_next(p);
+        bin->lhs = lhs;
+        bin->rhs = rust_parse_land(p);
+        lhs = bin;
+    }
+    return lhs;
+}
+
+static RustExpr *rust_parse_land(RustParser *p) {
+    RustExpr *lhs = rust_parse_cmp(p);
+    while (p->tk.kind == RUST_TK_LAND) {
+        RustExpr *bin = rust_new_expr(RUST_EXPR_BINARY);
+        bin->op = p->tk.kind;
+        bin->line = p->tk.line;
+        bin->col = p->tk.col;
+        rust_next(p);
+        bin->lhs = lhs;
+        bin->rhs = rust_parse_cmp(p);
+        lhs = bin;
+    }
+    return lhs;
+}
+
+static RustExpr *rust_parse_add(RustParser *p) {
+    RustExpr *lhs = rust_parse_mul(p);
+    while (p->tk.kind == RUST_TK_PLUS || p->tk.kind == RUST_TK_MINUS) {
+        RustExpr *bin = rust_new_expr(RUST_EXPR_BINARY);
+        bin->op = p->tk.kind;
+        bin->line = p->tk.line;
+        bin->col = p->tk.col;
+        rust_next(p);
+        bin->lhs = lhs;
+        bin->rhs = rust_parse_mul(p);
+        lhs = bin;
+    }
+    return lhs;
+}
+
+static RustExpr *rust_parse_cmp(RustParser *p) {
+    RustExpr *lhs = rust_parse_add(p);
+    while (p->tk.kind == RUST_TK_EQ || p->tk.kind == RUST_TK_NE ||
+           p->tk.kind == RUST_TK_LT || p->tk.kind == RUST_TK_LE ||
+           p->tk.kind == RUST_TK_GT || p->tk.kind == RUST_TK_GE) {
+        RustExpr *bin = rust_new_expr(RUST_EXPR_BINARY);
+        bin->op = p->tk.kind;
+        bin->line = p->tk.line;
+        bin->col = p->tk.col;
+        rust_next(p);
+        bin->lhs = lhs;
+        bin->rhs = rust_parse_add(p);
+        lhs = bin;
+    }
+    return lhs;
+}
+
+static RustExpr *rust_parse_unary(RustParser *p) {
+    if (p->tk.kind == RUST_TK_BANG) {
+        RustExpr *u = rust_new_expr(RUST_EXPR_UNARY);
+        u->op = RUST_TK_BANG;
+        u->line = p->tk.line;
+        u->col = p->tk.col;
+        rust_next(p);
+        u->lhs = rust_parse_unary(p);
+        return u;
+    }
+    return rust_parse_primary(p);
+}
+
+static void rust_append_stmt(RustStmt **head, RustStmt *s) {
+    RustStmt *cur;
+    if (!*head) {
+        *head = s;
+        return;
+    }
+    cur = *head;
+    while (cur->next) cur = cur->next;
+    cur->next = s;
+}
+
+static RustStmt *rust_parse_stmt(RustParser *p);
+
+static int rust_next_token_kind_lookahead(const RustParser *p) {
+    RustParser probe;
+    if (!p) return RUST_TK_EOF;
+    probe = *p;
+    rust_next(&probe);
+    return probe.tk.kind;
+}
+
+static void rust_phase_line(int enabled, const char *phase) {
+    if (enabled && phase) fprintf(stderr, "rust-phase: %s\n", phase);
+}
+
+static void rust_sync_to_next_fn(RustParser *p) {
+    int depth = 0;
+    if (!p) return;
+    while (p->tk.kind != RUST_TK_EOF) {
+        if (depth == 0 && p->tk.kind == RUST_TK_FN) return;
+        if (p->tk.kind == RUST_TK_LBRACE) depth++;
+        else if (p->tk.kind == RUST_TK_RBRACE) {
+            if (depth > 0) depth--;
+        }
+        rust_next(p);
+    }
+}
+
+static void rust_sync_stmt_semi(RustParser *p) {
+    int brace = 0;
+    if (!p) return;
+    while (p->tk.kind != RUST_TK_EOF) {
+        if (brace == 0 && p->tk.kind == RUST_TK_SEMI) {
+            rust_next(p);
+            return;
+        }
+        if (p->tk.kind == RUST_TK_LBRACE) brace++;
+        else if (p->tk.kind == RUST_TK_RBRACE && brace > 0) brace--;
+        rust_next(p);
+    }
+}
+
+static int rust_try_diagnose_unsupported_top_level(RustParser *p) {
+    int line;
+    int col;
+    if (!p || p->tk.kind != RUST_TK_IDENT) return 0;
+    line = p->tk.line;
+    col = p->tk.col;
+    if (strcmp(p->tk.text, "struct") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0401", line, col, "unsupported Rust feature: struct definitions",
+                      "this frontend accepts only top-level `fn` items; see docs/rust_frontend_plan.md (P2)");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "enum") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0402", line, col, "unsupported Rust feature: enum definitions",
+                      "this frontend accepts only top-level `fn` items; enums are planned for P2/P3");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "mod") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0409", line, col, "unsupported Rust feature: modules (`mod`)",
+                      "single-file programs only; `mod` / module trees are not implemented");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "use") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0410", line, col, "unsupported Rust feature: `use` imports",
+                      "declare items in one file; import paths are not implemented");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "trait") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0407", line, col, "unsupported Rust feature: trait definitions",
+                      "traits / trait objects are not implemented in this Rust subset");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "impl") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0406", line, col, "unsupported Rust feature: `impl` blocks",
+                      "`impl` / inherent methods are not implemented; use free functions");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "async") == 0 && rust_next_token_kind_lookahead(p) == RUST_TK_FN) {
+        rust_add_diag(p, "RUST-UNS-E0405", line, col, "unsupported Rust feature: `async fn`",
+                      "async is not implemented; use synchronous `fn` only");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "unsafe") == 0 && rust_next_token_kind_lookahead(p) == RUST_TK_FN) {
+        rust_add_diag(p, "RUST-UNS-E0411", line, col, "unsupported Rust feature: `unsafe fn`",
+                      "the `unsafe` keyword is not supported; use plain `fn`");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "const") == 0 || strcmp(p->tk.text, "static") == 0 ||
+        strcmp(p->tk.text, "type") == 0 || strcmp(p->tk.text, "union") == 0 ||
+        strcmp(p->tk.text, "extern") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0413", line, col, "unsupported Rust item: const/static/type/alias/union/extern",
+                      "only function items (`fn`) are supported at the top level today");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    return 0;
+}
+
+static int rust_parse_type_name(RustParser *p, char *buf, int buf_len) {
+    if (!p || !buf || buf_len <= 0) return 0;
+    if (p->tk.kind == RUST_TK_AMP) {
+        rust_add_diag(p, "RUST-UNS-E0408", p->tk.line, p->tk.col, "unsupported Rust feature: reference types (`&T`, `&mut T`)",
+                      "only `i32` and `bool` value types are supported; references are planned for P5");
+        rust_next(p);
+        if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "mut") == 0) rust_next(p);
+        if (p->tk.kind == RUST_TK_I32) rust_next(p);
+        else if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "bool") == 0) rust_next(p);
+        return 0;
+    }
+    if (p->tk.kind == RUST_TK_I32) {
+        strncpy(buf, "i32", (size_t)buf_len - 1);
+        buf[buf_len - 1] = 0;
+        rust_next(p);
+        return 1;
+    }
+    if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "bool") == 0) {
+        strncpy(buf, "bool", (size_t)buf_len - 1);
+        buf[buf_len - 1] = 0;
+        rust_next(p);
+        return 1;
+    }
+    return 0;
+}
+
+static RustStmt *rust_parse_block(RustParser *p) {
+    RustStmt *head = 0;
+    if (!rust_expect(p, RUST_TK_LBRACE, "expected '{' to begin block", "add block braces")) return head;
+    while (p->tk.kind != RUST_TK_RBRACE && p->tk.kind != RUST_TK_EOF) {
+        RustStmt *s = rust_parse_stmt(p);
+        if (s) rust_append_stmt(&head, s);
+    }
+    rust_expect(p, RUST_TK_RBRACE, "expected '}' to end block", "close block opened with '{'");
+    return head;
+}
+
+static RustStmt *rust_parse_stmt(RustParser *p) {
+    RustStmt *s;
+    int line = p->tk.line;
+    int col = p->tk.col;
+    if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "match") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0403", line, col, "unsupported Rust feature: `match` expressions",
+                      "use `if` / `else` chains for now; `match` lowering is not implemented");
+        rust_next(p);
+        rust_sync_stmt_semi(p);
+        return 0;
+    }
+    if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "async") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0405", line, col, "unsupported Rust feature: `async` blocks",
+                      "`async` is not implemented; use synchronous code only");
+        rust_next(p);
+        rust_sync_stmt_semi(p);
+        return 0;
+    }
+    if (rust_accept(p, RUST_TK_LET)) {
+        s = rust_new_stmt(RUST_STMT_LET, line);
+        s->col = col;
+        if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "mut") == 0) {
+            s->is_mut = 1;
+            rust_next(p);
+        }
+        if (p->tk.kind == RUST_TK_IDENT) {
+            strncpy(s->name, p->tk.text, 127);
+            s->name[127] = 0;
+            s->name_line = p->tk.line;
+            s->name_col = p->tk.col;
+            rust_next(p);
+        } else {
+            rust_add_diag(p, "RUSTPARSE003", p->tk.line, p->tk.col, "expected identifier after 'let'", "declare variable name");
+        }
+        if (rust_accept(p, RUST_TK_COLON)) {
+            s->has_type_annotation = 1;
+            if (!rust_parse_type_name(p, s->type_name, 64)) {
+                if (p->tk.kind != RUST_TK_ASSIGN)
+                    rust_add_diag(p, "RUSTPARSE004", p->tk.line, p->tk.col, "expected type in let binding", "v1 supports only 'i32' and 'bool'");
+            }
+        } else {
+            s->has_type_annotation = 0;
+            strncpy(s->type_name, "i32", 63);
+        }
+        rust_expect(p, RUST_TK_ASSIGN, "expected '=' in let binding", "initialize let binding with expression");
+        s->expr = rust_parse_expr(p);
+        rust_expect(p, RUST_TK_SEMI, "expected ';' after let statement", "terminate statement with semicolon");
+        return s;
+    }
+    if (rust_accept(p, RUST_TK_RETURN)) {
+        s = rust_new_stmt(RUST_STMT_RETURN, line);
+        s->col = col;
+        s->expr = rust_parse_expr(p);
+        rust_expect(p, RUST_TK_SEMI, "expected ';' after return statement", "terminate return with semicolon");
+        return s;
+    }
+    if (rust_accept(p, RUST_TK_IF)) {
+        s = rust_new_stmt(RUST_STMT_IF, line);
+        s->col = col;
+        s->cond = rust_parse_expr(p);
+        s->then_head = rust_parse_block(p);
+        if (rust_accept(p, RUST_TK_ELSE)) {
+            s->else_head = rust_parse_block(p);
+        }
+        return s;
+    }
+    if (rust_accept(p, RUST_TK_WHILE)) {
+        s = rust_new_stmt(RUST_STMT_WHILE, line);
+        s->col = col;
+        s->cond = rust_parse_expr(p);
+        s->body_head = rust_parse_block(p);
+        return s;
+    }
+    if (p->tk.kind == RUST_TK_IDENT && rust_next_token_kind_lookahead(p) == RUST_TK_ASSIGN) {
+        s = rust_new_stmt(RUST_STMT_ASSIGN, line);
+        s->col = col;
+        strncpy(s->name, p->tk.text, 127);
+        s->name[127] = 0;
+        s->name_line = p->tk.line;
+        s->name_col = p->tk.col;
+        rust_next(p);
+        rust_expect(p, RUST_TK_ASSIGN, "expected '=' in assignment statement", "assign to existing mutable local with `name = expr;`");
+        s->expr = rust_parse_expr(p);
+        rust_expect(p, RUST_TK_SEMI, "expected ';' after assignment statement", "terminate statement with semicolon");
+        return s;
+    }
+    s = rust_new_stmt(RUST_STMT_EXPR, line);
+    s->col = col;
+    s->expr = rust_parse_expr(p);
+    rust_expect(p, RUST_TK_SEMI, "expected ';' after expression statement", "terminate statement with semicolon");
+    return s;
+}
+
+static RustFunction *rust_parse_function(RustParser *p) {
+    RustFunction *fn;
+    RustStmt *cur;
+    int param_idx;
+    if (!rust_expect(p, RUST_TK_FN, "expected 'fn' at top level", "declare functions with 'fn name() -> i32 { ... }'")) return 0;
+    fn = (RustFunction *)calloc(1, sizeof(RustFunction));
+    if (!fn) exit(1);
+    if (p->tk.kind == RUST_TK_IDENT) {
+        strncpy(fn->name, p->tk.text, 127);
+        fn->name[127] = 0;
+        fn->name_line = p->tk.line;
+        fn->name_col = p->tk.col;
+        rust_next(p);
+    } else {
+        rust_add_diag(p, "RUSTPARSE005", p->tk.line, p->tk.col, "expected function name", "provide identifier after 'fn'");
+        strncpy(fn->name, "<anon>", 127);
+    }
+    if (p->tk.kind == RUST_TK_LT) {
+        rust_add_diag(p, "RUST-UNS-E0404", p->tk.line, p->tk.col,
+                      "unsupported Rust feature: generic type parameters (`fn name<...>(...)`)",
+                      "monomorphic functions only; remove `<...>` type parameter lists");
+        rust_sync_to_next_fn(p);
+        free(fn);
+        return 0;
+    }
+    rust_expect(p, RUST_TK_LPAREN, "expected '(' after function name", "write function parameter list");
+    while (p->tk.kind != RUST_TK_RPAREN && p->tk.kind != RUST_TK_EOF) {
+        if (fn->num_params >= MAX_PARAMS) {
+            rust_add_diag(p, "RUSTPARSE008", p->tk.line, p->tk.col, "too many function parameters", "reduce parameter count");
+            break;
+        }
+        param_idx = fn->num_params;
+        if (p->tk.kind == RUST_TK_IDENT) {
+            strncpy(fn->param_names[param_idx], p->tk.text, 127);
+            fn->param_names[param_idx][127] = 0;
+            fn->param_lines[param_idx] = p->tk.line;
+            fn->param_cols[param_idx] = p->tk.col;
+            rust_next(p);
+        } else {
+            rust_add_diag(p, "RUSTPARSE009", p->tk.line, p->tk.col, "expected parameter name", "use syntax: name: i32");
+            break;
+        }
+        rust_expect(p, RUST_TK_COLON, "expected ':' in parameter", "use syntax: name: i32");
+        if (!rust_parse_type_name(p, fn->param_types[param_idx], 64)) {
+            if (p->tk.kind != RUST_TK_RPAREN && p->tk.kind != RUST_TK_COMMA)
+                rust_add_diag(p, "RUSTPARSE010", p->tk.line, p->tk.col, "expected parameter type", "v1 supports only i32 and bool parameters");
+            strncpy(fn->param_types[param_idx], "i32", 63);
+        }
+        fn->param_symbol_ids[param_idx] = RUST_SYMBOL_INVALID;
+        fn->num_params++;
+        if (!rust_accept(p, RUST_TK_COMMA)) break;
+    }
+    rust_expect(p, RUST_TK_RPAREN, "expected ')' after parameter list", "close parameter list");
+    if (rust_accept(p, RUST_TK_ARROW)) {
+        fn->has_explicit_ret_type = 1;
+        if (!rust_parse_type_name(p, fn->ret_type, 64)) {
+            rust_add_diag(p, "RUSTPARSE006", p->tk.line, p->tk.col, "expected return type after '->'", "v1 supports only i32 and bool return types");
+            strncpy(fn->ret_type, "i32", 63);
+        }
+    } else {
+        fn->has_explicit_ret_type = 0;
+        strncpy(fn->ret_type, "i32", 63);
+    }
+    fn->body_head = rust_parse_block(p);
+    cur = fn->body_head;
+    while (cur) {
+        fn->stmt_count++;
+        cur = cur->next;
+    }
+    return fn;
+}
+
+static RustAst *rust_parse_program_internal(RustParser *p) {
+    RustFunction *tail = 0;
+    rust_next(p);
+    while (p->tk.kind != RUST_TK_EOF) {
+        RustFunction *fn;
+        if (p->tk.kind != RUST_TK_FN) {
+            if (!rust_try_diagnose_unsupported_top_level(p)) {
+                rust_add_diag(p, "RUSTPARSE007", p->tk.line, p->tk.col, "expected top-level function",
+                              "v1 frontend accepts only top-level `fn` items (see unsupported-feature diagnostics for `struct`, `enum`, `mod`, ...)");
+                rust_next(p);
+            }
+            continue;
+        }
+        fn = rust_parse_function(p);
+        if (!fn) continue;
+        if (!p->ast.functions) p->ast.functions = fn;
+        else tail->next = fn;
+        tail = fn;
+        p->ast.function_count++;
+    }
+    return &p->ast;
+}
+
+static void rust_dump_expr(FILE *out, RustExpr *e, int indent) {
+    int i;
+    for (i = 0; i < indent; i++) fprintf(out, " ");
+    if (!e) {
+        fprintf(out, "Expr <null>\n");
+        return;
+    }
+    if (e->kind == RUST_EXPR_IDENT) fprintf(out, "Expr Ident %s\n", e->text);
+    else if (e->kind == RUST_EXPR_NUM) fprintf(out, "Expr Num %lld\n", e->num);
+    else if (e->kind == RUST_EXPR_BOOL) fprintf(out, "Expr Bool %s\n", e->bool_val ? "true" : "false");
+    else if (e->kind == RUST_EXPR_CALL) {
+        int ai;
+        fprintf(out, "Expr Call %s argc=%d\n", e->call_callee, e->call_arg_count);
+        for (ai = 0; ai < e->call_arg_count; ai++) {
+            rust_dump_expr(out, e->call_args[ai], indent + 2);
+        }
+    }
+    else if (e->kind == RUST_EXPR_UNARY) {
+        fprintf(out, "Expr Unary op=%d\n", e->op);
+        rust_dump_expr(out, e->lhs, indent + 2);
+    }
+    else {
+        fprintf(out, "Expr Binary op=%d\n", e->op);
+        rust_dump_expr(out, e->lhs, indent + 2);
+        rust_dump_expr(out, e->rhs, indent + 2);
+    }
+}
+
+static void rust_dump_stmt(FILE *out, RustStmt *s, int indent) {
+    int i;
+    while (s) {
+        for (i = 0; i < indent; i++) fprintf(out, " ");
+        if (s->kind == RUST_STMT_LET) {
+            fprintf(out, "Stmt Let%s %s : %s\n", s->is_mut ? " mut" : "", s->name, s->type_name);
+            rust_dump_expr(out, s->expr, indent + 2);
+        } else if (s->kind == RUST_STMT_ASSIGN) {
+            fprintf(out, "Stmt Assign %s\n", s->name);
+            rust_dump_expr(out, s->expr, indent + 2);
+        } else if (s->kind == RUST_STMT_RETURN) {
+            fprintf(out, "Stmt Return\n");
+            rust_dump_expr(out, s->expr, indent + 2);
+        } else if (s->kind == RUST_STMT_IF) {
+            fprintf(out, "Stmt If\n");
+            for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+            fprintf(out, "Cond\n");
+            rust_dump_expr(out, s->cond, indent + 4);
+            for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+            fprintf(out, "Then\n");
+            rust_dump_stmt(out, s->then_head, indent + 4);
+            if (s->else_head) {
+                for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+                fprintf(out, "Else\n");
+                rust_dump_stmt(out, s->else_head, indent + 4);
+            }
+        } else if (s->kind == RUST_STMT_WHILE) {
+            fprintf(out, "Stmt While\n");
+            for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+            fprintf(out, "Cond\n");
+            rust_dump_expr(out, s->cond, indent + 4);
+            for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+            fprintf(out, "Body\n");
+            rust_dump_stmt(out, s->body_head, indent + 4);
+        } else {
+            fprintf(out, "Stmt Expr\n");
+            rust_dump_expr(out, s->expr, indent + 2);
+        }
+        s = s->next;
+    }
+}
+
+static void rust_dump_ast(FILE *out, RustAst *ast) {
+    RustFunction *fn = ast->functions;
+    int pi;
+    fprintf(out, "RustAst v1\n");
+    fprintf(out, "Functions %d\n", ast->function_count);
+    while (fn) {
+        fprintf(out, "Function %s -> %s\n", fn->name, fn->ret_type[0] ? fn->ret_type : "i32");
+        for (pi = 0; pi < fn->num_params; pi++) {
+            fprintf(out, "  Param %s : %s\n", fn->param_names[pi], fn->param_types[pi][0] ? fn->param_types[pi] : "i32");
+        }
+        rust_dump_stmt(out, fn->body_head, 2);
+        fn = fn->next;
+    }
+}
+
+static void rust_dump_symbol_id(FILE *out, RustSymbolId id) {
+    if (id == RUST_SYMBOL_INVALID) fprintf(out, "invalid");
+    else fprintf(out, "%u", id);
+}
+
+typedef enum RustDumpNameMode {
+    RUST_DUMP_NAME_UNQUOTED = 0,
+    RUST_DUMP_NAME_QUOTED = 1
+} RustDumpNameMode;
+
+#define RUST_DUMP_NAME_MAX_BYTES 80
+
+static void rust_append_text(char *buf, int cap, int *len, const char *text) {
+    int i = 0;
+    if (!buf || cap <= 0 || !len || !text) return;
+    while (text[i] != '\0' && *len < cap - 1) {
+        buf[*len] = text[i];
+        (*len)++;
+        i++;
+    }
+    buf[*len] = '\0';
+}
+
+static void rust_append_char(char *buf, int cap, int *len, char ch) {
+    if (!buf || cap <= 0 || !len) return;
+    if (*len >= cap - 1) return;
+    buf[*len] = ch;
+    (*len)++;
+    buf[*len] = '\0';
+}
+
+static void rust_append_escaped_name(char *buf, int cap, int *len, const char *name, RustDumpNameMode mode) {
+    int i;
+    int emitted = 0;
+    int raw_len;
+    char tmp[32];
+    (void)mode;
+    if (!name) {
+        rust_append_text(buf, cap, len, "<missing>");
+        return;
+    }
+    raw_len = (int)strlen(name);
+    for (i = 0; name[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (emitted >= RUST_DUMP_NAME_MAX_BYTES) {
+            sprintf(tmp, "...(len=%d)", raw_len);
+            rust_append_text(buf, cap, len, tmp);
+            return;
+        }
+        if (c == '\n') {
+            rust_append_text(buf, cap, len, "\\n"); emitted += 2;
+        } else if (c == '\r') {
+            rust_append_text(buf, cap, len, "\\r"); emitted += 2;
+        } else if (c == '\t') {
+            rust_append_text(buf, cap, len, "\\t"); emitted += 2;
+        } else if (c == '\\') {
+            rust_append_text(buf, cap, len, "\\\\"); emitted += 2;
+        } else if (c == '"') {
+            rust_append_text(buf, cap, len, "\\\""); emitted += 2;
+        } else if (c < 0x20 || c == 0x7f) {
+            sprintf(tmp, "\\x%02X", c);
+            rust_append_text(buf, cap, len, tmp); emitted += 4;
+        } else {
+            rust_append_char(buf, cap, len, (char)c); emitted++;
+        }
+    }
+}
+
+static void rust_format_ident_message(char *buf, int cap, const char *prefix, const char *name, const char *suffix) {
+    int len = 0;
+    if (!buf || cap <= 0) return;
+    buf[0] = '\0';
+    rust_append_text(buf, cap, &len, prefix);
+    rust_append_char(buf, cap, &len, '`');
+    rust_append_escaped_name(buf, cap, &len, name, RUST_DUMP_NAME_UNQUOTED);
+    rust_append_char(buf, cap, &len, '`');
+    rust_append_text(buf, cap, &len, suffix);
+}
+
+static void rust_dump_name(FILE *out, const char *name, RustDumpNameMode mode) {
+    size_t raw_len;
+    size_t emitted;
+    size_t i;
+    (void)mode;
+    if (!out) return;
+    if (!name) {
+        fputs("<missing>", out);
+        return;
+    }
+    raw_len = strlen(name);
+    emitted = 0;
+    for (i = 0; name[i] != '\0'; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (emitted >= RUST_DUMP_NAME_MAX_BYTES) {
+            fprintf(out, "...(len=%zu)", raw_len);
+            return;
+        }
+        if (c == '\n') {
+            fputs("\\n", out); emitted += 2;
+        } else if (c == '\r') {
+            fputs("\\r", out); emitted += 2;
+        } else if (c == '\t') {
+            fputs("\\t", out); emitted += 2;
+        } else if (c == '\\') {
+            fputs("\\\\", out); emitted += 2;
+        } else if (c == '"') {
+            fputs("\\\"", out); emitted += 2;
+        } else if (c < 0x20 || c == 0x7f) {
+            fprintf(out, "\\x%02X", c); emitted += 4;
+        } else {
+            fputc((int)c, out); emitted++;
+        }
+    }
+}
+
+static void rust_dump_expr_with_symbols(FILE *out, RustExpr *e, int indent) {
+    int i;
+    for (i = 0; i < indent; i++) fprintf(out, " ");
+    if (!e) {
+        fprintf(out, "Expr <null>\n");
+        return;
+    }
+    if (e->kind == RUST_EXPR_IDENT) {
+        fputs("Ident name=\"", out);
+        rust_dump_name(out, e->text, RUST_DUMP_NAME_QUOTED);
+        fputs("\" symbol=", out);
+        rust_dump_symbol_id(out, e->symbol_id);
+        fprintf(out, "\n");
+    } else if (e->kind == RUST_EXPR_CALL) {
+        int ai;
+        fputs("Call callee=\"", out);
+        rust_dump_name(out, e->call_callee, RUST_DUMP_NAME_QUOTED);
+        fputs("\" symbol=", out);
+        rust_dump_symbol_id(out, e->call_callee_symbol_id);
+        fprintf(out, " argc=%d\n", e->call_arg_count);
+        for (ai = 0; ai < e->call_arg_count; ai++) {
+            rust_dump_expr_with_symbols(out, e->call_args[ai], indent + 2);
+        }
+    } else if (e->kind == RUST_EXPR_UNARY) {
+        fprintf(out, "Unary op=%d\n", e->op);
+        rust_dump_expr_with_symbols(out, e->lhs, indent + 2);
+    } else if (e->kind == RUST_EXPR_NUM) {
+        fprintf(out, "Int %lld\n", e->num);
+    } else if (e->kind == RUST_EXPR_BOOL) {
+        fprintf(out, "Bool %s\n", e->bool_val ? "true" : "false");
+    } else {
+        fprintf(out, "Binary op=%d\n", e->op);
+        rust_dump_expr_with_symbols(out, e->lhs, indent + 2);
+        rust_dump_expr_with_symbols(out, e->rhs, indent + 2);
+    }
+}
+
+static void rust_dump_stmt_with_symbols(FILE *out, RustStmt *s, int indent) {
+    int i;
+    while (s) {
+        for (i = 0; i < indent; i++) fprintf(out, " ");
+        if (s->kind == RUST_STMT_LET) {
+            fputs(s->is_mut ? "LetMut name=\"" : "Let name=\"", out);
+            rust_dump_name(out, s->name, RUST_DUMP_NAME_QUOTED);
+            fputs("\" symbol=", out);
+            rust_dump_symbol_id(out, s->symbol_id);
+            fprintf(out, "\n");
+            rust_dump_expr_with_symbols(out, s->expr, indent + 2);
+        } else if (s->kind == RUST_STMT_ASSIGN) {
+            fputs("Assign name=\"", out);
+            rust_dump_name(out, s->name, RUST_DUMP_NAME_QUOTED);
+            fputs("\" symbol=", out);
+            rust_dump_symbol_id(out, s->symbol_id);
+            fprintf(out, "\n");
+            rust_dump_expr_with_symbols(out, s->expr, indent + 2);
+        } else if (s->kind == RUST_STMT_RETURN) {
+            fprintf(out, "Return\n");
+            rust_dump_expr_with_symbols(out, s->expr, indent + 2);
+        } else if (s->kind == RUST_STMT_IF) {
+            fprintf(out, "If\n");
+            for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+            fprintf(out, "Cond\n");
+            rust_dump_expr_with_symbols(out, s->cond, indent + 4);
+            for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+            fprintf(out, "Then\n");
+            rust_dump_stmt_with_symbols(out, s->then_head, indent + 4);
+            if (s->else_head) {
+                for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+                fprintf(out, "Else\n");
+                rust_dump_stmt_with_symbols(out, s->else_head, indent + 4);
+            }
+        } else if (s->kind == RUST_STMT_WHILE) {
+            fprintf(out, "While\n");
+            for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+            fprintf(out, "Cond\n");
+            rust_dump_expr_with_symbols(out, s->cond, indent + 4);
+            for (i = 0; i < indent + 2; i++) fprintf(out, " ");
+            fprintf(out, "Body\n");
+            rust_dump_stmt_with_symbols(out, s->body_head, indent + 4);
+        } else {
+            fprintf(out, "ExprStmt\n");
+            rust_dump_expr_with_symbols(out, s->expr, indent + 2);
+        }
+        s = s->next;
+    }
+}
+
+static void rust_dump_ast_with_symbols(FILE *out, RustAst *ast) {
+    RustFunction *fn = ast->functions;
+    int pi;
+    fprintf(out, "RustAstSymbols v1\n");
+    while (fn) {
+        fputs("Function name=\"", out);
+        rust_dump_name(out, fn->name, RUST_DUMP_NAME_QUOTED);
+        fputs("\" symbol=", out);
+        rust_dump_symbol_id(out, fn->symbol_id);
+        fprintf(out, " return=%s\n", fn->ret_type[0] ? fn->ret_type : "i32");
+        for (pi = 0; pi < fn->num_params; pi++) {
+            fputs("  Param name=\"", out);
+            rust_dump_name(out, fn->param_names[pi], RUST_DUMP_NAME_QUOTED);
+            fputs("\" symbol=", out);
+            rust_dump_symbol_id(out, fn->param_symbol_ids[pi]);
+            fprintf(out, "\n");
+        }
+        fprintf(out, "  Block\n");
+        rust_dump_stmt_with_symbols(out, fn->body_head, 4);
+        fn = fn->next;
+    }
+}
+
+static const char *rust_symbol_kind_name(RustSymbolKind kind) {
+    if (kind == RUST_SYMBOL_FUNCTION) return "function";
+    if (kind == RUST_SYMBOL_PARAM) return "param";
+    if (kind == RUST_SYMBOL_LOCAL) return "local";
+    return "unknown";
+}
+
+static void rust_dump_symbol_table(const RustResolveContext *ctx) {
+    int i;
+    if (!ctx || !ctx->symbols) return;
+    for (i = 0; i < ctx->symbol_count; i++) {
+        const RustSymbol *sym = &ctx->symbols[i];
+        const char *fname = ctx->filename ? ctx->filename : "<unknown>";
+        printf("symbol %u %s ", sym->id, rust_symbol_kind_name(sym->kind));
+        rust_dump_name(stdout, sym->name ? sym->name : "<anon>", RUST_DUMP_NAME_UNQUOTED);
+        printf(" %s:%d:%d scope=%u\n", fname, sym->line, sym->col, sym->scope_depth);
+    }
+}
+
+static void rust_print_diag(const char *filename, RustDiag *d) {
+    FILE *out = stderr;
+    if (!d) return;
+    if (d->kind == 1) {
+        fprintf(out, "note: %s\n", d->message);
+        fprintf(out, "  --> %s:%d:%d\n", filename, d->line, d->col);
+        return;
+    }
+    fprintf(out, "error[%s]: %s\n", d->code, d->message);
+    fprintf(out, "  --> %s:%d:%d\n", filename, d->line, d->col);
+}
+
+static void rust_print_diags(const char *filename, RustDiag *diags, int count) {
+    int i = 0;
+    while (i < count) {
+        RustDiag *d = &diags[i];
+        if (d->kind == 1) {
+            rust_print_diag(filename, d);
+            i++;
+            continue;
+        }
+        rust_print_diag(filename, d);
+        i++;
+        while (i < count && diags[i].kind == 1) {
+            rust_print_diag(filename, &diags[i]);
+            i++;
+        }
+        if (d->hint[0]) {
+            fprintf(stderr, "  hint: %s\n", d->hint);
+        }
+    }
+}
+
+typedef struct RustBinding {
+    const char *name;
+    RustSymbolId symbol_id;
+    int line;
+    int col;
+} RustBinding;
+
+typedef struct RustScope {
+    RustBinding *bindings;
+    int binding_count;
+    int binding_capacity;
+} RustScope;
+
+typedef struct RustResolver {
+    RustResolveContext *ctx;
+    RustScope *scopes;
+    int scope_count;
+    int scope_capacity;
+    RustSymbolId next_symbol_id;
+} RustResolver;
+
+static int rust_resolver_add_diag(RustResolveContext *ctx, const char *code, int line, int col, const char *msg, const char *hint) {
+    RustDiag *d;
+    if (!ctx || !ctx->diags || !ctx->num_diags) return 0;
+    if (*(ctx->num_diags) >= ctx->max_diags) return 0;
+    d = &ctx->diags[*(ctx->num_diags)];
+    d->kind = 0;
+    strncpy(d->code, code, 31); d->code[31] = 0;
+    d->line = line;
+    d->col = col;
+    strncpy(d->message, msg, 255); d->message[255] = 0;
+    if (hint) {
+        strncpy(d->hint, hint, 255); d->hint[255] = 0;
+    } else {
+        d->hint[0] = 0;
+    }
+    (*(ctx->num_diags))++;
+    ctx->had_error = 1;
+    return 1;
+}
+
+static int rust_resolver_add_note(RustResolveContext *ctx, int line, int col, const char *msg) {
+    RustDiag *d;
+    if (!ctx || !ctx->diags || !ctx->num_diags) return 0;
+    if (*(ctx->num_diags) >= ctx->max_diags) return 0;
+    d = &ctx->diags[*(ctx->num_diags)];
+    d->kind = 1;
+    d->code[0] = 0;
+    d->line = line;
+    d->col = col;
+    strncpy(d->message, msg, 255); d->message[255] = 0;
+    d->hint[0] = 0;
+    (*(ctx->num_diags))++;
+    return 1;
+}
+
+static int rust_typecheck_add_diag(RustTypecheckContext *ctx, const char *code, int line, int col, const char *msg, const char *hint) {
+    RustDiag *d;
+    if (!ctx || !ctx->diags || !ctx->num_diags) return 0;
+    if (*(ctx->num_diags) >= ctx->max_diags) return 0;
+    d = &ctx->diags[*(ctx->num_diags)];
+    d->kind = 0;
+    strncpy(d->code, code, 31); d->code[31] = 0;
+    d->line = line;
+    d->col = col;
+    strncpy(d->message, msg, 255); d->message[255] = 0;
+    if (hint) {
+        strncpy(d->hint, hint, 255); d->hint[255] = 0;
+    } else {
+        d->hint[0] = 0;
+    }
+    (*(ctx->num_diags))++;
+    ctx->had_error = 1;
+    return 1;
+}
+
+static int rust_lower_add_diag(RustLowerContext *ctx, int line, int col, const char *msg, const char *hint) {
+    RustDiag *d;
+    if (!ctx || !ctx->diags || !ctx->num_diags) return 0;
+    if (*(ctx->num_diags) >= ctx->max_diags) return 0;
+    d = &ctx->diags[*(ctx->num_diags)];
+    d->kind = 0;
+    strncpy(d->code, "RUST-LOWER-E9999", 31); d->code[31] = 0;
+    d->line = line;
+    d->col = col;
+    strncpy(d->message, msg, 255); d->message[255] = 0;
+    if (hint) {
+        strncpy(d->hint, hint, 255); d->hint[255] = 0;
+    } else {
+        d->hint[0] = 0;
+    }
+    (*(ctx->num_diags))++;
+    ctx->had_error = 1;
+    return 1;
+}
+
+static const char *rust_type_name(RustTypeKind ty);
+
+static RustTypeKind rust_type_from_symbol(RustTypecheckContext *ctx, RustSymbolId id, int line, int col) {
+    if (id == RUST_SYMBOL_INVALID) {
+        rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", line, col, "unresolved symbol reached typechecker", "resolver must succeed before typecheck");
+        return RUST_TYPE_ERROR;
+    }
+    if (!ctx->symbol_types || id >= (RustSymbolId)ctx->symbol_types_len) {
+        rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", line, col, "missing symbol type information in typechecker", "resolver/typecheck contract broken");
+        return RUST_TYPE_ERROR;
+    }
+    return (RustTypeKind)ctx->symbol_types[id];
+}
+
+static const RustSymbol *rust_type_find_symbol(RustTypecheckContext *ctx, RustSymbolId id) {
+    int i;
+    if (!ctx || !ctx->symbols || id == RUST_SYMBOL_INVALID) return 0;
+    for (i = 0; i < ctx->symbol_count; i++) {
+        if (ctx->symbols[i].id == id) return &ctx->symbols[i];
+    }
+    return 0;
+}
+
+static RustFunction *rust_find_function_by_symbol_id(RustAst *ast, RustSymbolId id) {
+    RustFunction *fn;
+    if (!ast || id == RUST_SYMBOL_INVALID) return 0;
+    fn = ast->functions;
+    while (fn) {
+        if (fn->symbol_id == id) return fn;
+        fn = fn->next;
+    }
+    return 0;
+}
+
+static void rust_type_assign_symbol(RustTypecheckContext *ctx, RustSymbolId id, RustTypeKind ty, int line, int col) {
+    if (id == RUST_SYMBOL_INVALID) {
+        rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", line, col, "unresolved symbol reached typechecker", "resolver must succeed before typecheck");
+        return;
+    }
+    if (!ctx->symbol_types || id >= (RustSymbolId)ctx->symbol_types_len) {
+        rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", line, col, "missing symbol type information in typechecker", "resolver/typecheck contract broken");
+        return;
+    }
+    ctx->symbol_types[id] = (int)ty;
+}
+
+static void rust_type_report_expected(RustTypecheckContext *ctx, const char *code, int line, int col, RustTypeKind expected, RustTypeKind got, const char *hint_prefix) {
+    char msg[256];
+    int n = 0;
+    msg[0] = '\0';
+    n += snprintf(msg + n, sizeof(msg) - (size_t)n, "expected `%s`, found `%s`", rust_type_name(expected), rust_type_name(got));
+    if (hint_prefix && hint_prefix[0]) {
+        rust_typecheck_add_diag(ctx, code, line, col, msg, hint_prefix);
+    } else {
+        rust_typecheck_add_diag(ctx, code, line, col, msg, 0);
+    }
+}
+
+static void rust_type_report_missing_return(RustTypecheckContext *ctx, const char *fn_name, int line, int col) {
+    char msg[256];
+    rust_format_ident_message(msg, 256, "missing return from function ", fn_name, "");
+    rust_typecheck_add_diag(ctx, "RUST-TYPE-E0004", line, col, msg, "add a return expression on all control-flow paths");
+}
+
+static int rust_resolver_grow(void **items, int *cap, int elem_size) {
+    int old = *cap;
+    int next = old ? old * 2 : 8;
+    void *mem;
+    if (next < old) return 0;
+    mem = realloc(*items, (size_t)next * (size_t)elem_size);
+    if (!mem) return 0;
+    *items = mem;
+    *cap = next;
+    return 1;
+}
+
+static int rust_resolver_push_scope(RustResolver *r) {
+    RustScope *s;
+    if (r->scope_count == r->scope_capacity) {
+        if (!rust_resolver_grow((void **)&r->scopes, &r->scope_capacity, (int)sizeof(RustScope))) return 0;
+    }
+    s = &r->scopes[r->scope_count++];
+    s->bindings = 0;
+    s->binding_count = 0;
+    s->binding_capacity = 0;
+    return 1;
+}
+
+static void rust_resolver_pop_scope(RustResolver *r) {
+    RustScope *s;
+    if (!r || r->scope_count <= 0) return;
+    s = &r->scopes[r->scope_count - 1];
+    free(s->bindings);
+    r->scope_count--;
+}
+
+static RustBinding *rust_find_current_scope(RustResolver *r, const char *name) {
+    RustScope *s;
+    int i;
+    if (!r || r->scope_count <= 0 || !name) return 0;
+    s = &r->scopes[r->scope_count - 1];
+    for (i = 0; i < s->binding_count; i++) {
+        if (strcmp(s->bindings[i].name, name) == 0) return &s->bindings[i];
+    }
+    return 0;
+}
+
+static RustBinding *rust_find_visible(RustResolver *r, const char *name) {
+    int si;
+    if (!r || !name) return 0;
+    for (si = r->scope_count - 1; si >= 0; si--) {
+        RustScope *s = &r->scopes[si];
+        int i;
+        for (i = 0; i < s->binding_count; i++) {
+            if (strcmp(s->bindings[i].name, name) == 0) return &s->bindings[i];
+        }
+    }
+    return 0;
+}
+
+static RustSymbolId rust_add_symbol(RustResolver *r, RustSymbolKind kind, const char *name, int line, int col) {
+    RustResolveContext *ctx = r->ctx;
+    RustSymbol *sym;
+    RustSymbolId id;
+    if (ctx->symbol_count == ctx->symbol_capacity) {
+        if (!rust_resolver_grow((void **)&ctx->symbols, &ctx->symbol_capacity, (int)sizeof(RustSymbol))) {
+            rust_resolver_add_diag(ctx, "RUST-E9999", line, col, "out of memory while creating symbol", "try simplifying the source file");
+            return RUST_SYMBOL_INVALID;
+        }
+    }
+    id = r->next_symbol_id++;
+    sym = &ctx->symbols[ctx->symbol_count++];
+    sym->id = id;
+    sym->kind = kind;
+    sym->name = name;
+    sym->line = line;
+    sym->col = col;
+    sym->scope_depth = (unsigned)((r->scope_count > 0) ? (r->scope_count - 1) : 0);
+    return id;
+}
+
+static RustSymbolId rust_declare(RustResolver *r, RustSymbolKind kind, const char *name, int line, int col) {
+    RustScope *scope;
+    RustBinding *b;
+    RustBinding *exists;
+    RustSymbolId id;
+    char msg[256];
+    if (!r || !name || !name[0]) return RUST_SYMBOL_INVALID;
+    if (r->scope_count == 0) {
+        if (!rust_resolver_push_scope(r)) {
+            rust_resolver_add_diag(r->ctx, "RUST-E9999", line, col, "out of memory while creating scope", "try simplifying the source file");
+            return RUST_SYMBOL_INVALID;
+        }
+    }
+    exists = rust_find_current_scope(r, name);
+    if (exists) {
+        rust_format_ident_message(msg, 256, "duplicate binding ", name, " in the same scope");
+        rust_resolver_add_diag(r->ctx, "RUST-E0001", line, col, msg, "rename this binding or remove the previous declaration");
+        if (exists->line > 0 && exists->col > 0) {
+            rust_resolver_add_note(r->ctx, exists->line, exists->col, "previous binding declared here");
+        }
+        return RUST_SYMBOL_INVALID;
+    }
+    scope = &r->scopes[r->scope_count - 1];
+    if (scope->binding_count == scope->binding_capacity) {
+        if (!rust_resolver_grow((void **)&scope->bindings, &scope->binding_capacity, (int)sizeof(RustBinding))) {
+            rust_resolver_add_diag(r->ctx, "RUST-E9999", line, col, "out of memory while declaring binding", "try simplifying this scope");
+            return RUST_SYMBOL_INVALID;
+        }
+    }
+    id = rust_add_symbol(r, kind, name, line, col);
+    if (id == RUST_SYMBOL_INVALID) return id;
+    b = &scope->bindings[scope->binding_count++];
+    b->name = name;
+    b->symbol_id = id;
+    b->line = line;
+    b->col = col;
+    return id;
+}
+
+static RustSymbolId rust_use_name(RustResolver *r, const char *name, int line, int col) {
+    RustBinding *b = rust_find_visible(r, name);
+    char msg[256];
+    if (!b) {
+        rust_format_ident_message(msg, 256, "cannot find name ", name, " in this scope");
+        rust_resolver_add_diag(r->ctx, "RUST-E0002", line, col, msg, "declare the binding before using it");
+        return RUST_SYMBOL_INVALID;
+    }
+    return b->symbol_id;
+}
+
+static void rust_resolve_expr(RustResolver *r, RustExpr *e) {
+    if (!e) return;
+    if (e->kind == RUST_EXPR_IDENT) {
+        e->symbol_id = rust_use_name(r, e->text, e->line, e->col);
+        return;
+    }
+    if (e->kind == RUST_EXPR_CALL) {
+        int ai;
+        e->call_callee_symbol_id = rust_use_name(r, e->call_callee, e->line, e->col);
+        for (ai = 0; ai < e->call_arg_count; ai++) {
+            rust_resolve_expr(r, e->call_args[ai]);
+        }
+        return;
+    }
+    if (e->kind == RUST_EXPR_UNARY) {
+        rust_resolve_expr(r, e->lhs);
+        return;
+    }
+    if (e->kind == RUST_EXPR_BINARY) {
+        rust_resolve_expr(r, e->lhs);
+        rust_resolve_expr(r, e->rhs);
+        return;
+    }
+}
+
+static void rust_resolve_stmt_list_in_new_scope(RustResolver *r, RustStmt *s);
+static void rust_typecheck_stmt_list(RustTypecheckContext *ctx, RustStmt *s, RustTypeKind fn_ret);
+static RustTypeKind rust_typecheck_expr(RustTypecheckContext *ctx, RustExpr *e);
+static RustFlowKind rust_typecheck_stmt_list_flow(RustTypecheckContext *ctx, RustStmt *s);
+static RustFlowKind rust_typecheck_stmt_flow(RustTypecheckContext *ctx, RustStmt *s);
+
+static int rust_stmt_list_symbol_is_mut_local(const RustStmt *s, RustSymbolId symbol_id) {
+    while (s) {
+        if (s->kind == RUST_STMT_LET && s->symbol_id == symbol_id) return s->is_mut ? 1 : 0;
+        if (s->kind == RUST_STMT_IF) {
+            if (rust_stmt_list_symbol_is_mut_local(s->then_head, symbol_id)) return 1;
+            if (rust_stmt_list_symbol_is_mut_local(s->else_head, symbol_id)) return 1;
+        } else if (s->kind == RUST_STMT_WHILE) {
+            if (rust_stmt_list_symbol_is_mut_local(s->body_head, symbol_id)) return 1;
+        }
+        s = s->next;
+    }
+    return 0;
+}
+
+static int rust_ast_symbol_is_mut_local(const RustAst *ast, RustSymbolId symbol_id) {
+    const RustFunction *fn;
+    if (!ast || symbol_id == RUST_SYMBOL_INVALID) return 0;
+    fn = ast->functions;
+    while (fn) {
+        if (rust_stmt_list_symbol_is_mut_local(fn->body_head, symbol_id)) return 1;
+        fn = fn->next;
+    }
+    return 0;
+}
+
+static const char *rust_type_name(RustTypeKind ty) {
+    if (ty == RUST_TYPE_I32) return "i32";
+    if (ty == RUST_TYPE_BOOL) return "bool";
+    return "<error>";
+}
+
+static RustTypeKind rust_parse_type_kind_name(const char *name) {
+    if (!name || !name[0] || strcmp(name, "i32") == 0) return RUST_TYPE_I32;
+    if (strcmp(name, "bool") == 0) return RUST_TYPE_BOOL;
+    return RUST_TYPE_ERROR;
+}
+
+static int rust_is_cmp_op(int op) {
+    return op == RUST_TK_EQ || op == RUST_TK_NE ||
+           op == RUST_TK_LT || op == RUST_TK_LE ||
+           op == RUST_TK_GT || op == RUST_TK_GE;
+}
+
+static int rust_is_logic_op(int op) {
+    return op == RUST_TK_LAND || op == RUST_TK_LOR;
+}
+
+static void rust_resolve_stmt(RustResolver *r, RustStmt *s) {
+    if (!s) return;
+    if (s->kind == RUST_STMT_LET) {
+        /* Resolve initializer first so let x = x + 1 binds outer x. */
+        rust_resolve_expr(r, s->expr);
+        s->symbol_id = rust_declare(r, RUST_SYMBOL_LOCAL, s->name, s->name_line, s->name_col);
+        return;
+    }
+    if (s->kind == RUST_STMT_RETURN || s->kind == RUST_STMT_EXPR) {
+        rust_resolve_expr(r, s->expr);
+        return;
+    }
+    if (s->kind == RUST_STMT_ASSIGN) {
+        RustSymbolId target = rust_use_name(r, s->name, s->name_line, s->name_col);
+        s->symbol_id = target;
+        rust_resolve_expr(r, s->expr);
+        if (target != RUST_SYMBOL_INVALID && !rust_ast_symbol_is_mut_local(r->ctx->ast, target)) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "cannot assign to immutable binding `%s`", s->name[0] ? s->name : "<unknown>");
+            rust_resolver_add_diag(r->ctx, "RUST-E0003", s->name_line, s->name_col, msg, "declare with `let mut`, for example: `let mut x: i32 = 0;`");
+        }
+        return;
+    }
+    if (s->kind == RUST_STMT_IF) {
+        rust_resolve_expr(r, s->cond);
+        rust_resolve_stmt_list_in_new_scope(r, s->then_head);
+        if (s->else_head) rust_resolve_stmt_list_in_new_scope(r, s->else_head);
+        return;
+    }
+    if (s->kind == RUST_STMT_WHILE) {
+        rust_resolve_expr(r, s->cond);
+        rust_resolve_stmt_list_in_new_scope(r, s->body_head);
+        return;
+    }
+}
+
+static void rust_resolve_stmt_list_no_new_scope(RustResolver *r, RustStmt *s) {
+    while (s) {
+        rust_resolve_stmt(r, s);
+        s = s->next;
+    }
+}
+
+static void rust_resolve_stmt_list_in_new_scope(RustResolver *r, RustStmt *s) {
+    if (!rust_resolver_push_scope(r)) {
+        rust_resolver_add_diag(r->ctx, "RUST-E9999", 0, 0, "out of memory while entering block scope", "try simplifying nested blocks");
+        rust_resolve_stmt_list_no_new_scope(r, s);
+        return;
+    }
+    rust_resolve_stmt_list_no_new_scope(r, s);
+    rust_resolver_pop_scope(r);
+}
+
+int rust_resolve_names(RustResolveContext *ctx) {
+    RustResolver r;
+    RustFunction *fn;
+    if (!ctx || !ctx->ast) return 1;
+    ctx->had_error = 0;
+    memset(&r, 0, sizeof(r));
+    r.ctx = ctx;
+    r.next_symbol_id = 1;
+    if (!rust_resolver_push_scope(&r)) return 1;
+
+    /* Pass 1: declare top-level function names. */
+    fn = ctx->ast->functions;
+    while (fn) {
+        fn->symbol_id = rust_declare(&r, RUST_SYMBOL_FUNCTION, fn->name, fn->name_line, fn->name_col);
+        fn = fn->next;
+    }
+
+    /* Pass 2: resolve function bodies with function-local scope. */
+    fn = ctx->ast->functions;
+    while (fn) {
+        int pi;
+        if (!rust_resolver_push_scope(&r)) {
+            rust_resolver_add_diag(ctx, "RUST-E9999", fn->name_line, fn->name_col, "out of memory while entering function scope", "try simplifying function body");
+            rust_resolve_stmt_list_no_new_scope(&r, fn->body_head);
+        } else {
+            for (pi = 0; pi < fn->num_params; pi++) {
+                fn->param_symbol_ids[pi] = rust_declare(&r, RUST_SYMBOL_PARAM, fn->param_names[pi], fn->param_lines[pi], fn->param_cols[pi]);
+            }
+            rust_resolve_stmt_list_no_new_scope(&r, fn->body_head);
+            rust_resolver_pop_scope(&r);
+        }
+        fn = fn->next;
+    }
+
+    while (r.scope_count > 0) rust_resolver_pop_scope(&r);
+    free(r.scopes);
+    return ctx->had_error ? 1 : 0;
+}
+
+int rust_typecheck(RustTypecheckContext *ctx) {
+    RustFunction *fn;
+    if (!ctx || !ctx->ast) return 1;
+    ctx->had_error = 0;
+    if (!ctx->symbol_types || ctx->symbol_types_len <= 0) {
+        rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", 0, 0, "typechecker missing symbol type table", "resolver/typecheck contract broken");
+        return 1;
+    }
+    fn = ctx->ast->functions;
+    while (fn) {
+        int pi;
+        RustTypeKind fn_ret = rust_parse_type_kind_name(fn->ret_type);
+        if (ctx->strict_function_signatures && !fn->has_explicit_ret_type) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "function `%s` requires explicit return type in strict signature mode", fn->name[0] ? fn->name : "<anon>");
+            rust_typecheck_add_diag(ctx, "RUST-TYPE-E0015", fn->name_line, fn->name_col, msg, "add `-> i32` or `-> bool`, for example: `fn name(...) -> i32 { ... }`");
+        }
+        if (fn->symbol_id == RUST_SYMBOL_INVALID) {
+            rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", fn->name_line, fn->name_col, "unresolved symbol reached typechecker", "resolver must succeed before typecheck");
+            ctx->had_error = 1;
+        }
+        for (pi = 0; pi < fn->num_params; pi++) {
+            if (fn->param_symbol_ids[pi] == RUST_SYMBOL_INVALID) {
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", fn->param_lines[pi], fn->param_cols[pi], "unresolved symbol reached typechecker", "resolver must succeed before typecheck");
+                ctx->had_error = 1;
+            } else {
+                RustTypeKind pty = rust_parse_type_kind_name(fn->param_types[pi]);
+                if (pty == RUST_TYPE_ERROR) {
+                    rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", fn->param_lines[pi], fn->param_cols[pi], "unsupported parameter type reached typechecker", "v1 supports only i32 and bool parameters");
+                    ctx->had_error = 1;
+                } else {
+                    rust_type_assign_symbol(ctx, fn->param_symbol_ids[pi], pty, fn->param_lines[pi], fn->param_cols[pi]);
+                }
+            }
+        }
+        if (fn_ret == RUST_TYPE_ERROR) {
+            rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", fn->name_line, fn->name_col, "unsupported function return type reached typechecker", "v1 supports only i32 and bool");
+            fn_ret = RUST_TYPE_ERROR;
+        }
+        rust_typecheck_stmt_list(ctx, fn->body_head, fn_ret);
+        if (fn_ret == RUST_TYPE_I32) {
+            RustFlowKind flow = rust_typecheck_stmt_list_flow(ctx, fn->body_head);
+            if (flow != RUST_FLOW_ALWAYS_RETURNS) {
+                rust_type_report_missing_return(ctx, fn->name, fn->name_line, fn->name_col);
+            }
+        }
+        (void)fn_ret;
+        fn = fn->next;
+    }
+    return ctx->had_error ? 1 : 0;
+}
+
+static RustTypeKind rust_typecheck_expr(RustTypecheckContext *ctx, RustExpr *e) {
+    if (!ctx || !e) return RUST_TYPE_ERROR;
+    if (e->kind == RUST_EXPR_NUM) return RUST_TYPE_I32;
+    if (e->kind == RUST_EXPR_BOOL) return RUST_TYPE_BOOL;
+    if (e->kind == RUST_EXPR_IDENT) {
+        return rust_type_from_symbol(ctx, e->symbol_id, e->line, e->col);
+    } else if (e->kind == RUST_EXPR_UNARY) {
+        RustTypeKind ut = rust_typecheck_expr(ctx, e->lhs);
+        if (e->op == RUST_TK_BANG) {
+            if (ut == RUST_TYPE_ERROR) return RUST_TYPE_ERROR;
+            if (ut != RUST_TYPE_BOOL) {
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E0009", e->line, e->col, "logical not operand must be `bool`", "use a bool expression with `!`");
+                return RUST_TYPE_ERROR;
+            }
+            return RUST_TYPE_BOOL;
+        }
+        return RUST_TYPE_ERROR;
+    } else if (e->kind == RUST_EXPR_CALL) {
+        const RustSymbol *callee_sym;
+        RustFunction *callee_fn;
+        int ai;
+        if (e->call_callee_symbol_id == RUST_SYMBOL_INVALID) return RUST_TYPE_ERROR;
+        callee_sym = rust_type_find_symbol(ctx, e->call_callee_symbol_id);
+        if (!callee_sym) {
+            rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", e->line, e->col, "missing callee symbol in typechecker", "resolver/typecheck contract broken");
+            return RUST_TYPE_ERROR;
+        }
+        if (callee_sym->kind != RUST_SYMBOL_FUNCTION) {
+            char msg[256];
+            rust_format_ident_message(msg, 256, "called value ", e->call_callee, " is not a function");
+            rust_typecheck_add_diag(ctx, "RUST-TYPE-E0005", e->line, e->col, msg, "call expressions require a function name");
+            for (ai = 0; ai < e->call_arg_count; ai++) {
+                rust_typecheck_expr(ctx, e->call_args[ai]);
+            }
+            return RUST_TYPE_ERROR;
+        }
+        callee_fn = rust_find_function_by_symbol_id(ctx->ast, e->call_callee_symbol_id);
+        if (!callee_fn) {
+            rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", e->line, e->col, "callee function metadata missing", "resolver/typecheck contract broken");
+            return RUST_TYPE_ERROR;
+        }
+        if (e->call_arg_count != callee_fn->num_params) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "function `%s` expects %d %s but found %d",
+                     e->call_callee, callee_fn->num_params,
+                     (callee_fn->num_params == 1) ? "argument" : "arguments",
+                     e->call_arg_count);
+            rust_typecheck_add_diag(ctx, "RUST-TYPE-E0006", e->line, e->col, msg, "pass the expected number of arguments");
+        }
+        for (ai = 0; ai < e->call_arg_count; ai++) {
+            RustTypeKind aty = rust_typecheck_expr(ctx, e->call_args[ai]);
+            RustTypeKind pty = (ai < callee_fn->num_params) ? rust_parse_type_kind_name(callee_fn->param_types[ai]) : RUST_TYPE_ERROR;
+            if (ai < callee_fn->num_params && pty == RUST_TYPE_ERROR) {
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", e->line, e->col, "unsupported parameter type reached typechecker", "v1 supports only i32 and bool parameters");
+            } else if (ai < callee_fn->num_params && aty != RUST_TYPE_ERROR && aty != pty) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "argument %d to function `%s` has mismatched type: expected `%s`, found `%s`",
+                         ai + 1, e->call_callee, rust_type_name(pty), rust_type_name(aty));
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E0007", e->line, e->col, msg, "pass an argument with the declared parameter type");
+            }
+        }
+        return rust_parse_type_kind_name(callee_fn->ret_type);
+    } else if (e->kind == RUST_EXPR_BINARY) {
+        RustTypeKind lt = rust_typecheck_expr(ctx, e->lhs);
+        RustTypeKind rt = rust_typecheck_expr(ctx, e->rhs);
+        if (lt == RUST_TYPE_ERROR || rt == RUST_TYPE_ERROR) return RUST_TYPE_ERROR;
+        if (rust_is_logic_op(e->op)) {
+            if (lt != RUST_TYPE_BOOL || rt != RUST_TYPE_BOOL) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "logical operands must be `bool`: left is `%s`, right is `%s`",
+                         rust_type_name(lt), rust_type_name(rt));
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E0010", e->line, e->col, msg, "use bool expressions with logical operators");
+                return RUST_TYPE_ERROR;
+            }
+            return RUST_TYPE_BOOL;
+        } else if (rust_is_cmp_op(e->op)) {
+            if (lt != RUST_TYPE_I32 || rt != RUST_TYPE_I32) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "comparison operands must be `i32`: left is `%s`, right is `%s`",
+                         rust_type_name(lt), rust_type_name(rt));
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E0008", e->line, e->col, msg, "compare integer expressions");
+                return RUST_TYPE_ERROR;
+            }
+            return RUST_TYPE_BOOL;
+        } else {
+            if (lt != RUST_TYPE_I32) {
+                rust_type_report_expected(ctx, "RUST-TYPE-E0001", e->line, e->col, RUST_TYPE_I32, lt, "use i32 operands for arithmetic expressions");
+                return RUST_TYPE_ERROR;
+            }
+            if (rt != RUST_TYPE_I32) {
+                rust_type_report_expected(ctx, "RUST-TYPE-E0001", e->line, e->col, RUST_TYPE_I32, rt, "use i32 operands for arithmetic expressions");
+                return RUST_TYPE_ERROR;
+            }
+            return RUST_TYPE_I32;
+        }
+    }
+    return RUST_TYPE_ERROR;
+}
+
+static void rust_typecheck_stmt_list(RustTypecheckContext *ctx, RustStmt *s, RustTypeKind fn_ret) {
+    while (s) {
+        if (s->kind == RUST_STMT_LET) {
+            RustTypeKind init_ty;
+            RustTypeKind decl_ty;
+            if (ctx->strict_let_annotations && !s->has_type_annotation) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "let binding `%s` requires explicit type annotation in strict mode", s->name[0] ? s->name : "<unknown>");
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E0014", s->line, s->col, msg, "add `: i32` or `: bool`, for example: `let x: i32 = 1;`");
+            }
+            if (s->symbol_id == RUST_SYMBOL_INVALID) {
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", s->name_line, s->name_col, "unresolved symbol reached typechecker", "resolver must succeed before typecheck");
+                ctx->had_error = 1;
+            }
+            init_ty = rust_typecheck_expr(ctx, s->expr);
+            if (s->has_type_annotation) {
+                decl_ty = rust_parse_type_kind_name(s->type_name);
+                if (decl_ty == RUST_TYPE_ERROR) {
+                    rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", s->line, s->col, "unsupported let annotation type reached typechecker", "v1 supports only i32 and bool");
+                } else if (init_ty != RUST_TYPE_ERROR && init_ty != decl_ty) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg), "let initializer type mismatch: expected `%s`, found `%s`", rust_type_name(decl_ty), rust_type_name(init_ty));
+                    rust_typecheck_add_diag(ctx, "RUST-TYPE-E0013", s->line, s->col, msg, "make initializer match annotation, e.g. `let flag: bool = true;`");
+                }
+            } else {
+                decl_ty = init_ty;
+            }
+            if (decl_ty != RUST_TYPE_ERROR) {
+                rust_type_assign_symbol(ctx, s->symbol_id, decl_ty, s->name_line, s->name_col);
+            }
+        } else if (s->kind == RUST_STMT_ASSIGN) {
+            RustTypeKind target_ty;
+            RustTypeKind expr_ty;
+            if (s->symbol_id == RUST_SYMBOL_INVALID) {
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E9999", s->name_line, s->name_col, "unresolved assignment target reached typechecker", "resolver must succeed before typecheck");
+                ctx->had_error = 1;
+                s = s->next;
+                continue;
+            }
+            if (!rust_ast_symbol_is_mut_local(ctx->ast, s->symbol_id)) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "cannot assign to immutable binding `%s`", s->name[0] ? s->name : "<unknown>");
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E0011", s->name_line, s->name_col, msg, "declare the binding with `let mut`");
+            }
+            target_ty = rust_type_from_symbol(ctx, s->symbol_id, s->name_line, s->name_col);
+            expr_ty = rust_typecheck_expr(ctx, s->expr);
+            if (target_ty != RUST_TYPE_ERROR && expr_ty != RUST_TYPE_ERROR && target_ty != expr_ty) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "assignment type mismatch: expected `%s`, found `%s`", rust_type_name(target_ty), rust_type_name(expr_ty));
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E0012", s->line, s->col, msg, "assign a value with the same type as the binding");
+            }
+        } else if (s->kind == RUST_STMT_RETURN || s->kind == RUST_STMT_EXPR) {
+            RustTypeKind rt = rust_typecheck_expr(ctx, s->expr);
+            if (s->kind == RUST_STMT_RETURN && rt != RUST_TYPE_ERROR && rt != fn_ret) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "return type mismatch: expected `%s`, found `%s`", rust_type_name(fn_ret), rust_type_name(rt));
+                rust_typecheck_add_diag(ctx, "RUST-TYPE-E0003", s->line, s->col, msg, "return an expression matching the function return type");
+            }
+        } else if (s->kind == RUST_STMT_IF) {
+            RustTypeKind ct = rust_typecheck_expr(ctx, s->cond);
+            if (ct != RUST_TYPE_ERROR && ct != RUST_TYPE_BOOL) {
+                rust_type_report_expected(ctx, "RUST-TYPE-E0002", s->line, s->col, RUST_TYPE_BOOL, ct, "use a bool expression for condition");
+            }
+            rust_typecheck_stmt_list(ctx, s->then_head, fn_ret);
+            rust_typecheck_stmt_list(ctx, s->else_head, fn_ret);
+        } else if (s->kind == RUST_STMT_WHILE) {
+            RustTypeKind ct = rust_typecheck_expr(ctx, s->cond);
+            if (ct != RUST_TYPE_ERROR && ct != RUST_TYPE_BOOL) {
+                rust_type_report_expected(ctx, "RUST-TYPE-E0002", s->line, s->col, RUST_TYPE_BOOL, ct, "use a bool expression for condition");
+            }
+            rust_typecheck_stmt_list(ctx, s->body_head, fn_ret);
+        }
+        s = s->next;
+    }
+}
+
+static RustFlowKind rust_typecheck_stmt_flow(RustTypecheckContext *ctx, RustStmt *s) {
+    (void)ctx;
+    if (!s) return RUST_FLOW_MAY_CONTINUE;
+    if (s->kind == RUST_STMT_RETURN) return RUST_FLOW_ALWAYS_RETURNS;
+    if (s->kind == RUST_STMT_IF) {
+        if (!s->else_head) return RUST_FLOW_MAY_CONTINUE;
+        if (rust_typecheck_stmt_list_flow(ctx, s->then_head) == RUST_FLOW_ALWAYS_RETURNS &&
+            rust_typecheck_stmt_list_flow(ctx, s->else_head) == RUST_FLOW_ALWAYS_RETURNS) {
+            return RUST_FLOW_ALWAYS_RETURNS;
+        }
+        return RUST_FLOW_MAY_CONTINUE;
+    }
+    if (s->kind == RUST_STMT_WHILE) {
+        return RUST_FLOW_MAY_CONTINUE;
+    }
+    return RUST_FLOW_MAY_CONTINUE;
+}
+
+static RustFlowKind rust_typecheck_stmt_list_flow(RustTypecheckContext *ctx, RustStmt *s) {
+    while (s) {
+        RustFlowKind fk = rust_typecheck_stmt_flow(ctx, s);
+        if (fk == RUST_FLOW_ALWAYS_RETURNS) return RUST_FLOW_ALWAYS_RETURNS;
+        s = s->next;
+    }
+    return RUST_FLOW_MAY_CONTINUE;
+}
+
+static void rust_lower_indent(int indent) {
+    int i;
+    for (i = 0; i < indent; i++) fputc(' ', stdout);
+}
+
+static const char *rust_lower_bin_name(int op) {
+    if (op == RUST_TK_PLUS) return "add";
+    if (op == RUST_TK_MINUS) return "sub";
+    if (op == RUST_TK_STAR) return "mul";
+    if (op == RUST_TK_SLASH) return "div";
+    if (op == RUST_TK_EQ) return "eq";
+    if (op == RUST_TK_NE) return "ne";
+    if (op == RUST_TK_LT) return "lt";
+    if (op == RUST_TK_LE) return "le";
+    if (op == RUST_TK_GT) return "gt";
+    if (op == RUST_TK_GE) return "ge";
+    if (op == RUST_TK_LAND) return "and";
+    if (op == RUST_TK_LOR) return "or";
+    return 0;
+}
+
+static void rust_lower_dump_expr(RustLowerContext *ctx, RustExpr *e) {
+    int ai;
+    const char *op_name;
+    if (!ctx || !e) {
+        fputs("(error)", stdout);
+        return;
+    }
+    if (e->kind == RUST_EXPR_NUM) {
+        printf("(const %lld)", e->num);
+        return;
+    }
+    if (e->kind == RUST_EXPR_BOOL) {
+        printf("(bool %s)", e->bool_val ? "true" : "false");
+        return;
+    }
+    if (e->kind == RUST_EXPR_IDENT) {
+        fputs("(load ", stdout);
+        rust_dump_name(stdout, e->text, RUST_DUMP_NAME_UNQUOTED);
+        fputc(')', stdout);
+        return;
+    }
+    if (e->kind == RUST_EXPR_UNARY) {
+        if (e->op == RUST_TK_BANG) {
+            fputs("(not ", stdout);
+            rust_lower_dump_expr(ctx, e->lhs);
+            fputc(')', stdout);
+            return;
+        }
+        rust_lower_add_diag(ctx, e->line, e->col, "unsupported unary operator in Rust lowering", "this unary operator is not supported by the current lowering pass");
+        fputs("(error)", stdout);
+        return;
+    }
+    if (e->kind == RUST_EXPR_BINARY) {
+        op_name = rust_lower_bin_name(e->op);
+        if (!op_name) {
+            rust_lower_add_diag(ctx, e->line, e->col, "unsupported binary operator in Rust lowering", "this binary operator is not supported by the current lowering pass");
+            fputs("(error)", stdout);
+            return;
+        }
+        printf("(%s ", op_name);
+        rust_lower_dump_expr(ctx, e->lhs);
+        fputc(' ', stdout);
+        rust_lower_dump_expr(ctx, e->rhs);
+        fputc(')', stdout);
+        return;
+    }
+    if (e->kind == RUST_EXPR_CALL) {
+        fputs("(call ", stdout);
+        rust_dump_name(stdout, e->call_callee, RUST_DUMP_NAME_UNQUOTED);
+        for (ai = 0; ai < e->call_arg_count; ai++) {
+            fputc(' ', stdout);
+            rust_lower_dump_expr(ctx, e->call_args[ai]);
+        }
+        fputc(')', stdout);
+        return;
+    }
+    rust_lower_add_diag(ctx, e->line, e->col, "unsupported expression reached Rust lowering", "this expression is not supported by the current lowering pass");
+    fputs("(error)", stdout);
+}
+
+static void rust_lower_dump_stmt_list(RustLowerContext *ctx, RustStmt *st, int indent) {
+    while (st) {
+        if (st->kind == RUST_STMT_LET) {
+            if (!st->expr) {
+                rust_lower_add_diag(ctx, st->line, st->col, "unsupported let without initializer in lowering", "v1 lowering expects initialized locals");
+            } else {
+                rust_lower_indent(indent);
+                fputs("let ", stdout);
+                rust_dump_name(stdout, st->name, RUST_DUMP_NAME_UNQUOTED);
+                fputs(" <- ", stdout);
+                rust_lower_dump_expr(ctx, st->expr);
+                fputc('\n', stdout);
+            }
+        } else if (st->kind == RUST_STMT_ASSIGN) {
+            rust_lower_indent(indent);
+            fputs("set ", stdout);
+            rust_dump_name(stdout, st->name, RUST_DUMP_NAME_UNQUOTED);
+            fputs(" <- ", stdout);
+            rust_lower_dump_expr(ctx, st->expr);
+            fputc('\n', stdout);
+        } else if (st->kind == RUST_STMT_RETURN) {
+            if (!st->expr) {
+                rust_lower_add_diag(ctx, st->line, st->col, "unsupported bare return in lowering", "return an i32 expression");
+            } else {
+                rust_lower_indent(indent);
+                fputs("ret ", stdout);
+                rust_lower_dump_expr(ctx, st->expr);
+                fputc('\n', stdout);
+            }
+        } else if (st->kind == RUST_STMT_EXPR) {
+            rust_lower_indent(indent);
+            fputs("eval ", stdout);
+            rust_lower_dump_expr(ctx, st->expr);
+            fputc('\n', stdout);
+        } else if (st->kind == RUST_STMT_IF) {
+            rust_lower_indent(indent);
+            fputs("if ", stdout);
+            rust_lower_dump_expr(ctx, st->cond);
+            fputc('\n', stdout);
+            rust_lower_indent(indent);
+            fputs("then\n", stdout);
+            rust_lower_dump_stmt_list(ctx, st->then_head, indent + 2);
+            if (st->else_head) {
+                rust_lower_indent(indent);
+                fputs("else\n", stdout);
+                rust_lower_dump_stmt_list(ctx, st->else_head, indent + 2);
+            }
+            rust_lower_indent(indent);
+            fputs("end\n", stdout);
+        } else if (st->kind == RUST_STMT_WHILE) {
+            rust_lower_indent(indent);
+            fputs("while ", stdout);
+            rust_lower_dump_expr(ctx, st->cond);
+            fputc('\n', stdout);
+            rust_lower_indent(indent);
+            fputs("do\n", stdout);
+            rust_lower_dump_stmt_list(ctx, st->body_head, indent + 2);
+            rust_lower_indent(indent);
+            fputs("end\n", stdout);
+        } else if (ctx->dump_ir) {
+            rust_lower_add_diag(ctx, st->line, st->col, "unsupported statement reached lowering", "typecheck should gate unsupported forms");
+        }
+        st = st->next;
+    }
+}
+
+static int rust_lower_expr_supported(RustLowerContext *ctx, RustExpr *e) {
+    int ai;
+    if (!e) return 1;
+    if (e->kind == RUST_EXPR_NUM || e->kind == RUST_EXPR_BOOL || e->kind == RUST_EXPR_IDENT) {
+        return 1;
+    }
+    if (e->kind == RUST_EXPR_UNARY) {
+        if (e->op != RUST_TK_BANG) {
+            rust_lower_add_diag(ctx, e->line, e->col, "unsupported unary operator in Rust lowering", "this unary operator is not supported by the current lowering pass");
+            return 0;
+        }
+        return rust_lower_expr_supported(ctx, e->lhs);
+    }
+    if (e->kind == RUST_EXPR_BINARY) {
+        if (!rust_lower_bin_name(e->op)) {
+            rust_lower_add_diag(ctx, e->line, e->col, "unsupported binary operator in Rust lowering", "this binary operator is not supported by the current lowering pass");
+            return 0;
+        }
+        if (!rust_lower_expr_supported(ctx, e->lhs)) return 0;
+        if (!rust_lower_expr_supported(ctx, e->rhs)) return 0;
+        return 1;
+    }
+    if (e->kind == RUST_EXPR_CALL) {
+        const RustSymbol *callee = 0;
+        int si;
+        if (e->call_callee_symbol_id == RUST_SYMBOL_INVALID) {
+            rust_lower_add_diag(ctx, e->line, e->col, "unresolved call callee reached Rust lowering", "resolver/typecheck contract broken before lowering");
+            return 0;
+        }
+        for (si = 0; si < ctx->symbol_count; si++) {
+            if (ctx->symbols[si].id == e->call_callee_symbol_id) {
+                callee = &ctx->symbols[si];
+                break;
+            }
+        }
+        if (!callee) {
+            rust_lower_add_diag(ctx, e->line, e->col, "missing call callee symbol in Rust lowering", "resolver/typecheck contract broken before lowering");
+            return 0;
+        }
+        if (callee->kind != RUST_SYMBOL_FUNCTION) {
+            rust_lower_add_diag(ctx, e->line, e->col, "call target is not a function in Rust lowering", "only function symbols are valid call targets");
+            return 0;
+        }
+        for (ai = 0; ai < e->call_arg_count; ai++) {
+            if (!rust_lower_expr_supported(ctx, e->call_args[ai])) return 0;
+        }
+        return 1;
+    }
+    rust_lower_add_diag(ctx, e->line, e->col, "unsupported expression reached Rust lowering", "this expression is not supported by the current lowering pass");
+    return 0;
+}
+
+static int rust_lower_stmt_list_supported(RustLowerContext *ctx, RustStmt *st) {
+    while (st) {
+        if (st->kind == RUST_STMT_LET) {
+            if (!st->expr) {
+                rust_lower_add_diag(ctx, st->line, st->col, "unsupported let without initializer in lowering", "v1 lowering expects initialized locals");
+                return 0;
+            }
+            if (!rust_lower_expr_supported(ctx, st->expr)) return 0;
+        } else if (st->kind == RUST_STMT_ASSIGN) {
+            if (!st->expr) {
+                rust_lower_add_diag(ctx, st->line, st->col, "unsupported assignment without expression in lowering", "use `name = expr;`");
+                return 0;
+            }
+            if (!rust_lower_expr_supported(ctx, st->expr)) return 0;
+        } else if (st->kind == RUST_STMT_RETURN || st->kind == RUST_STMT_EXPR) {
+            if (!st->expr) {
+                rust_lower_add_diag(ctx, st->line, st->col, "unsupported bare return in lowering", "return an i32 expression");
+                return 0;
+            }
+            if (!rust_lower_expr_supported(ctx, st->expr)) return 0;
+        } else if (st->kind == RUST_STMT_IF) {
+            if (!rust_lower_expr_supported(ctx, st->cond)) return 0;
+            if (!rust_lower_stmt_list_supported(ctx, st->then_head)) return 0;
+            if (!rust_lower_stmt_list_supported(ctx, st->else_head)) return 0;
+        } else if (st->kind == RUST_STMT_WHILE) {
+            if (!rust_lower_expr_supported(ctx, st->cond)) return 0;
+            if (!rust_lower_stmt_list_supported(ctx, st->body_head)) return 0;
+        } else {
+            rust_lower_add_diag(ctx, st->line, st->col, "unsupported statement reached lowering", "typecheck should gate unsupported forms");
+            return 0;
+        }
+        st = st->next;
+    }
+    return 1;
+}
+
+int rust_lower_to_ir(RustLowerContext *ctx) {
+    RustFunction *fn;
+    if (!ctx || !ctx->ast) return 1;
+    ctx->had_error = 0;
+    if (ctx->dump_ir) {
+        RustFunction *pre_fn = ctx->ast->functions;
+        while (pre_fn) {
+            if (!rust_lower_stmt_list_supported(ctx, pre_fn->body_head)) {
+                return 1;
+            }
+            pre_fn = pre_fn->next;
+        }
+    }
+    fn = ctx->ast->functions;
+    if (ctx->dump_ir) {
+        printf("RustIR v1\n");
+    }
+    while (fn) {
+        if (ctx->dump_ir) {
+            int pi;
+            fputs("fn ", stdout);
+            rust_dump_name(stdout, fn->name, RUST_DUMP_NAME_UNQUOTED);
+            fputc('(', stdout);
+            for (pi = 0; pi < fn->num_params; pi++) {
+                if (pi) fputs(", ", stdout);
+                rust_dump_name(stdout, fn->param_names[pi], RUST_DUMP_NAME_UNQUOTED);
+                fputs(":i32", stdout);
+            }
+            fputs(") -> i32 {\n", stdout);
+            rust_lower_dump_stmt_list(ctx, fn->body_head, 2);
+            fputs("}\n", stdout);
+        }
+        fn = fn->next;
+    }
+    return ctx->had_error ? 1 : 0;
+}
+
+int rust_frontend_compile_file(const char *filename, const char *source, int source_len, int dump_ast, int dump_ast_with_symbols, int dump_symbol_table, int dump_ir, int strict_let_annotations, int strict_function_signatures, int rust_dump_phase) {
+    RustParser p;
+    RustAst *ast;
+    int i;
+    RustResolveContext rctx;
+    RustTypecheckContext tctx;
+    RustLowerContext lctx;
+    memset(&p, 0, sizeof(p));
+    p.filename = filename;
+    p.src = source;
+    p.len = source_len;
+    p.line = 1;
+    p.col = 1;
+    ast = rust_parse_program_internal(&p);
+    if (dump_ast) {
+        rust_dump_ast(stdout, ast);
+    }
+    rust_print_diags(filename, p.diags, p.num_diags);
+    if (p.num_diags > 0) return 1;
+    rust_phase_line(rust_dump_phase, "rust-parse");
+    rctx.filename = filename; rctx.ast = ast;
+    rctx.diags = p.diags; rctx.num_diags = &p.num_diags; rctx.max_diags = 256;
+    rctx.symbols = 0; rctx.symbol_count = 0; rctx.symbol_capacity = 0; rctx.had_error = 0;
+    tctx.filename = filename; tctx.ast = ast;
+    tctx.diags = p.diags; tctx.num_diags = &p.num_diags; tctx.max_diags = 256;
+    tctx.symbols = 0; tctx.symbol_count = 0; tctx.had_error = 0;
+    tctx.symbol_types_len = 0;
+    tctx.symbol_types = 0;
+    tctx.strict_let_annotations = strict_let_annotations ? 1 : 0;
+    tctx.strict_function_signatures = strict_function_signatures ? 1 : 0;
+    lctx.filename = filename; lctx.ast = ast;
+    lctx.symbols = 0; lctx.symbol_count = 0;
+    lctx.diags = p.diags; lctx.num_diags = &p.num_diags; lctx.max_diags = 256; lctx.had_error = 0; lctx.dump_ir = dump_ir;
+    rust_phase_line(rust_dump_phase, "rust-resolve");
+    if (rust_resolve_names(&rctx) != 0) {
+        if (dump_ast_with_symbols) {
+            rust_dump_ast_with_symbols(stdout, ast);
+        }
+        if (dump_symbol_table) {
+            rust_dump_symbol_table(&rctx);
+        }
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(rctx.symbols);
+        return 1;
+    }
+    tctx.symbols = rctx.symbols;
+    tctx.symbol_count = rctx.symbol_count;
+    lctx.symbols = rctx.symbols;
+    lctx.symbol_count = rctx.symbol_count;
+    tctx.symbol_types_len = rctx.symbol_count + 1;
+    tctx.symbol_types = (int *)calloc((size_t)tctx.symbol_types_len, sizeof(int));
+    if (!tctx.symbol_types) {
+        rust_typecheck_add_diag(&tctx, "RUST-TYPE-E9999", 0, 0, "typechecker allocation failed", "try again with more memory");
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(rctx.symbols);
+        return 1;
+    }
+    if (dump_ast_with_symbols) {
+        rust_dump_ast_with_symbols(stdout, ast);
+    }
+    if (dump_symbol_table) {
+        rust_dump_symbol_table(&rctx);
+    }
+    rust_phase_line(rust_dump_phase, "rust-typecheck");
+    if (rust_typecheck(&tctx) != 0) {
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(tctx.symbol_types);
+        free(rctx.symbols);
+        return 1;
+    }
+    rust_phase_line(rust_dump_phase, "rust-lower");
+    if (rust_lower_to_ir(&lctx) != 0) {
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(tctx.symbol_types);
+        free(rctx.symbols);
+        return 1;
+    }
+    free(tctx.symbol_types);
+    free(rctx.symbols);
+    return 0;
+}
+
+static int rust_backend_add_diag(RustParser *p, int line, int col, const char *msg, const char *hint) {
+    RustDiag *d;
+    if (!p) return 0;
+    if (p->num_diags >= 256) return 0;
+    d = &p->diags[p->num_diags++];
+    d->kind = 0;
+    strncpy(d->code, "RUST-BACKEND-E9999", 31);
+    d->code[31] = 0;
+    d->line = line;
+    d->col = col;
+    strncpy(d->message, msg, 255);
+    d->message[255] = 0;
+    if (hint) {
+        strncpy(d->hint, hint, 255);
+        d->hint[255] = 0;
+    } else {
+        d->hint[0] = 0;
+    }
+    return 1;
+}
+
+static int rust_backend_add_diag_code(RustParser *p, const char *code, int line, int col, const char *msg, const char *hint) {
+    RustDiag *d;
+    if (!p) return 0;
+    if (p->num_diags >= 256) return 0;
+    d = &p->diags[p->num_diags++];
+    d->kind = 0;
+    strncpy(d->code, code ? code : "RUST-BACKEND-E9999", 31);
+    d->code[31] = 0;
+    d->line = line;
+    d->col = col;
+    strncpy(d->message, msg, 255);
+    d->message[255] = 0;
+    if (hint) {
+        strncpy(d->hint, hint, 255);
+        d->hint[255] = 0;
+    } else {
+        d->hint[0] = 0;
+    }
+    return 1;
+}
+
+typedef struct RustBackendLocal {
+    RustSymbolId symbol_id;
+    int kind; /* 1=i32, 2=bool */
+    long long value;
+    int has_value;
+} RustBackendLocal;
+
+typedef struct RustBackendSlot {
+    RustSymbolId symbol_id;
+    int offset;
+    int kind; /* 1=i32, 2=bool */
+} RustBackendSlot;
+
+typedef struct RustBackendEvalState {
+    RustAst *ast;
+    RustSymbolId call_stack[256];
+    int call_stack_len;
+} RustBackendEvalState;
+
+static const RustFunction *rust_backend_find_main_function(const RustAst *ast) {
+    const RustFunction *fn;
+    if (!ast) return 0;
+    fn = ast->functions;
+    while (fn) {
+        if (strcmp(fn->name, "main") == 0) return fn;
+        fn = fn->next;
+    }
+    return 0;
+}
+
+static const RustFunction *rust_backend_find_function_by_symbol_in_ast(const RustAst *ast, RustSymbolId symbol_id) {
+    const RustFunction *fn;
+    if (!ast || symbol_id == RUST_SYMBOL_INVALID) return 0;
+    fn = ast->functions;
+    while (fn) {
+        if (fn->symbol_id == symbol_id) return fn;
+        fn = fn->next;
+    }
+    return 0;
+}
+
+static void rust_backend_runtime_function_label(char *buf, int buf_len, const RustFunction *fn) {
+    if (!buf || buf_len <= 0 || !fn) return;
+    if (strcmp(fn->name, "main") == 0) {
+        snprintf(buf, (size_t)buf_len, "main");
+    } else {
+        snprintf(buf, (size_t)buf_len, "rust_fn_%d", (int)fn->symbol_id);
+    }
+}
+
+static int rust_backend_runtime_expr_supported(const RustAst *ast, const RustExpr *e, const RustSymbolId *call_stack, int call_stack_len);
+static int rust_backend_runtime_stmt_supported(const RustAst *ast, const RustStmt *st, const RustSymbolId *call_stack, int call_stack_len);
+static int rust_backend_runtime_function_supported(const RustAst *ast, const RustFunction *fn, const RustSymbolId *call_stack, int call_stack_len);
+
+static int rust_backend_runtime_expr_supported(const RustAst *ast, const RustExpr *e, const RustSymbolId *call_stack, int call_stack_len) {
+    if (!e) return 0;
+    if (e->kind == RUST_EXPR_NUM || e->kind == RUST_EXPR_BOOL || e->kind == RUST_EXPR_IDENT) return 1;
+    if (e->kind == RUST_EXPR_CALL) {
+        const RustFunction *callee;
+        int ai;
+        if (!ast) return 0;
+        if (e->call_callee_symbol_id == RUST_SYMBOL_INVALID) return 0;
+        callee = rust_backend_find_function_by_symbol_in_ast(ast, e->call_callee_symbol_id);
+        if (!callee) return 0;
+        if (e->call_arg_count != callee->num_params) return 0;
+        for (ai = 0; ai < e->call_arg_count; ai++) {
+            if (!rust_backend_runtime_expr_supported(ast, e->call_args[ai], call_stack, call_stack_len)) return 0;
+        }
+        return 1;
+    }
+    if (e->kind == RUST_EXPR_BINARY) {
+        if (e->op == RUST_TK_PLUS || e->op == RUST_TK_MINUS || e->op == RUST_TK_STAR || e->op == RUST_TK_SLASH) {
+            if (e->op == RUST_TK_SLASH && e->rhs && e->rhs->kind == RUST_EXPR_NUM && e->rhs->num == 0) return 0;
+            return rust_backend_runtime_expr_supported(ast, e->lhs, call_stack, call_stack_len) &&
+                   rust_backend_runtime_expr_supported(ast, e->rhs, call_stack, call_stack_len);
+        }
+        if (e->op == RUST_TK_EQ || e->op == RUST_TK_NE || e->op == RUST_TK_LT || e->op == RUST_TK_LE || e->op == RUST_TK_GT || e->op == RUST_TK_GE) {
+            return rust_backend_runtime_expr_supported(ast, e->lhs, call_stack, call_stack_len) &&
+                   rust_backend_runtime_expr_supported(ast, e->rhs, call_stack, call_stack_len);
+        }
+        if (e->op == RUST_TK_LAND || e->op == RUST_TK_LOR) {
+            return rust_backend_runtime_expr_supported(ast, e->lhs, call_stack, call_stack_len) &&
+                   rust_backend_runtime_expr_supported(ast, e->rhs, call_stack, call_stack_len);
+        }
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_UNARY) {
+        if (e->op != RUST_TK_BANG) return 0;
+        return rust_backend_runtime_expr_supported(ast, e->lhs, call_stack, call_stack_len);
+    }
+    return 0;
+}
+
+static int rust_backend_runtime_expr_kind(const RustExpr *e) {
+    if (!e) return 0;
+    if (e->kind == RUST_EXPR_BOOL) return 2;
+    if (e->kind == RUST_EXPR_BINARY &&
+        (e->op == RUST_TK_EQ || e->op == RUST_TK_NE || e->op == RUST_TK_LT ||
+         e->op == RUST_TK_LE || e->op == RUST_TK_GT || e->op == RUST_TK_GE ||
+         e->op == RUST_TK_LAND || e->op == RUST_TK_LOR)) {
+        return 2;
+    }
+    if (e->kind == RUST_EXPR_UNARY && e->op == RUST_TK_BANG) {
+        return 2;
+    }
+    return 1;
+}
+
+static int rust_backend_runtime_stmt_supported(const RustAst *ast, const RustStmt *st, const RustSymbolId *call_stack, int call_stack_len) {
+    while (st) {
+        if (st->kind == RUST_STMT_LET || st->kind == RUST_STMT_RETURN || st->kind == RUST_STMT_ASSIGN) {
+            if (!st->expr || !rust_backend_runtime_expr_supported(ast, st->expr, call_stack, call_stack_len)) return 0;
+            if (st->kind == RUST_STMT_LET && st->symbol_id == RUST_SYMBOL_INVALID) return 0;
+            if (st->kind == RUST_STMT_ASSIGN &&
+                (st->symbol_id == RUST_SYMBOL_INVALID || !rust_ast_symbol_is_mut_local(ast, st->symbol_id))) return 0;
+        } else if (st->kind == RUST_STMT_IF) {
+            if (!st->cond || !rust_backend_runtime_expr_supported(ast, st->cond, call_stack, call_stack_len)) return 0;
+            if (!rust_backend_runtime_stmt_supported(ast, st->then_head, call_stack, call_stack_len)) return 0;
+            if (!rust_backend_runtime_stmt_supported(ast, st->else_head, call_stack, call_stack_len)) return 0;
+        } else if (st->kind == RUST_STMT_WHILE) {
+            if (!st->cond || !rust_backend_runtime_expr_supported(ast, st->cond, call_stack, call_stack_len)) return 0;
+            if (!rust_backend_runtime_stmt_supported(ast, st->body_head, call_stack, call_stack_len)) return 0;
+        } else {
+            return 0;
+        }
+        st = st->next;
+    }
+    return 1;
+}
+
+static int rust_backend_runtime_function_supported(const RustAst *ast, const RustFunction *fn, const RustSymbolId *call_stack, int call_stack_len) {
+    int pi;
+    if (!ast || !fn || !call_stack || call_stack_len <= 0) return 0;
+    if (!fn->body_head) return 0;
+    for (pi = 0; pi < fn->num_params; pi++) {
+        if (fn->param_symbol_ids[pi] == RUST_SYMBOL_INVALID) return 0;
+    }
+    return rust_backend_runtime_stmt_supported(ast, fn->body_head, call_stack, call_stack_len);
+}
+
+static int rust_backend_runtime_program_supported(const RustAst *ast) {
+    const RustFunction *fn;
+    RustSymbolId call_stack[1];
+    if (!ast) return 0;
+    fn = ast->functions;
+    while (fn) {
+        call_stack[0] = fn->symbol_id;
+        if (!rust_backend_runtime_function_supported(ast, fn, call_stack, 1)) return 0;
+        fn = fn->next;
+    }
+    return 1;
+}
+
+static int rust_backend_find_slot(const RustBackendSlot *slots, int slot_count, RustSymbolId symbol_id, int *out_offset, int *out_kind) {
+    int i;
+    if (!slots || !out_offset || symbol_id == RUST_SYMBOL_INVALID) return 0;
+    for (i = 0; i < slot_count; i++) {
+        if (slots[i].symbol_id == symbol_id) {
+            *out_offset = slots[i].offset;
+            if (out_kind) *out_kind = slots[i].kind;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Walk the same stmt shapes as rust_backend_runtime_stmt_supported / rust_backend_emit_runtime_stmt_list
+ * so every runtime-supported `let` gets a stack slot (including under if/else/while bodies). */
+static int rust_backend_collect_runtime_slots_from_stmt_list(
+    RustParser *p,
+    RustBackendSlot *slots,
+    int *slot_count,
+    int *next_off,
+    const RustStmt *st
+) {
+    while (st) {
+        if (st->kind == RUST_STMT_LET) {
+            if (*slot_count >= 256) {
+                rust_backend_add_diag(p, st->line, st->col, "backend runtime slot table overflow", "reduce parameter/local bindings for backend-v1 runtime codegen");
+                return 1;
+            }
+            slots[*slot_count].symbol_id = st->symbol_id;
+            slots[*slot_count].offset = *next_off;
+            slots[*slot_count].kind = rust_backend_runtime_expr_kind(st->expr);
+            (*slot_count)++;
+            *next_off -= 4;
+        } else if (st->kind == RUST_STMT_IF) {
+            if (rust_backend_collect_runtime_slots_from_stmt_list(p, slots, slot_count, next_off, st->then_head) != 0) return 1;
+            if (rust_backend_collect_runtime_slots_from_stmt_list(p, slots, slot_count, next_off, st->else_head) != 0) return 1;
+        } else if (st->kind == RUST_STMT_WHILE) {
+            if (rust_backend_collect_runtime_slots_from_stmt_list(p, slots, slot_count, next_off, st->body_head) != 0) return 1;
+        }
+        st = st->next;
+    }
+    return 0;
+}
+
+static int rust_backend_emit_runtime_expr(FILE *out, RustParser *p, const RustAst *ast, const RustExpr *e, const RustBackendSlot *slots, int slot_count, int *label_id) {
+    int off;
+    int sk;
+    if (!out || !p || !e) return 1;
+    if (e->kind == RUST_EXPR_NUM) {
+        fprintf(out, "    movl $%lld, %%eax\n", e->num);
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_BOOL) {
+        fprintf(out, "    movl $%d, %%eax\n", e->bool_val ? 1 : 0);
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_IDENT) {
+        if (!rust_backend_find_slot(slots, slot_count, e->symbol_id, &off, &sk)) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `runtime identifier binding`", "this Rust construct is not supported by the current backend runtime bridge");
+            return 1;
+        }
+        (void)sk;
+        fprintf(out, "    movl %d(%%rbp), %%eax\n", off);
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_CALL) {
+        const RustFunction *callee;
+        char label[64];
+        static const char *arg_regs[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
+        int ai;
+        int n;
+        int n_reg;
+        int n_stack;
+        int align_pad;
+        int room;
+        int si;
+        int cleanup;
+        if (!ast || e->call_callee_symbol_id == RUST_SYMBOL_INVALID) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `runtime call expression`", "this Rust construct is not supported by the current backend runtime bridge");
+            return 1;
+        }
+        callee = rust_backend_find_function_by_symbol_in_ast(ast, e->call_callee_symbol_id);
+        if (!callee) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `runtime call callee`", "resolver/typecheck contract broken before backend runtime bridge");
+            return 1;
+        }
+        if (e->call_arg_count != callee->num_params) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `runtime call arguments`", "call argument count does not match callee parameter count");
+            return 1;
+        }
+        n = e->call_arg_count;
+        n_reg = n < 6 ? n : 6;
+        n_stack = n > 6 ? n - 6 : 0;
+        /* Register args (first six) are evaluated right-to-left (push on stack), then
+         * popped into %edi..%r9d. A left-to-right mov would clobber nested call args. */
+        align_pad = (n_stack & 1) ? 8 : 0;
+        /* SysV: the first stack param must live at 0(%rsp) at the *call* site so that after
+         * `call` (ret at 0) it is at 8(%rsp) for the callee. Do not `push` stack params then
+         * add reg-arg pushes (that would bury the 7th under temps). Reg args first, then
+         * subq a contiguous outgoing-arg area, movl each i32 to 0, 8, ... 8(n_stack-1)(%rsp). */
+        room = 8 * n_stack + align_pad;
+        for (ai = n_reg - 1; ai >= 0; ai--) {
+            if (rust_backend_emit_runtime_expr(out, p, ast, e->call_args[ai], slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    pushq %%rax\n");
+        }
+        for (ai = 0; ai < n_reg; ai++) {
+            fprintf(out, "    popq %%rax\n");
+            fprintf(out, "    movl %%eax, %s\n", arg_regs[ai]);
+        }
+        if (room > 0) {
+            fprintf(out, "    subq $%d, %%rsp\n", room);
+            for (ai = 6; ai < n; ai++) {
+                if (rust_backend_emit_runtime_expr(out, p, ast, e->call_args[ai], slots, slot_count, label_id) != 0) return 1;
+                si = 8 * (ai - 6);
+                fprintf(out, "    movl %%eax, %d(%%rsp)\n", si);
+            }
+        }
+        rust_backend_runtime_function_label(label, (int)sizeof(label), callee);
+        fprintf(out, "    call %s\n", label);
+        cleanup = room;
+        if (cleanup > 0) {
+            fprintf(out, "    addq $%d, %%rsp\n", cleanup);
+        }
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_UNARY) {
+        if (e->op != RUST_TK_BANG) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `runtime unary operator`", "this Rust construct is not supported by the current backend runtime bridge");
+            return 1;
+        }
+        if (rust_backend_emit_runtime_expr(out, p, ast, e->lhs, slots, slot_count, label_id) != 0) return 1;
+        fprintf(out, "    cmpl $0, %%eax\n");
+        fprintf(out, "    sete %%al\n");
+        fprintf(out, "    movzbl %%al, %%eax\n");
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_BINARY) {
+        if (e->op == RUST_TK_LAND) {
+            int id = (*label_id)++;
+            if (rust_backend_emit_runtime_expr(out, p, ast, e->lhs, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    cmpl $0, %%eax\n");
+            fprintf(out, "    je .Lrust_logic_false_%d\n", id);
+            if (rust_backend_emit_runtime_expr(out, p, ast, e->rhs, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    cmpl $0, %%eax\n");
+            fprintf(out, "    je .Lrust_logic_false_%d\n", id);
+            fprintf(out, "    movl $1, %%eax\n");
+            fprintf(out, "    jmp .Lrust_logic_end_%d\n", id);
+            fprintf(out, ".Lrust_logic_false_%d:\n", id);
+            fprintf(out, "    movl $0, %%eax\n");
+            fprintf(out, ".Lrust_logic_end_%d:\n", id);
+            return 0;
+        }
+        if (e->op == RUST_TK_LOR) {
+            int id = (*label_id)++;
+            if (rust_backend_emit_runtime_expr(out, p, ast, e->lhs, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    cmpl $0, %%eax\n");
+            fprintf(out, "    jne .Lrust_logic_true_%d\n", id);
+            if (rust_backend_emit_runtime_expr(out, p, ast, e->rhs, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    cmpl $0, %%eax\n");
+            fprintf(out, "    jne .Lrust_logic_true_%d\n", id);
+            fprintf(out, "    movl $0, %%eax\n");
+            fprintf(out, "    jmp .Lrust_logic_end_%d\n", id);
+            fprintf(out, ".Lrust_logic_true_%d:\n", id);
+            fprintf(out, "    movl $1, %%eax\n");
+            fprintf(out, ".Lrust_logic_end_%d:\n", id);
+            return 0;
+        }
+        if (rust_backend_emit_runtime_expr(out, p, ast, e->lhs, slots, slot_count, label_id) != 0) return 1;
+        fprintf(out, "    pushq %%rax\n");
+        if (rust_backend_emit_runtime_expr(out, p, ast, e->rhs, slots, slot_count, label_id) != 0) return 1;
+        fprintf(out, "    movl %%eax, %%ecx\n");
+        fprintf(out, "    popq %%rax\n");
+        if (e->op == RUST_TK_PLUS) fprintf(out, "    addl %%ecx, %%eax\n");
+        else if (e->op == RUST_TK_MINUS) fprintf(out, "    subl %%ecx, %%eax\n");
+        else if (e->op == RUST_TK_STAR) fprintf(out, "    imull %%ecx, %%eax\n");
+        else if (e->op == RUST_TK_SLASH) {
+            fprintf(out, "    cltd\n");
+            fprintf(out, "    idivl %%ecx\n");
+        } else if (e->op == RUST_TK_EQ || e->op == RUST_TK_NE || e->op == RUST_TK_LT || e->op == RUST_TK_LE || e->op == RUST_TK_GT || e->op == RUST_TK_GE) {
+            fprintf(out, "    cmpl %%ecx, %%eax\n");
+            if (e->op == RUST_TK_EQ) fprintf(out, "    sete %%al\n");
+            else if (e->op == RUST_TK_NE) fprintf(out, "    setne %%al\n");
+            else if (e->op == RUST_TK_LT) fprintf(out, "    setl %%al\n");
+            else if (e->op == RUST_TK_LE) fprintf(out, "    setle %%al\n");
+            else if (e->op == RUST_TK_GT) fprintf(out, "    setg %%al\n");
+            else fprintf(out, "    setge %%al\n");
+            fprintf(out, "    movzbl %%al, %%eax\n");
+        } else {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `runtime binary operator`", "this Rust construct is not supported by the current backend runtime bridge");
+            return 1;
+        }
+        return 0;
+    }
+    rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `runtime expression`", "this Rust construct is not supported by the current backend runtime bridge");
+    return 1;
+}
+
+static int rust_backend_emit_runtime_stmt_list(FILE *out, RustParser *p, const RustAst *ast, const RustStmt *st, RustBackendSlot *slots, int slot_count, int *label_id) {
+    while (st) {
+        if (st->kind == RUST_STMT_LET) {
+            int off;
+            if (!rust_backend_find_slot(slots, slot_count, st->symbol_id, &off, 0)) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `runtime let slot binding`", "this Rust construct is not supported by the current backend runtime bridge");
+                return 1;
+            }
+            if (rust_backend_emit_runtime_expr(out, p, ast, st->expr, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    movl %%eax, %d(%%rbp)\n", off);
+        } else if (st->kind == RUST_STMT_ASSIGN) {
+            int off;
+            if (st->symbol_id == RUST_SYMBOL_INVALID || !rust_ast_symbol_is_mut_local(ast, st->symbol_id)) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `runtime assignment target`", "assignment requires an existing mutable local");
+                return 1;
+            }
+            if (!rust_backend_find_slot(slots, slot_count, st->symbol_id, &off, 0)) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `runtime assignment slot binding`", "this Rust construct is not supported by the current backend runtime bridge");
+                return 1;
+            }
+            if (rust_backend_emit_runtime_expr(out, p, ast, st->expr, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    movl %%eax, %d(%%rbp)\n", off);
+        } else if (st->kind == RUST_STMT_RETURN) {
+            if (rust_backend_emit_runtime_expr(out, p, ast, st->expr, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    leave\n");
+            fprintf(out, "    ret\n");
+        } else if (st->kind == RUST_STMT_IF) {
+            int id = (*label_id)++;
+            if (rust_backend_emit_runtime_expr(out, p, ast, st->cond, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    cmpl $0, %%eax\n");
+            fprintf(out, "    je .Lrust_else_%d\n", id);
+            if (rust_backend_emit_runtime_stmt_list(out, p, ast, st->then_head, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    jmp .Lrust_end_if_%d\n", id);
+            fprintf(out, ".Lrust_else_%d:\n", id);
+            if (rust_backend_emit_runtime_stmt_list(out, p, ast, st->else_head, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, ".Lrust_end_if_%d:\n", id);
+        } else if (st->kind == RUST_STMT_WHILE) {
+            int id = (*label_id)++;
+            fprintf(out, ".Lrust_while_start_%d:\n", id);
+            if (rust_backend_emit_runtime_expr(out, p, ast, st->cond, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    cmpl $0, %%eax\n");
+            fprintf(out, "    je .Lrust_while_end_%d\n", id);
+            if (rust_backend_emit_runtime_stmt_list(out, p, ast, st->body_head, slots, slot_count, label_id) != 0) return 1;
+            fprintf(out, "    jmp .Lrust_while_start_%d\n", id);
+            fprintf(out, ".Lrust_while_end_%d:\n", id);
+        } else {
+            rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `runtime statement`", "this Rust construct is not supported by the current backend runtime bridge");
+            return 1;
+        }
+        st = st->next;
+    }
+    return 0;
+}
+
+static int rust_backend_emit_runtime_function(FILE *out, RustParser *p, const RustAst *ast, const RustFunction *fn, int *label_id) {
+    RustBackendSlot slots[256];
+    int slot_count = 0;
+    int next_off = -4;
+    int pi;
+    int stack_bytes;
+    char fn_label[64];
+    static const char *arg_regs[6] = {"%edi", "%esi", "%edx", "%ecx", "%r8d", "%r9d"};
+    if (!out || !p || !fn) return 1;
+    for (pi = 0; pi < fn->num_params; pi++) {
+        if (slot_count >= 256) {
+            rust_backend_add_diag(p, fn->name_line, fn->name_col, "backend runtime slot table overflow", "reduce parameter/local bindings for backend-v1 runtime codegen");
+            return 1;
+        }
+        slots[slot_count].symbol_id = fn->param_symbol_ids[pi];
+        slots[slot_count].offset = next_off;
+        slots[slot_count].kind = 1;
+        slot_count++;
+        next_off -= 4;
+    }
+    if (rust_backend_collect_runtime_slots_from_stmt_list(p, slots, &slot_count, &next_off, fn->body_head) != 0) return 1;
+    stack_bytes = slot_count * 4;
+    if (stack_bytes <= 0) stack_bytes = 16;
+    else {
+        int rem = stack_bytes % 16;
+        if (rem != 0) stack_bytes += 16 - rem;
+    }
+    rust_backend_runtime_function_label(fn_label, (int)sizeof(fn_label), fn);
+    fprintf(out, "%s:\n", fn_label);
+    fprintf(out, "    pushq %%rbp\n");
+    fprintf(out, "    movq %%rsp, %%rbp\n");
+    fprintf(out, "    subq $%d, %%rsp\n", stack_bytes);
+    for (pi = 0; pi < fn->num_params; pi++) {
+        if (pi < 6) {
+            fprintf(out, "    movl %s, %d(%%rbp)\n", arg_regs[pi], slots[pi].offset);
+        } else {
+            int incoming_off = 16 + 8 * (pi - 6);
+            fprintf(out, "    movl %d(%%rbp), %%eax\n", incoming_off);
+            fprintf(out, "    movl %%eax, %d(%%rbp)\n", slots[pi].offset);
+        }
+    }
+    if (rust_backend_emit_runtime_stmt_list(out, p, ast, fn->body_head, slots, slot_count, label_id) != 0) return 1;
+    fprintf(out, "    movl $0, %%eax\n");
+    fprintf(out, "    leave\n");
+    fprintf(out, "    ret\n");
+    return 0;
+}
+
+static int rust_backend_emit_runtime_program(FILE *out, RustParser *p, const RustAst *ast) {
+    const RustFunction *fn;
+    int label_id = 0;
+    if (!out || !p || !ast) return 1;
+    fprintf(out, ".text\n");
+    fprintf(out, ".globl main\n");
+    fn = ast->functions;
+    while (fn) {
+        if (rust_backend_emit_runtime_function(out, p, ast, fn, &label_id) != 0) return 1;
+        fn = fn->next;
+    }
+    return 0;
+}
+
+static int rust_backend_lookup_local(const RustBackendLocal *locals, int local_count, RustSymbolId symbol_id, long long *out_value) {
+    int i;
+    if (!locals || symbol_id == RUST_SYMBOL_INVALID || !out_value) return 0;
+    for (i = 0; i < local_count; i++) {
+        if (locals[i].symbol_id == symbol_id && locals[i].has_value) {
+            *out_value = locals[i].value;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int rust_backend_lookup_local_typed(const RustBackendLocal *locals, int local_count, RustSymbolId symbol_id, int expected_kind, long long *out_value) {
+    int i;
+    if (!locals || symbol_id == RUST_SYMBOL_INVALID || !out_value) return 0;
+    for (i = 0; i < local_count; i++) {
+        if (locals[i].symbol_id == symbol_id && locals[i].has_value && locals[i].kind == expected_kind) {
+            *out_value = locals[i].value;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int rust_backend_eval_const_i32_expr(RustParser *p, RustBackendEvalState *state, RustExpr *e, const RustBackendLocal *locals, int local_count, long long *out_value);
+static int rust_backend_eval_const_bool_expr(RustParser *p, RustBackendEvalState *state, RustExpr *e, const RustBackendLocal *locals, int local_count, int *out_value);
+static int rust_backend_eval_const_function_i32(
+    RustParser *p,
+    RustBackendEvalState *state,
+    RustSymbolId function_symbol_id,
+    const RustBackendLocal *args,
+    int arg_count,
+    int line,
+    int col,
+    long long *out_value
+);
+
+static const RustFunction *rust_backend_find_function_by_symbol_id(const RustBackendEvalState *state, RustSymbolId symbol_id) {
+    const RustFunction *fn;
+    if (!state || !state->ast || symbol_id == RUST_SYMBOL_INVALID) return 0;
+    fn = state->ast->functions;
+    while (fn) {
+        if (fn->symbol_id == symbol_id) return fn;
+        fn = fn->next;
+    }
+    return 0;
+}
+
+static int rust_backend_call_stack_contains(const RustBackendEvalState *state, RustSymbolId symbol_id) {
+    int i;
+    if (!state) return 0;
+    for (i = 0; i < state->call_stack_len; i++) {
+        if (state->call_stack[i] == symbol_id) return 1;
+    }
+    return 0;
+}
+
+static int rust_backend_eval_const_i32_expr(RustParser *p, RustBackendEvalState *state, RustExpr *e, const RustBackendLocal *locals, int local_count, long long *out_value) {
+    long long lhs, rhs;
+    if (!p || !e || !out_value) return 1;
+    if (e->kind == RUST_EXPR_NUM) {
+        *out_value = e->num;
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_IDENT) {
+        if (!rust_backend_lookup_local_typed(locals, local_count, e->symbol_id, 1, out_value)) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `identifier expression`", "this Rust construct is not supported by the current backend bridge");
+            return 1;
+        }
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_CALL) {
+        RustBackendLocal arg_locals[256];
+        int ai;
+        if (e->call_callee_symbol_id == RUST_SYMBOL_INVALID) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `unresolved call callee`", "resolver/typecheck contract broken before backend");
+            return 1;
+        }
+        if (e->call_arg_count > 256) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `too many call arguments`", "reduce argument count for backend-v1 constant calls");
+            return 1;
+        }
+        for (ai = 0; ai < e->call_arg_count; ai++) {
+            long long av = 0;
+            if (rust_backend_eval_const_i32_expr(p, state, e->call_args[ai], locals, local_count, &av) != 0) return 1;
+            arg_locals[ai].symbol_id = RUST_SYMBOL_INVALID;
+            arg_locals[ai].kind = 1;
+            arg_locals[ai].value = av;
+            arg_locals[ai].has_value = 1;
+        }
+        return rust_backend_eval_const_function_i32(
+            p, state, e->call_callee_symbol_id, arg_locals, e->call_arg_count, e->line, e->col, out_value
+        );
+    }
+    if (e->kind != RUST_EXPR_BINARY) {
+        rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `non-constant expression`", "this Rust construct is not supported by the current backend bridge");
+        return 1;
+    }
+    if (e->op != RUST_TK_PLUS && e->op != RUST_TK_MINUS && e->op != RUST_TK_STAR && e->op != RUST_TK_SLASH) {
+        rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `non-arithmetic constant expression`", "backend v1 supports only +, -, *, / in constant return expressions");
+        return 1;
+    }
+    if (rust_backend_eval_const_i32_expr(p, state, e->lhs, locals, local_count, &lhs) != 0) return 1;
+    if (rust_backend_eval_const_i32_expr(p, state, e->rhs, locals, local_count, &rhs) != 0) return 1;
+    if (e->op == RUST_TK_PLUS) *out_value = lhs + rhs;
+    else if (e->op == RUST_TK_MINUS) *out_value = lhs - rhs;
+    else if (e->op == RUST_TK_STAR) *out_value = lhs * rhs;
+    else {
+        if (rhs == 0) {
+            rust_backend_add_diag_code(p, "RUST-BACKEND-E0001", e->line, e->col, "division by zero in constant expression", "avoid dividing by zero in constant expressions");
+            return 1;
+        }
+        *out_value = lhs / rhs;
+    }
+    return 0;
+}
+
+static int rust_backend_eval_const_bool_expr(RustParser *p, RustBackendEvalState *state, RustExpr *e, const RustBackendLocal *locals, int local_count, int *out_value) {
+    long long lhs, rhs;
+    int lb, rb;
+    if (!p || !e || !out_value) return 1;
+    if (e->kind == RUST_EXPR_BOOL) {
+        *out_value = e->bool_val ? 1 : 0;
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_IDENT) {
+        if (!rust_backend_lookup_local_typed(locals, local_count, e->symbol_id, 2, &lhs)) {
+            rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `identifier bool expression`", "this Rust construct is not supported by the current backend bridge");
+            return 1;
+        }
+        *out_value = lhs ? 1 : 0;
+        return 0;
+    }
+    if (e->kind == RUST_EXPR_UNARY && e->op == RUST_TK_BANG) {
+        if (rust_backend_eval_const_bool_expr(p, state, e->lhs, locals, local_count, &lb) != 0) return 1;
+        *out_value = lb ? 0 : 1;
+        return 0;
+    }
+    if (e->kind != RUST_EXPR_BINARY) {
+        rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `non-constant bool expression`", "this Rust construct is not supported by the current backend bridge");
+        return 1;
+    }
+    if (e->op == RUST_TK_LAND || e->op == RUST_TK_LOR) {
+        if (rust_backend_eval_const_bool_expr(p, state, e->lhs, locals, local_count, &lb) != 0) return 1;
+        if (rust_backend_eval_const_bool_expr(p, state, e->rhs, locals, local_count, &rb) != 0) return 1;
+        *out_value = (e->op == RUST_TK_LAND) ? ((lb && rb) ? 1 : 0) : ((lb || rb) ? 1 : 0);
+        return 0;
+    }
+    if (e->op == RUST_TK_EQ || e->op == RUST_TK_NE || e->op == RUST_TK_LT || e->op == RUST_TK_LE || e->op == RUST_TK_GT || e->op == RUST_TK_GE) {
+        if (rust_backend_eval_const_i32_expr(p, state, e->lhs, locals, local_count, &lhs) != 0) return 1;
+        if (rust_backend_eval_const_i32_expr(p, state, e->rhs, locals, local_count, &rhs) != 0) return 1;
+        if (e->op == RUST_TK_EQ) *out_value = (lhs == rhs) ? 1 : 0;
+        else if (e->op == RUST_TK_NE) *out_value = (lhs != rhs) ? 1 : 0;
+        else if (e->op == RUST_TK_LT) *out_value = (lhs < rhs) ? 1 : 0;
+        else if (e->op == RUST_TK_LE) *out_value = (lhs <= rhs) ? 1 : 0;
+        else if (e->op == RUST_TK_GT) *out_value = (lhs > rhs) ? 1 : 0;
+        else *out_value = (lhs >= rhs) ? 1 : 0;
+        return 0;
+    }
+    rust_backend_add_diag(p, e->line, e->col, "unsupported Rust backend feature `bool binary operator`", "this Rust construct is not supported by the current backend bridge");
+    return 1;
+}
+
+static int rust_backend_eval_stmt_list(
+    RustParser *p,
+    RustBackendEvalState *state,
+    RustStmt *st,
+    RustBackendLocal *locals,
+    int *local_count,
+    long long *ret_value,
+    int *did_return
+) {
+    while (st) {
+        if (st->kind == RUST_STMT_LET) {
+            long long v = 0;
+            int b = 0;
+            int i;
+            int kind = 0;
+            if (!st->expr) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `let without initializer`", "backend v1 requires initialized local bindings");
+                return 1;
+            }
+            if (st->symbol_id == RUST_SYMBOL_INVALID) {
+                rust_backend_add_diag(p, st->line, st->col, "backend local symbol missing", "resolver/typecheck contract broken before backend");
+                return 1;
+            }
+            if (st->expr->kind == RUST_EXPR_BOOL ||
+                (st->expr->kind == RUST_EXPR_UNARY && st->expr->op == RUST_TK_BANG) ||
+                (st->expr->kind == RUST_EXPR_BINARY &&
+                 (st->expr->op == RUST_TK_EQ || st->expr->op == RUST_TK_NE ||
+                  st->expr->op == RUST_TK_LT || st->expr->op == RUST_TK_LE ||
+                  st->expr->op == RUST_TK_GT || st->expr->op == RUST_TK_GE ||
+                  st->expr->op == RUST_TK_LAND || st->expr->op == RUST_TK_LOR))) {
+                if (rust_backend_eval_const_bool_expr(p, state, st->expr, locals, *local_count, &b) != 0) return 1;
+                v = b ? 1 : 0;
+                kind = 2;
+            } else {
+                if (rust_backend_eval_const_i32_expr(p, state, st->expr, locals, *local_count, &v) != 0) return 1;
+                kind = 1;
+            }
+            for (i = 0; i < *local_count; i++) {
+                if (locals[i].symbol_id == st->symbol_id) {
+                    locals[i].value = v;
+                    locals[i].kind = kind;
+                    locals[i].has_value = 1;
+                    break;
+                }
+            }
+            if (i == *local_count) {
+                if (*local_count >= 256) {
+                    rust_backend_add_diag(p, st->line, st->col, "backend local table overflow", "reduce local bindings for backend v1");
+                    return 1;
+                }
+                locals[*local_count].symbol_id = st->symbol_id;
+                locals[*local_count].value = v;
+                locals[*local_count].kind = kind;
+                locals[*local_count].has_value = 1;
+                (*local_count)++;
+            }
+        } else if (st->kind == RUST_STMT_ASSIGN) {
+            int i;
+            int kind = 1;
+            long long v = 0;
+            int b = 0;
+            if (st->symbol_id == RUST_SYMBOL_INVALID || !rust_ast_symbol_is_mut_local(state->ast, st->symbol_id)) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `assignment statement`", "constant backend requires assignment to a resolved mutable local");
+                return 1;
+            }
+            if (st->expr->kind == RUST_EXPR_BOOL ||
+                (st->expr->kind == RUST_EXPR_UNARY && st->expr->op == RUST_TK_BANG) ||
+                (st->expr->kind == RUST_EXPR_BINARY &&
+                 (st->expr->op == RUST_TK_EQ || st->expr->op == RUST_TK_NE ||
+                  st->expr->op == RUST_TK_LT || st->expr->op == RUST_TK_LE ||
+                  st->expr->op == RUST_TK_GT || st->expr->op == RUST_TK_GE ||
+                  st->expr->op == RUST_TK_LAND || st->expr->op == RUST_TK_LOR))) {
+                if (rust_backend_eval_const_bool_expr(p, state, st->expr, locals, *local_count, &b) != 0) return 1;
+                v = b ? 1 : 0;
+                kind = 2;
+            } else {
+                if (rust_backend_eval_const_i32_expr(p, state, st->expr, locals, *local_count, &v) != 0) return 1;
+                kind = 1;
+            }
+            for (i = 0; i < *local_count; i++) {
+                if (locals[i].symbol_id == st->symbol_id) {
+                    locals[i].value = v;
+                    locals[i].kind = kind;
+                    locals[i].has_value = 1;
+                    break;
+                }
+            }
+            if (i == *local_count) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `assignment to unknown local`", "assignment target must already be bound");
+                return 1;
+            }
+        } else if (st->kind == RUST_STMT_RETURN) {
+            if (!st->expr) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `bare return`", "backend v1 requires `return <constant-i32-expression>;`");
+                return 1;
+            }
+            if (rust_backend_eval_const_i32_expr(p, state, st->expr, locals, *local_count, ret_value) != 0) return 1;
+            *did_return = 1;
+            if (st->next) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `statements after return`", "backend v1 requires return as final statement in reachable path");
+                return 1;
+            }
+            return 0;
+        } else if (st->kind == RUST_STMT_IF) {
+            int cond = 0;
+            if (rust_backend_eval_const_bool_expr(p, state, st->cond, locals, *local_count, &cond) != 0) return 1;
+            if (cond) {
+                if (rust_backend_eval_stmt_list(p, state, st->then_head, locals, local_count, ret_value, did_return) != 0) return 1;
+            } else {
+                if (rust_backend_eval_stmt_list(p, state, st->else_head, locals, local_count, ret_value, did_return) != 0) return 1;
+            }
+            if (!*did_return) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `if path without return`", "backend v1 requires a constant path that returns i32");
+                return 1;
+            }
+            if (st->next) {
+                rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `statements after resolved if-return`", "backend v1 requires return as final statement in reachable path");
+                return 1;
+            }
+            return 0;
+        } else if (st->kind == RUST_STMT_WHILE) {
+            rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `while statement`", "this Rust construct is not supported by the current backend bridge");
+            return 1;
+        } else if (st->kind == RUST_STMT_EXPR) {
+            rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `expression statement`", "this Rust construct is not supported by the current backend bridge");
+            return 1;
+        } else {
+            rust_backend_add_diag(p, st->line, st->col, "unsupported Rust backend feature `statement kind`", "this Rust construct is not supported by the current backend bridge");
+            return 1;
+        }
+        st = st->next;
+    }
+    return 0;
+}
+
+static int rust_backend_eval_const_function_i32(
+    RustParser *p,
+    RustBackendEvalState *state,
+    RustSymbolId function_symbol_id,
+    const RustBackendLocal *args,
+    int arg_count,
+    int line,
+    int col,
+    long long *out_value
+) {
+    const RustFunction *fn;
+    RustBackendLocal locals[256];
+    int local_count = 0;
+    int did_return = 0;
+    int saved_depth;
+    int pi;
+    if (!p || !state || !out_value) return 1;
+    if (rust_backend_call_stack_contains(state, function_symbol_id)) {
+        rust_backend_add_diag_code(p, "RUST-BACKEND-E0002", line, col, "recursive constant function call is not supported", "backend-v1 can only evaluate non-recursive constant function calls");
+        return 1;
+    }
+    fn = rust_backend_find_function_by_symbol_id(state, function_symbol_id);
+    if (!fn) {
+        rust_backend_add_diag(p, line, col, "unsupported Rust backend feature `missing called function`", "resolver/typecheck contract broken before backend");
+        return 1;
+    }
+    if (fn->num_params != arg_count) {
+        rust_backend_add_diag(p, line, col, "unsupported Rust backend feature `call arity mismatch in backend-v1`", "resolver/typecheck contract broken before backend");
+        return 1;
+    }
+    for (pi = 0; pi < fn->num_params; pi++) {
+        if (fn->param_symbol_ids[pi] == RUST_SYMBOL_INVALID) {
+            rust_backend_add_diag(p, line, col, "unsupported Rust backend feature `function parameter binding`", "resolver/typecheck contract broken before backend");
+            return 1;
+        }
+        if (!args || !args[pi].has_value || args[pi].kind != 1) {
+            rust_backend_add_diag(p, line, col, "unsupported Rust backend feature `non-constant call argument`", "backend-v1 currently binds only constant i32 call arguments");
+            return 1;
+        }
+        if (local_count >= 256) {
+            rust_backend_add_diag(p, line, col, "backend local table overflow", "reduce local/parameter bindings for backend v1");
+            return 1;
+        }
+        locals[local_count].symbol_id = fn->param_symbol_ids[pi];
+        locals[local_count].kind = 1;
+        locals[local_count].value = args[pi].value;
+        locals[local_count].has_value = 1;
+        local_count++;
+    }
+    if (state->call_stack_len >= 256) {
+        rust_backend_add_diag(p, line, col, "backend call stack overflow", "reduce backend-v1 constant call depth");
+        return 1;
+    }
+    saved_depth = state->call_stack_len;
+    state->call_stack[state->call_stack_len++] = function_symbol_id;
+    if (rust_backend_eval_stmt_list(p, state, fn->body_head, locals, &local_count, out_value, &did_return) != 0) {
+        state->call_stack_len = saved_depth;
+        return 1;
+    }
+    state->call_stack_len = saved_depth;
+    if (!did_return) {
+        rust_backend_add_diag(p, line, col, "unsupported Rust backend feature `called function without return`", "backend-v1 requires called functions to constant-evaluate to i32");
+        return 1;
+    }
+    return 0;
+}
+
+static int rust_backend_extract_const_main(RustParser *p, RustAst *ast, long long *ret_value) {
+    RustFunction *fn;
+    RustBackendLocal locals[256];
+    int local_count = 0;
+    int did_return = 0;
+    RustBackendEvalState state;
+    if (!p || !ast || !ret_value) return 1;
+    fn = ast->functions;
+    while (fn && strcmp(fn->name, "main") != 0) {
+        fn = fn->next;
+    }
+    if (!fn) {
+        rust_backend_add_diag(p, 1, 1, "unsupported Rust backend feature `missing main`", "backend v1 requires an entrypoint `fn main() -> i32`");
+        return 1;
+    }
+    if (fn->num_params != 0) {
+        rust_backend_add_diag(p, fn->name_line, fn->name_col, "unsupported Rust backend feature `main parameters`", "backend v1 requires `main` to take no parameters");
+        return 1;
+    }
+    if (!fn->body_head) {
+        rust_backend_add_diag(p, fn->name_line, fn->name_col, "unsupported Rust backend feature `empty main body`", "backend v1 requires let-bindings followed by a final return");
+        return 1;
+    }
+    memset(&state, 0, sizeof(state));
+    state.ast = ast;
+    state.call_stack_len = 0;
+    if (rust_backend_eval_stmt_list(p, &state, fn->body_head, locals, &local_count, ret_value, &did_return) != 0) {
+        return 1;
+    }
+    if (!did_return) {
+        rust_backend_add_diag(p, fn->name_line, fn->name_col, "unsupported Rust backend feature `missing return`", "backend v1 requires a final return");
+        return 1;
+    }
+    return 0;
+}
+
+int rust_backend_bridge_compile_file(const char *filename, const char *source, int source_len, const char *output_file, int compile_only, int strict_let_annotations, int strict_function_signatures, int rust_dump_phase) {
+    RustParser p;
+    RustAst *ast;
+    RustResolveContext rctx;
+    RustTypecheckContext tctx;
+    long long ret_value = 0;
+    FILE *out;
+    char asm_file[256];
+    char cmd[512];
+    int ret;
+    int al;
+    int stop_at_asm = 0;
+    const RustFunction *main_fn = 0;
+
+    memset(&p, 0, sizeof(p));
+    p.filename = filename;
+    p.src = source;
+    p.len = source_len;
+    p.line = 1;
+    p.col = 1;
+    ast = rust_parse_program_internal(&p);
+    if (p.num_diags > 0) {
+        rust_print_diags(filename, p.diags, p.num_diags);
+        return 1;
+    }
+    rust_phase_line(rust_dump_phase, "rust-parse");
+    memset(&rctx, 0, sizeof(rctx));
+    rctx.filename = filename;
+    rctx.ast = ast;
+    rctx.diags = p.diags;
+    rctx.num_diags = &p.num_diags;
+    rctx.max_diags = 256;
+    rust_phase_line(rust_dump_phase, "rust-resolve");
+    if (rust_resolve_names(&rctx) != 0) {
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(rctx.symbols);
+        return 1;
+    }
+    memset(&tctx, 0, sizeof(tctx));
+    tctx.filename = filename;
+    tctx.ast = ast;
+    tctx.diags = p.diags;
+    tctx.num_diags = &p.num_diags;
+    tctx.max_diags = 256;
+    tctx.symbols = rctx.symbols;
+    tctx.symbol_count = rctx.symbol_count;
+    tctx.symbol_types_len = rctx.symbol_count + 1;
+    tctx.symbol_types = (int *)calloc((size_t)tctx.symbol_types_len, sizeof(int));
+    tctx.strict_let_annotations = strict_let_annotations ? 1 : 0;
+    tctx.strict_function_signatures = strict_function_signatures ? 1 : 0;
+    if (!tctx.symbol_types) {
+        rust_backend_add_diag(&p, 0, 0, "backend bridge allocation failed", "try again with more memory");
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(rctx.symbols);
+        return 1;
+    }
+    rust_phase_line(rust_dump_phase, "rust-typecheck");
+    if (rust_typecheck(&tctx) != 0) {
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(tctx.symbol_types);
+        free(rctx.symbols);
+        return 1;
+    }
+    if (p.num_diags > 0) {
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(tctx.symbol_types);
+        free(rctx.symbols);
+        return 1;
+    }
+
+    strncpy(asm_file, output_file, 250);
+    al = 0;
+    while (asm_file[al]) al++;
+    if (al >= 2 && asm_file[al - 2] == '.' && asm_file[al - 1] == 's') {
+        stop_at_asm = 1;
+    } else {
+        asm_file[al] = '.';
+        asm_file[al + 1] = 's';
+        asm_file[al + 2] = 0;
+    }
+    out = fopen(asm_file, "w");
+    if (!out) {
+        rust_backend_add_diag(&p, 0, 0, "cannot write backend assembly output", "check output path permissions");
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(tctx.symbol_types);
+        free(rctx.symbols);
+        return 1;
+    }
+    rust_phase_line(rust_dump_phase, "rust-codegen");
+    main_fn = rust_backend_find_main_function(ast);
+    if (main_fn && rust_backend_runtime_program_supported(ast)) {
+        if (rust_backend_emit_runtime_program(out, &p, ast) != 0) {
+            fclose(out);
+            rust_print_diags(filename, p.diags, p.num_diags);
+            free(tctx.symbol_types);
+            free(rctx.symbols);
+            return 1;
+        }
+    } else {
+        if (rust_backend_extract_const_main(&p, ast, &ret_value) != 0) {
+            fclose(out);
+            rust_print_diags(filename, p.diags, p.num_diags);
+            free(tctx.symbol_types);
+            free(rctx.symbols);
+            return 1;
+        }
+        fprintf(out, ".text\n");
+        fprintf(out, ".globl main\n");
+        fprintf(out, "main:\n");
+        fprintf(out, "    movl $%lld, %%eax\n", ret_value);
+        fprintf(out, "    ret\n");
+    }
+    fclose(out);
+
+    if (!stop_at_asm) {
+        if (compile_only) {
+            sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -c -o %s %s 2>&1", output_file, asm_file);
+        } else {
+            sprintf(cmd, "gcc -O0 -w -fno-asynchronous-unwind-tables -Wa,--noexecstack -fno-unwind-tables -o %s %s -lm -lpthread -ldl 2>&1", output_file, asm_file);
+        }
+        ret = system(cmd);
+        if (ret != 0) {
+            rust_backend_add_diag(&p, 0, 0, "backend assembly/linking failed", "check toolchain and output permissions");
+            rust_print_diags(filename, p.diags, p.num_diags);
+            free(tctx.symbol_types);
+            free(rctx.symbols);
+            return 1;
+        }
+    }
+    free(tctx.symbol_types);
+    free(rctx.symbols);
+    return 0;
+}
 #ifndef ZCC_AST_BRIDGE_H
 /* Exclusively for standalone IDE analysis */
 #include "part1.c"
@@ -13559,472 +17506,6 @@ void ir_module_lower_x86(const ir_module_t *mod, FILE *out) {
 
         ra_free(ra);
     }
-}
-/*
- * ir_pass_manager.c — ZCC IR Pass Manager Implementation
- * ========================================================
- * Compiled by GCC only (linked separately, NOT concatenated into zcc.c).
- * Operates on ir_func_t* linked lists defined in ir.h.
- *
- * Production passes:
- *   DCE            — backward liveness scan, unlinks dead definitions
- *   Constant Fold  — evaluates binary ops on known constants
- *   Strength Reduce — mul-by-0 → const 0, add/sub-by-0 → copy
- *
- * Default pipeline: DCE → const_fold → strength_reduce → DCE
- */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "ir.h"
-
-/* ── Pass result type ────────────────────────────────────────────────── */
-
-typedef struct {
-    int nodes_before;
-    int nodes_after;
-    int nodes_deleted;
-    int nodes_modified;
-    int changed;
-} ir_pass_result_t;
-
-typedef ir_pass_result_t (*ir_pass_fn)(void *fn_ptr);
-
-#define IR_PM_MAX_PASSES 16
-
-typedef struct {
-    const char    *name;
-    ir_pass_fn     fn;
-    int            enabled;
-} ir_pass_entry_t;
-
-typedef struct {
-    ir_pass_entry_t passes[IR_PM_MAX_PASSES];
-    int             count;
-    int             verbose;
-} ir_pass_manager_t;
-
-/* ── Helpers ─────────────────────────────────────────────────────────── */
-
-static int count_nodes(ir_func_t *fn) {
-    int count = 0;
-    ir_node_t *n = fn->head;
-    while (n) {
-        count++;
-        n = n->next;
-    }
-    return count;
-}
-
-/* Check if an opcode is side-effectful (must not be DCE'd) */
-static int is_side_effect(ir_op_t op) {
-    switch (op) {
-    case IR_STORE:
-    case IR_CALL:
-    case IR_RET:
-    case IR_BR:
-    case IR_BR_IF:
-    case IR_LABEL:
-    case IR_ARG:
-        return 1;
-    default:
-        return 0;
-    }
-}
-
-/* Check if a node references 'name' as a source operand.
- * For IR_STORE, dst is actually a USE (the address), not a definition. */
-static int node_uses(ir_node_t *n, const char *name) {
-    if (name[0] == '\0') return 0;
-    if (n->src1[0] && strcmp(n->src1, name) == 0) return 1;
-    if (n->src2[0] && strcmp(n->src2, name) == 0) return 1;
-    /* IR_STORE uses dst as the address operand — it's a USE, not a DEF */
-    if (n->op == IR_STORE && n->dst[0] && strcmp(n->dst, name) == 0) return 1;
-    return 0;
-}
-
-/* ════════════════════════════════════════════════════════════════════════
- * PASS 1: Dead Code Elimination (DCE)
- * ════════════════════════════════════════════════════════════════════════
- * Scan the node list.  A node is dead if:
- *   1) It defines a temp (dst[0] != '\0')
- *   2) It is NOT side-effectful (not store/call/ret/br/br_if/label/arg)
- *   3) It is NOT IR_STORE (where dst is a use, not a definition)
- *   4) No subsequent node references dst in src1, src2, or store-dst
- *
- * Complexity: O(N²) per function. With ~300 nodes/function average,
- * this is ~90K comparisons/function — negligible.
- */
-static ir_pass_result_t ir_pass_dce(void *fn_ptr) {
-    ir_func_t *fn = (ir_func_t *)fn_ptr;
-    ir_pass_result_t r;
-    ir_node_t *prev;
-    ir_node_t *n;
-    ir_node_t *scan;
-    ir_node_t *next;
-    int deleted = 0;
-
-    memset(&r, 0, sizeof(r));
-    r.nodes_before = count_nodes(fn);
-
-    prev = NULL;
-    n = fn->head;
-    while (n) {
-        next = n->next;
-
-        /* Does this node define a temp that could be dead? */
-        if (n->dst[0] != '\0'
-            && !is_side_effect(n->op)
-            && n->op != IR_STORE) {
-
-            /* Check if ANY subsequent node uses this temp */
-            int used = 0;
-            for (scan = next; scan; scan = scan->next) {
-                if (node_uses(scan, n->dst)) {
-                    used = 1;
-                    break;
-                }
-            }
-
-            if (!used) {
-                /* Dead node — unlink from list */
-                if (prev) {
-                    prev->next = next;
-                } else {
-                    fn->head = next;
-                }
-                if (n == fn->tail) {
-                    fn->tail = prev;
-                }
-                free(n);
-                fn->node_count--;
-                deleted++;
-                /* Don't advance prev; it still points to the right place */
-                n = next;
-                continue;
-            }
-        }
-
-        prev = n;
-        n = next;
-    }
-
-    r.nodes_after = r.nodes_before - deleted;
-    r.nodes_deleted = deleted;
-    r.changed = deleted > 0;
-    return r;
-}
-
-/* ════════════════════════════════════════════════════════════════════════
- * PASS 2: Constant Folding
- * ════════════════════════════════════════════════════════════════════════
- * Scan forward.  Track temps defined by IR_CONST.  When a binary op
- * has both src1 and src2 as known constants, evaluate at compile time
- * and replace the node with IR_CONST.
- */
-
-#define CONST_MAP_MAX 2048
-
-typedef struct {
-    char name[32];  /* IR_NAME_MAX */
-    long value;
-} const_map_entry_t;
-
-static const_map_entry_t s_cmap[CONST_MAP_MAX];
-static int s_cmap_count;
-
-static void cmap_clear(void) {
-    s_cmap_count = 0;
-}
-
-static void cmap_add(const char *name, long value) {
-    int i;
-    /* Update if exists */
-    for (i = 0; i < s_cmap_count; i++) {
-        if (strcmp(s_cmap[i].name, name) == 0) {
-            s_cmap[i].value = value;
-            return;
-        }
-    }
-    /* Add new */
-    if (s_cmap_count >= CONST_MAP_MAX) return;
-    strncpy(s_cmap[s_cmap_count].name, name, 31);
-    s_cmap[s_cmap_count].name[31] = '\0';
-    s_cmap[s_cmap_count].value = value;
-    s_cmap_count++;
-}
-
-static int cmap_get(const char *name, long *value) {
-    int i;
-    if (name[0] == '\0') return 0;
-    for (i = 0; i < s_cmap_count; i++) {
-        if (strcmp(s_cmap[i].name, name) == 0) {
-            *value = s_cmap[i].value;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static ir_pass_result_t ir_pass_const_fold(void *fn_ptr) {
-    ir_func_t *fn = (ir_func_t *)fn_ptr;
-    ir_pass_result_t r;
-    ir_node_t *n;
-    int modified = 0;
-
-    memset(&r, 0, sizeof(r));
-    r.nodes_before = count_nodes(fn);
-
-    cmap_clear();
-
-    for (n = fn->head; n; n = n->next) {
-        /* Track constants */
-        if (n->op == IR_CONST && n->dst[0]) {
-            cmap_add(n->dst, n->imm);
-            continue;
-        }
-
-        /* Check binary ops with two known constant operands */
-        if (n->src1[0] && n->src2[0]) {
-            long v1, v2, result;
-
-            if (!cmap_get(n->src1, &v1)) continue;
-            if (!cmap_get(n->src2, &v2)) continue;
-
-            switch (n->op) {
-            case IR_ADD: result = v1 + v2; break;
-            case IR_SUB: result = v1 - v2; break;
-            case IR_MUL: result = v1 * v2; break;
-            case IR_DIV: if (v2 == 0) continue; result = v1 / v2; break;
-            case IR_MOD: if (v2 == 0) continue; result = v1 % v2; break;
-            case IR_AND: result = v1 & v2; break;
-            case IR_OR:  result = v1 | v2; break;
-            case IR_XOR: result = v1 ^ v2; break;
-            case IR_SHL: result = v1 << v2; break;
-            case IR_SHR: result = v1 >> v2; break;
-            case IR_EQ:  result = (v1 == v2) ? 1 : 0; break;
-            case IR_NE:  result = (v1 != v2) ? 1 : 0; break;
-            case IR_LT:  result = (v1 < v2)  ? 1 : 0; break;
-            case IR_LE:  result = (v1 <= v2) ? 1 : 0; break;
-            case IR_GT:  result = (v1 > v2)  ? 1 : 0; break;
-            case IR_GE:  result = (v1 >= v2) ? 1 : 0; break;
-            default: continue;
-            }
-
-            /* Replace with IR_CONST */
-            n->op = IR_CONST;
-            n->imm = result;
-            n->src1[0] = '\0';
-            n->src2[0] = '\0';
-
-            /* Track the new constant */
-            cmap_add(n->dst, result);
-
-            modified++;
-        }
-    }
-
-    r.nodes_after = r.nodes_before; /* const fold mutates, doesn't delete */
-    r.nodes_modified = modified;
-    r.changed = modified > 0;
-    return r;
-}
-
-/* ════════════════════════════════════════════════════════════════════════
- * PASS 3: Strength Reduction
- * ════════════════════════════════════════════════════════════════════════
- * Pattern-match on operations with one known constant operand:
- *   MUL dst, src, 0  → CONST dst, 0
- *   MUL dst, 0, src  → CONST dst, 0
- *   ADD dst, src, 0  → COPY  dst, src
- *   ADD dst, 0, src  → COPY  dst, src
- *   SUB dst, src, 0  → COPY  dst, src
- *
- * Phase 3 will add: MUL 2^N → SHL N, DIV 2^N → SHR N (unsigned)
- */
-static ir_pass_result_t ir_pass_strength_reduce(void *fn_ptr) {
-    ir_func_t *fn = (ir_func_t *)fn_ptr;
-    ir_pass_result_t r;
-    ir_node_t *n;
-    int modified = 0;
-
-    memset(&r, 0, sizeof(r));
-    r.nodes_before = count_nodes(fn);
-
-    /* Collect constants */
-    cmap_clear();
-    for (n = fn->head; n; n = n->next) {
-        if (n->op == IR_CONST && n->dst[0]) {
-            cmap_add(n->dst, n->imm);
-        }
-    }
-
-    /* Apply strength reductions */
-    for (n = fn->head; n; n = n->next) {
-        long val;
-
-        if (n->op == IR_MUL) {
-            /* MUL by 0 (either operand) → CONST 0 */
-            if (cmap_get(n->src2, &val) && val == 0) {
-                n->op = IR_CONST;
-                n->imm = 0;
-                n->src1[0] = '\0';
-                n->src2[0] = '\0';
-                cmap_add(n->dst, 0);
-                modified++;
-                continue;
-            }
-            if (cmap_get(n->src1, &val) && val == 0) {
-                n->op = IR_CONST;
-                n->imm = 0;
-                n->src1[0] = '\0';
-                n->src2[0] = '\0';
-                cmap_add(n->dst, 0);
-                modified++;
-                continue;
-            }
-            /* MUL by 1 → COPY */
-            if (cmap_get(n->src2, &val) && val == 1) {
-                n->op = IR_COPY;
-                /* src1 stays, src2 cleared */
-                n->src2[0] = '\0';
-                modified++;
-                continue;
-            }
-            if (cmap_get(n->src1, &val) && val == 1) {
-                n->op = IR_COPY;
-                /* swap src2 into src1 position */
-                strncpy(n->src1, n->src2, 31);
-                n->src1[31] = '\0';
-                n->src2[0] = '\0';
-                modified++;
-                continue;
-            }
-        }
-
-        if (n->op == IR_ADD) {
-            /* ADD src, 0 → COPY src */
-            if (cmap_get(n->src2, &val) && val == 0) {
-                n->op = IR_COPY;
-                n->src2[0] = '\0';
-                modified++;
-                continue;
-            }
-            if (cmap_get(n->src1, &val) && val == 0) {
-                n->op = IR_COPY;
-                strncpy(n->src1, n->src2, 31);
-                n->src1[31] = '\0';
-                n->src2[0] = '\0';
-                modified++;
-                continue;
-            }
-        }
-
-        if (n->op == IR_SUB) {
-            /* SUB src, 0 → COPY src */
-            if (cmap_get(n->src2, &val) && val == 0) {
-                n->op = IR_COPY;
-                n->src2[0] = '\0';
-                modified++;
-                continue;
-            }
-        }
-    }
-
-    r.nodes_after = r.nodes_before; /* strength reduce mutates, doesn't delete */
-    r.nodes_modified = modified;
-    r.changed = modified > 0;
-    return r;
-}
-
-/* ── Registry API ────────────────────────────────────────────────────── */
-
-static ir_pass_manager_t *ir_pm_create(void) {
-    ir_pass_manager_t *pm = (ir_pass_manager_t *)calloc(1, sizeof(ir_pass_manager_t));
-    if (!pm) {
-        fprintf(stderr, "ir_pm_create: out of memory\n");
-        exit(1);
-    }
-    return pm;
-}
-
-static void ir_pm_register(ir_pass_manager_t *pm, const char *name, ir_pass_fn fn) {
-    if (pm->count >= IR_PM_MAX_PASSES) {
-        fprintf(stderr, "ir_pm_register: too many passes (max %d)\n", IR_PM_MAX_PASSES);
-        return;
-    }
-    pm->passes[pm->count].name = name;
-    pm->passes[pm->count].fn = fn;
-    pm->passes[pm->count].enabled = 1;
-    pm->count++;
-}
-
-static void ir_pm_run(ir_pass_manager_t *pm, ir_module_t *mod) {
-    int p;
-    int f;
-    int total_nodes_in = 0;
-    int total_nodes_out = 0;
-    int total_deleted = 0;
-    int total_modified = 0;
-
-    for (p = 0; p < pm->count; p++) {
-        int pass_before = 0;
-        int pass_after = 0;
-        int pass_deleted = 0;
-        int pass_modified = 0;
-
-        if (!pm->passes[p].enabled) continue;
-
-        for (f = 0; f < mod->func_count; f++) {
-            ir_pass_result_t r = pm->passes[p].fn(mod->funcs[f]);
-            pass_before += r.nodes_before;
-            pass_after += r.nodes_after;
-            pass_deleted += r.nodes_deleted;
-            pass_modified += r.nodes_modified;
-        }
-
-        if (pm->verbose) {
-            fprintf(stderr, "  [IR Pass] %-18s: %d funcs, %d nodes -> %d nodes (%d deleted, %d modified)\n",
-                    pm->passes[p].name, mod->func_count, pass_before, pass_after,
-                    pass_deleted, pass_modified);
-        }
-
-        if (p == 0) total_nodes_in = pass_before;
-        total_nodes_out = pass_after;
-        total_deleted += pass_deleted;
-        total_modified += pass_modified;
-    }
-
-    if (pm->verbose && pm->count > 0) {
-        fprintf(stderr, "  [IR Pass] Pipeline complete: %d nodes -> %d nodes (total: %d deleted, %d modified)\n",
-                total_nodes_in, total_nodes_out, total_deleted, total_modified);
-    }
-}
-
-static void ir_pm_free(ir_pass_manager_t *pm) {
-    if (pm) free(pm);
-}
-
-/* ── Primary entry point (called from part5.c) ──────────────────────── */
-
-void ir_pm_run_default(void *mod_ptr, int verbose) {
-    ir_module_t *mod = (ir_module_t *)mod_ptr;
-    ir_pass_manager_t *pm;
-
-    if (!mod || mod->func_count == 0) return;
-
-    pm = ir_pm_create();
-    pm->verbose = verbose;
-
-    /* Default pipeline: DCE → const_fold → strength_reduce → DCE */
-    ir_pm_register(pm, "dce", ir_pass_dce);
-    ir_pm_register(pm, "const_fold", ir_pass_const_fold);
-    ir_pm_register(pm, "strength_reduce", ir_pass_strength_reduce);
-    ir_pm_register(pm, "dce2", ir_pass_dce);
-
-    ir_pm_run(pm, mod);
-    ir_pm_free(pm);
 }
 /*
  * regalloc.c — Linear Scan Register Allocator for ZCC IR Backend

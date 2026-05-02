@@ -1,0 +1,3 @@
+error[RUST-UNS-E0413]: unsupported Rust item: const/static/type/alias/union/extern
+  --> tests/rust/unsupported-const.rs:1:1
+  hint: only function items (`fn`) are supported at the top level today

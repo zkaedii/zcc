@@ -1,0 +1,3 @@
+error[RUST-UNS-E0401]: unsupported Rust feature: struct definitions
+  --> tests/rust/unsupported-struct.rs:1:1
+  hint: this frontend accepts only top-level `fn` items; see docs/rust_frontend_plan.md (P2)

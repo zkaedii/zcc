@@ -1,0 +1,3 @@
+error[RUST-UNS-E0404]: unsupported Rust feature: generic type parameters (`fn name<...>(...)`)
+  --> tests/rust/unsupported-generics.rs:1:6
+  hint: monomorphic functions only; remove `<...>` type parameter lists

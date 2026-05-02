@@ -1,0 +1,2494 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SVG42 · Phase 4 — Hamiltonian Flow + PRIME Recurrence</title>
+<meta name="theme-color" content="#0a061a">
+<meta name="color-scheme" content="dark">
+<style>
+:root {
+  --bg: #0a061a;
+  --panel: rgba(28, 16, 56, 0.78);
+  --panel-2: rgba(46, 24, 86, 0.70);
+  --ink: #e6fffb;
+  --muted: #c4b5fd;
+  --neon-mint: #5eead4;
+  --neon-cyan: #22d3ee;
+  --neon-pink: #f472b6;
+  --neon-magenta: #d946ef;
+  --neon-amber: #fbbf24;
+  --line: #4c2890;
+  color-scheme: dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden}
+body{
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  color: var(--ink);
+  background:
+    radial-gradient(ellipse 70% 38% at 50% 78%, rgba(244,114,182,0.22), transparent 60%),
+    radial-gradient(ellipse 60% 60% at 100% -10%, rgba(94,234,212,0.18), transparent 65%),
+    radial-gradient(ellipse 50% 60% at 0% 0%, rgba(217,70,239,0.10), transparent 65%),
+    linear-gradient(180deg, #0a061a 0%, #120732 55%, #1a0a3d 100%);
+  background-attachment: fixed;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: auto 0 0 0;
+  height: 38vh;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, transparent, rgba(244,114,182,0.18) 100%),
+    repeating-linear-gradient(0deg, transparent 0 24px, rgba(244,114,182,0.10) 24px 25px),
+    repeating-linear-gradient(90deg, transparent 0 24px, rgba(94,234,212,0.16) 24px 25px);
+  transform: perspective(420px) rotateX(58deg);
+  transform-origin: 50% 100%;
+  mask-image: linear-gradient(180deg, transparent 0%, black 30%, black 100%);
+  -webkit-mask-image: linear-gradient(180deg, transparent 0%, black 30%, black 100%);
+  z-index: 0;
+  opacity: 0.55;
+}
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, transparent 0 2px, rgba(255,255,255,0.018) 2px 3px);
+  mix-blend-mode: screen;
+  z-index: 1;
+}
+
+.app {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "head head"
+    "side stage"
+    "side strip";
+  height: 100vh;
+  gap: 8px;
+  padding: 8px;
+}
+
+header {
+  grid-area: head;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(20,10,40,0.55), rgba(10,6,26,0.0));
+  border-left: 2px solid var(--neon-mint);
+  box-shadow: -3px 0 10px -3px var(--neon-mint);
+}
+header h1 {
+  margin: 0;
+  font-family: "Orbitron", "Bahnschrift", Impact, sans-serif;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  font-size: 0.95rem;
+  background: linear-gradient(90deg, var(--neon-mint), var(--neon-cyan) 30%, var(--neon-magenta) 60%, var(--neon-pink) 100%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 0 6px rgba(94,234,212,0.45));
+  animation: shimmer 9s linear infinite;
+}
+@keyframes shimmer {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 220% 50%; }
+}
+header .tag {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+header .tag::before { content: "// "; color: var(--muted); opacity: 0.7; }
+header .right { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+
+/* Conservation-quality LED. data-state ∈ {off, ok, warn, bad}. */
+.led {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: rgba(8, 6, 22, 0.5);
+  user-select: none;
+  cursor: help;
+  white-space: nowrap;
+}
+.led .led-label { letter-spacing: 0.16em; }
+.led[data-state="off"]  { color: var(--muted); }
+.led[data-state="off"]::first-letter { color: #475569; }
+.led[data-state="ok"]   { color: #5eead4; border-color: rgba(94,234,212,0.45); text-shadow: 0 0 6px rgba(94,234,212,0.45); }
+.led[data-state="warn"] { color: #fbbf24; border-color: rgba(251,191,36,0.45); text-shadow: 0 0 6px rgba(251,191,36,0.45); }
+.led[data-state="bad"]  { color: #f87171; border-color: rgba(248,113,113,0.55); text-shadow: 0 0 8px rgba(248,113,113,0.55); animation: ledPulse 1.2s ease-in-out infinite; }
+@keyframes ledPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
+@media (prefers-reduced-motion: reduce) { .led[data-state="bad"] { animation: none; } }
+
+aside {
+  grid-area: side;
+  background: linear-gradient(165deg, rgba(28,16,56,0.85), rgba(40,18,86,0.75));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+  overflow-y: auto;
+  box-shadow:
+    0 0 0 1px rgba(94,234,212,0.10) inset,
+    0 0 24px rgba(94,234,212,0.06);
+  backdrop-filter: blur(6px);
+}
+aside h2 {
+  margin: 0 0 6px;
+  font-family: "Orbitron", "Bahnschrift", Impact, sans-serif;
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  color: var(--neon-mint);
+  text-shadow: 0 0 4px rgba(94,234,212,0.35);
+}
+aside section { margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px dashed rgba(76,40,144,0.55); }
+aside section:last-child { border-bottom: 0; }
+
+.stage-wrap {
+  grid-area: stage;
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background:
+    radial-gradient(ellipse at 50% 100%, rgba(244,114,182,0.10), transparent 65%),
+    linear-gradient(180deg, #0a061a, #1a0a3d);
+  box-shadow:
+    0 0 24px rgba(94,234,212,0.10) inset,
+    0 0 0 1px rgba(244,114,182,0.20) inset;
+  isolation: isolate;
+  animation: stageEnchant 12s ease-in-out infinite;
+}
+@keyframes stageEnchant {
+  0%, 100% { box-shadow: 0 0 24px rgba(94,234,212,0.1) inset, 0 0 0 1px rgba(244,114,182,0.2) inset; }
+  50%      { box-shadow: 0 0 40px rgba(34,211,238,0.12) inset, 0 0 0 1px rgba(94,234,212,0.25) inset; }
+}
+@media (prefers-reduced-motion: reduce) { .stage-wrap { animation: none; } }
+.stage-wrap::before, .stage-wrap::after {
+  content: "";
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  pointer-events: none;
+  z-index: 5;
+  border: 2px solid var(--neon-mint);
+  filter: drop-shadow(0 0 6px rgba(94,234,212,0.55));
+}
+.stage-wrap::before { top: 6px; left: 6px; border-right: none; border-bottom: none; border-top-left-radius: 6px; }
+.stage-wrap::after { bottom: 6px; right: 6px; border-left: none; border-top: none; border-bottom-right-radius: 6px; border-color: var(--neon-pink); filter: drop-shadow(0 0 6px rgba(244,114,182,0.55)); }
+.stage-wrap.alarm { animation: alarm 0.6s ease-out 1; }
+@keyframes alarm {
+  0%   { box-shadow: 0 0 0 1px var(--neon-magenta) inset, 0 0 24px rgba(217,70,239,0.0) inset; }
+  40%  { box-shadow: 0 0 0 2px var(--neon-magenta) inset, 0 0 80px rgba(217,70,239,0.65) inset; }
+  100% { box-shadow: 0 0 24px rgba(94,234,212,0.10) inset, 0 0 0 1px rgba(244,114,182,0.20) inset; }
+}
+canvas { display: block; width: 100%; height: 100%; }
+#hud {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  z-index: 4;
+  font-size: 0.66rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--neon-mint);
+  text-shadow: 0 0 6px rgba(94,234,212,0.45);
+  pointer-events: none;
+  background: rgba(10,6,26,0.40);
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(94,234,212,0.30);
+}
+#hud b { color: var(--neon-pink); font-weight: 700; text-shadow: 0 0 6px rgba(244,114,182,0.4); }
+#log {
+  grid-area: strip;
+  display: grid;
+  /* energy : lyap : phase : bifurcation log
+     The phase portrait is fixed-square so it stays a true (q_x, p_x) plot. */
+  grid-template-columns: 1fr 220px 130px 220px;
+  gap: 8px;
+  padding: 0;
+  height: 130px;
+}
+@media (max-width: 1100px) {
+  #log { grid-template-columns: 1fr 1fr 1fr 1fr; }
+}
+/* On narrow widths, hide the phase card rather than crush the others. */
+@media (max-width: 760px) {
+  #log { grid-template-columns: 1fr 1fr 1fr; }
+  #phaseCard { display: none; }
+}
+.strip-card {
+  background: linear-gradient(165deg, rgba(28,16,56,0.85), rgba(40,18,86,0.70));
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  box-shadow: 0 0 0 1px rgba(94,234,212,0.10) inset;
+  overflow: hidden;
+  position: relative;
+  animation: stripCardBreath 22s ease-in-out infinite;
+}
+@keyframes stripCardBreath {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(94,234,212,0.1) inset; }
+  50%      { box-shadow: 0 0 0 1px rgba(94,234,212,0.2) inset, 0 0 18px rgba(244,114,182,0.07) inset; }
+}
+.strip-card h3 {
+  margin: 0 0 4px;
+  font-family: "Orbitron", "Bahnschrift", sans-serif;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-size: 0.62rem;
+  color: var(--muted);
+}
+#energyPlot, #lyapPlot, #phasePlot { width: 100%; height: 88px; display: block; }
+#phasePlot {
+  background: radial-gradient(ellipse at center, rgba(94,234,212,0.06), rgba(8,6,22,0.0) 70%);
+  border-radius: 6px;
+}
+#phaseCard[data-mode="A"] { opacity: 0.45; filter: grayscale(0.4); }
+#phaseCard[data-mode="A"] h3::after {
+  content: " · idle (mode A)";
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0.08em;
+  margin-left: 4px;
+  font-size: 0.62rem;
+}
+#bifurcationLog {
+  font-size: 0.66rem;
+  height: 88px;
+  overflow-y: auto;
+  color: var(--muted);
+  line-height: 1.45;
+}
+#bifurcationLog .ev-warn { color: var(--neon-amber); }
+#bifurcationLog .ev-crit { color: var(--neon-pink); text-shadow: 0 0 6px rgba(244,114,182,0.4); }
+#bifurcationLog .ev-info { color: var(--neon-cyan); }
+
+label.field {
+  display: grid;
+  grid-template-columns: 60px 1fr 56px;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+label.field b { color: var(--ink); font-weight: 600; letter-spacing: 0.05em; }
+label.field input[type="range"] { width: 100%; accent-color: var(--neon-mint); }
+label.field .val {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  text-align: right;
+  color: var(--neon-cyan);
+  text-shadow: 0 0 4px rgba(34,211,238,0.4);
+  font-size: 0.72rem;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  padding: 6px 10px;
+  background: linear-gradient(180deg, rgba(46,24,86,0.85), rgba(28,16,56,0.85));
+  border: 1px solid var(--line);
+  color: var(--neon-mint);
+  border-radius: 6px;
+  letter-spacing: 0.06em;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  transition: transform 80ms, box-shadow 120ms, color 120ms, border-color 120ms;
+}
+button:hover {
+  color: #fff;
+  border-color: var(--neon-pink);
+  box-shadow: 0 0 0 1px var(--neon-pink), 0 0 14px rgba(244,114,182,0.35);
+  transform: translateY(-1px);
+}
+button:active { transform: translateY(0); }
+button.toggle.on {
+  color: #0a061a;
+  background: linear-gradient(135deg, var(--neon-mint), var(--neon-cyan));
+  border-color: var(--neon-mint);
+  box-shadow: 0 0 14px rgba(94,234,212,0.55);
+}
+button.danger { color: var(--neon-pink); border-color: rgba(244,114,182,0.45); }
+button.row { width: 100%; text-align: left; padding: 4px 8px; margin: 2px 0; font-size: 0.70rem; }
+button.row .name { color: var(--ink); }
+button.row .desc { color: var(--muted); margin-left: 8px; font-size: 0.66rem; }
+
+.btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.brand-stamp {
+  position: fixed;
+  right: 12px;
+  bottom: 6px;
+  z-index: 3;
+  font-family: "Orbitron", "Bahnschrift", Impact, sans-serif;
+  font-size: 0.58rem;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--neon-mint);
+  text-shadow: 0 0 6px rgba(94,234,212,0.45);
+  opacity: 0.7;
+  pointer-events: none;
+}
+.brand-stamp b { color: var(--neon-pink); font-weight: 700; }
+.brand-stamp { animation: stampGlimmer 10s ease-in-out infinite; }
+@keyframes stampGlimmer {
+  0%, 100% { text-shadow: 0 0 4px rgba(94,234,212,0.3); filter: brightness(1); }
+  50%      { text-shadow: 0 0 12px rgba(244,114,182,0.45), 0 0 4px rgba(34,211,238,0.4); filter: brightness(1.05); }
+}
+/* Ethereal stage mist — static-friendly, pointer-events none */
+.p4-aurora {
+  position: fixed; inset: 0; pointer-events: none; z-index: 1;
+  background:
+    radial-gradient(ellipse 100% 80% at 50% 100%, rgba(94,234,212,0.09) 0%, transparent 55%),
+    radial-gradient(ellipse 60% 50% at 10% 20%, rgba(217,70,239,0.07) 0%, transparent 50%),
+    radial-gradient(ellipse 50% 40% at 90% 30%, rgba(244,114,182,0.06) 0%, transparent 45%);
+  mix-blend-mode: screen;
+  animation: auroraFloat 32s ease-in-out infinite;
+}
+@keyframes auroraFloat {
+  0%, 100% { transform: translate(0,0) scale(1); opacity: 0.75; }
+  50%      { transform: translate(0.8%,-0.4%) scale(1.03); opacity: 1; }
+}
+header { transition: box-shadow 0.5s ease, border-color 0.4s ease; }
+header:hover {
+  box-shadow: 0 0 20px rgba(94,234,212,0.12);
+  border-left-color: var(--neon-cyan);
+}
+.p4-vignette {
+  position: fixed; inset: 0; pointer-events: none; z-index: 1;
+  background: radial-gradient(ellipse 75% 70% at 50% 45%, rgba(0,0,0,0) 30%, rgba(0,0,0,0.5) 100%);
+  mix-blend-mode: multiply;
+}
+@media (prefers-reduced-motion: reduce) {
+  .p4-aurora, .brand-stamp, .strip-card { animation: none !important; }
+  header { transition: none; }
+}
+
+.kbd {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0,0,0,0.30);
+  border: 1px solid var(--line);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: 0.62rem;
+  color: var(--ink);
+  margin: 0 2px;
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.70rem;
+  color: var(--muted);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  padding: 2px 0;
+}
+.metric-row b { color: var(--neon-cyan); font-weight: 500; text-shadow: 0 0 4px rgba(34,211,238,0.35); }
+.metric-row .pos { color: var(--neon-mint); }
+.metric-row .neg { color: var(--neon-pink); }
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: rgba(10,6,26,0.60); border-radius: 6px; }
+::-webkit-scrollbar-thumb { background: linear-gradient(180deg, var(--neon-mint), var(--neon-pink)); border-radius: 6px; border: 1px solid rgba(10,6,26,0.60); }
+::-webkit-scrollbar-thumb:hover { background: linear-gradient(180deg, #a7f3d0, #f9a8d4); }
+
+@media (max-width: 920px) {
+  .app { grid-template-columns: 1fr; grid-template-areas: "head" "stage" "side" "strip"; }
+  aside { max-height: 40vh; }
+  #log { grid-template-columns: 1fr; height: auto; }
+}
+/* Inline SVG sprite sheet: header mark + optional <use> icons */
+.svg42-sprite-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+header .svg42-brand {
+  flex-shrink: 0; display: flex; align-items: center; margin-right: 2px;
+}
+header .svg42-brand svg { width: 34px; height: 34px; display: block; }
+.brand-stamp .bs-ico { vertical-align: -2px; margin-right: 4px; opacity: 0.92; }
+@media (forced-colors: active) {
+  body { background: Canvas !important; color: CanvasText !important; }
+  body::before, body::after { content: none !important; }
+  .p4-aurora, .p4-vignette { display: none !important; }
+  .app { filter: none; }
+  header {
+    background: Canvas !important;
+    color: CanvasText !important;
+    border: 1px solid CanvasText !important;
+    box-shadow: none !important;
+  }
+  header h1 {
+    background: none !important;
+    -webkit-text-fill-color: CanvasText !important;
+    color: CanvasText !important;
+    filter: none !important;
+    animation: none !important;
+  }
+  aside, .strip-card, .stage-wrap, #log {
+    background: Canvas !important;
+    color: CanvasText !important;
+    border: 1px solid CanvasText !important;
+    box-shadow: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+  .stage-wrap, .strip-card, aside { animation: none !important; }
+  .stage-wrap::before, .stage-wrap::after { border-color: CanvasText !important; filter: none; }
+  #hud, #energyPlot, #lyapPlot, #phasePlot, #bifurcationLog { color: CanvasText !important; }
+  button, input, select, .kbd {
+    background: Canvas !important;
+    color: CanvasText !important;
+    border: 1px solid CanvasText !important;
+    box-shadow: none !important;
+  }
+  .led { border: 1px solid CanvasText !important; }
+  .brand-stamp { text-shadow: none; filter: none; }
+}
+</style>
+</head>
+<body>
+<div class="p4-aurora" aria-hidden="true"></div>
+<div class="p4-vignette" aria-hidden="true"></div>
+<!-- Sprite symbols (re-usable via <use href="#…">) — no extra network, one document -->
+<svg class="svg42-sprite-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <symbol id="svg42-logo-p4" viewBox="0 0 40 40">
+    <defs>
+      <linearGradient id="p4g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#5eead4"/>
+        <stop offset="0.45" stop-color="#22d3ee"/>
+        <stop offset="1" stop-color="#d946ef"/>
+      </linearGradient>
+    </defs>
+    <rect x="1.5" y="1.5" width="37" height="37" rx="8" fill="rgba(20,10,40,0.5)" stroke="url(#p4g)" stroke-width="1.75"/>
+    <text x="20" y="27" text-anchor="middle" font-family="Orbitron, system-ui, sans-serif" font-size="15" font-weight="800" fill="url(#p4g)">42</text>
+    <circle cx="31" cy="9" r="2.5" fill="#f472b6" opacity="0.95"/>
+    <path d="M6 32 Q20 24 34 32" fill="none" stroke="url(#p4g)" stroke-width="1" opacity="0.55" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="svg42-ico-spark" viewBox="0 0 12 12">
+    <path d="M6 0L7.2 4.2L12 6L7.2 7.8L6 12L4.8 7.8L0 6L4.8 4.2Z" fill="#f472b6" opacity="0.9"/>
+  </symbol>
+</svg>
+<div class="app">
+  <header>
+    <span class="svg42-brand" title="Phase 4 / PRIME" aria-hidden="true">
+      <svg width="34" height="34" role="img" focusable="false"><use href="#svg42-logo-p4"/></svg>
+    </span>
+    <h1>SVG42 · Phase 4 · Prime Evolution</h1>
+    <span class="tag" id="modeTag">hamiltonian flow · symplectic · velocity verlet</span>
+    <div class="right">
+      <button id="btnMode" class="toggle on" title="Toggle dynamics mode (m): H = symplectic Hamiltonian flow (energy conserved up to O(dt^order)); A = stochastic PRIME recurrence">mode H · hamiltonian</button>
+      <button id="btnOrder" class="toggle" title="Toggle symplectic integrator order (y): 2 = velocity Verlet, |ΔH/H| ~ O(dt²); 4 = Yoshida composition, |ΔH/H| ~ O(dt⁴) — 100×–10000× tighter conservation at the same dt, ~3× the cost. Mode-H only.">order 2 · verlet</button>
+      <span id="ledConserve" class="led" title="Conservation quality (mode H): green = excellent, amber = marginal, red = breakdown" data-state="off">●&nbsp;<span class="led-label">—</span></span>
+      <button id="btnPlay" class="toggle on" title="Play / pause (space)">▶ running</button>
+      <button id="btnStep" title="Step one frame while paused (n)">step</button>
+      <button id="btnReset" title="Reset ensemble (r)">reset</button>
+      <button id="btnPerturb" title="Inject perturbation (p) — kick a random entity">perturb</button>
+      <button id="btnTwin" class="toggle" title="Toggle twin orbit (t) — perturbed clone for Lyapunov">twin</button>
+    </div>
+  </header>
+
+  <aside>
+    <section>
+      <h2>Recurrence parameters</h2>
+      <label class="field"><b>η eta</b><input id="eta" type="range" min="0" max="1.2" step="0.005" value="0.4"><span class="val" data-for="eta">0.400</span></label>
+      <label class="field"><b>γ gamma</b><input id="gamma" type="range" min="0" max="2.0" step="0.005" value="0.30"><span class="val" data-for="gamma">0.300</span></label>
+      <label class="field"><b>β beta</b><input id="beta" type="range" min="0" max="0.8" step="0.005" value="0.10"><span class="val" data-for="beta">0.100</span></label>
+      <label class="field"><b>ε eps</b><input id="eps" type="range" min="0" max="0.3" step="0.001" value="0.050"><span class="val" data-for="eps">0.050</span></label>
+      <label class="field"><b>κ couple</b><input id="kappa" type="range" min="0" max="2.0" step="0.005" value="0.60"><span class="val" data-for="kappa">0.600</span></label>
+      <label class="field"><b>dt</b><input id="dt" type="range" min="0.002" max="0.06" step="0.001" value="0.016"><span class="val" data-for="dt">0.016</span></label>
+    </section>
+
+    <section>
+      <h2>Ensemble</h2>
+      <label class="field"><b>N</b><input id="N" type="range" min="16" max="256" step="8" value="96"><span class="val" data-for="N">96</span></label>
+      <label class="field"><b>seed</b><input id="seed" type="range" min="1" max="9999" step="1" value="42"><span class="val" data-for="seed">42</span></label>
+      <label class="field"><b>trail</b><input id="trail" type="range" min="0.02" max="0.30" step="0.005" value="0.085"><span class="val" data-for="trail">0.085</span></label>
+    </section>
+
+    <section>
+      <h2>Presets · 12 stochastic + 6 hamiltonian</h2>
+      <div class="preset-grid" id="presetGrid"></div>
+    </section>
+
+    <section>
+      <h2>SVG42 IR bridge</h2>
+      <div class="btn-grid">
+        <button id="btnExportIr" title="Download evolved ensemble as svg42 IR JSON">export IR</button>
+        <button id="btnImportIr" title="Load svg42 IR JSON as initial conditions">import IR</button>
+        <button id="btnSnapshot" title="PNG of current frame">PNG</button>
+        <button id="btnDeriveSeed" class="danger" title="Derive a phase-2 seed line from current state">→ phase 2</button>
+      </div>
+      <input type="file" id="fileImport" accept=".json,application/json" style="position:absolute;left:-9999px">
+    </section>
+
+    <section>
+      <h2>Live metrics</h2>
+      <div class="metric-row"><span>fps</span><b id="m-fps">—</b></div>
+      <div class="metric-row"><span>step</span><b id="m-step">0</b></div>
+      <div class="metric-row"><span>H = K+V</span><b id="m-H">—</b></div>
+      <div class="metric-row"><span>kinetic K</span><b id="m-K">—</b></div>
+      <div class="metric-row"><span>potential V</span><b id="m-V">—</b></div>
+      <div class="metric-row" title="Pair potential V_pair = Σ_{i<j} −G c_i c_j / sqrt(|q_i−q_j|² + ε²) — the gravitational/charge-coupling subsystem. Falls (more negative) on close approach, paying for the K rise. In mode A it's not separately defined; row reads —."><span>V_pair</span><b id="m-Vpair">—</b></div>
+      <div class="metric-row" title="Confining (harmonic-trap) potential V_conf = ½ ω² Σ_i |q_i|² — the trap subsystem. Always ≥ 0; rises with |q|. The slow envelope is the orbital breathing. In mode A it's not separately defined; row reads —."><span>V_conf</span><b id="m-Vconf">—</b></div>
+      <div class="metric-row" title="Relative drift of total energy since the H-mode entry. In mode H this is the canonical conservation diagnostic for a symplectic integrator (should be small and *bounded*; secular monotone growth indicates breakdown). In mode A it's not meaningful."><span>|ΔH / H₀|</span><b id="m-Hdrift">—</b></div>
+      <div class="metric-row" title="σ_K / σ_H — the symplectic-mechanism ratio. The std of K across the recent window divided by the std of H. Three orders of magnitude separation between the two means the K↔V exchange is doing real work while H stays pinned: the integrator is genuinely conserving energy, not just smoothing the dynamics. Healthy mode-H runs with a working integrator typically show ratios in the 10² – 10⁴ range; ratios near 1 indicate either a frozen system (K not exchanging with V) or a leaking integrator (H drifting at the same scale as the exchange)."><span>σ_K / σ_H</span><b id="m-symRatio">—</b></div>
+      <div class="metric-row" title="Distinguishes the two failure modes of |ΔH/H| in mode H. A symplectic integrator's energy oscillates around the shadow Hamiltonian — bounded, no secular drift. A non-symplectic integrator (or a symplectic one near force-blowup) shows linear monotone growth on top. The detector LSQ-fits the recent |ΔH/H| samples and compares the linear-trend displacement to the residual envelope."><span>trend</span><b id="m-Htrend">—</b></div>
+      <div class="metric-row" title="Relative drift of total angular momentum L_z. The Hamiltonian has central pair + central trap forces, so L_z is exactly conserved by the continuous flow; symplectic integrators preserve it to round-off in the unweighted case and to O(dt^order) in the weighted case."><span>|ΔL_z / L_z₀|</span><b id="m-Ldrift">—</b></div>
+      <div class="metric-row" title="Total linear momentum magnitude. With the harmonic trap on, P oscillates harmonically (it is *not* a conserved quantity); shown so users can see the bounded oscillation envelope."><span>|P|</span><b id="m-P">—</b></div>
+      <div class="metric-row"><span>variance</span><b id="m-var">—</b></div>
+      <div class="metric-row"><span>λ lyapunov</span><b id="m-lyap">—</b></div>
+      <div class="metric-row"><span>regime</span><b id="m-regime">—</b></div>
+    </section>
+
+    <section>
+      <h2>Hotkeys</h2>
+      <div class="metric-row"><span><span class="kbd">space</span> play/pause</span><span></span></div>
+      <div class="metric-row"><span><span class="kbd">n</span> step frame</span><span></span></div>
+      <div class="metric-row"><span><span class="kbd">r</span> reset</span><span></span></div>
+      <div class="metric-row"><span><span class="kbd">p</span> perturb</span><span></span></div>
+      <div class="metric-row"><span><span class="kbd">t</span> twin orbit</span><span></span></div>
+      <div class="metric-row"><span><span class="kbd">m</span> mode H↔A</span><span></span></div>
+      <div class="metric-row"><span><span class="kbd">y</span> order 2↔4</span><span></span></div>
+      <div class="metric-row"><span><span class="kbd">1-9</span> presets</span><span></span></div>
+    </section>
+  </aside>
+
+  <div class="stage-wrap" id="stageWrap">
+    <canvas id="stage"></canvas>
+    <div id="hud">step <b id="hud-step">0</b> · N <b id="hud-N">96</b> · regime <b id="hud-regime">—</b></div>
+  </div>
+
+  <div id="log">
+    <div class="strip-card">
+      <h3>energy · H = K + V · conserved (symplectic, ΔH/H ~ O(dt²))</h3>
+      <canvas id="energyPlot"></canvas>
+    </div>
+    <div class="strip-card">
+      <h3>twin separation · lyapunov estimate</h3>
+      <canvas id="lyapPlot"></canvas>
+    </div>
+    <div class="strip-card" id="phaseCard">
+      <h3>phase-space portrait · entity 0 · (q<sub>x</sub>, p<sub>x</sub>)</h3>
+      <canvas id="phasePlot"></canvas>
+    </div>
+    <div class="strip-card">
+      <h3>bifurcation log</h3>
+      <div id="bifurcationLog"></div>
+    </div>
+  </div>
+</div>
+<div class="brand-stamp" title="SVG42">
+  <svg class="bs-ico" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><use href="#svg42-ico-spark"/></svg>
+  SVG<b>42</b> · phase 4 · prime
+</div>
+
+<script>
+"use strict";
+
+// ════════════════════════════════════════════════════════════════════════════
+// README — Phase 4 / Prime architecture (standalone tool side)
+// ════════════════════════════════════════════════════════════════════════════
+// This page is the *exploratory* surface of Phase 4: a 2D N-body symplectic
+// Hamiltonian flow with two integrators (velocity Verlet, order 2; Yoshida
+// composition, order 4), a live conservation LED, an energy-decomposition
+// strip plot (K, V_pair, V_conf), a phase-space portrait widget, and an
+// optional Mode A (stochastic recurrence) included as the historical
+// non-conservative default.
+//
+// The *deterministic* surface of the same kernel lives in the main builder
+// (tools/svg42/svg42_compiler_builder.html) as Phase 3 `prime ...` passes, with
+// the Prime Lab panel and Phase Portrait widget. Both implementations share
+// the same Hamiltonian, the same kick-drift-kick velocity-Verlet base step,
+// and the same Yoshida-4 (c, b, c) composition coefficients. They are
+// continuously verified to agree at the f64 bit level by the
+// .compat_out/phase4_prime_bridge.js cross-port test.
+//
+// Full architecture — eight independent witnesses (energy / angular-momentum /
+// time-reversibility / Newton-3 / dt-halving / cross-port bit-identity /
+// permutation stability / macro signature), the four-source macro validation
+// chain, the two-classifier distinction (decomposeDriftHint vs
+// classifyExchange), the metrics reference (|ΔH/H|, |ΔL_z/L_z₀|, σ_K/σ_H),
+// the source-of-truth boundaries, and the ULP/round-off ceiling per property
+// — lives in docs/rigor/PHASE4.md. Smoke files are in .compat_out/phase4_*.js and
+// .compat_out/prime_lab_smoke.js, with phase4_invariants_under_edit.js as
+// the meta-test that fails loudly if any witness chain is removed or
+// weakened.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ─── Parameters and state ─────────────────────────────────────────────────
+const PARAMS = {
+  eta: 0.4, gamma: 0.3, beta: 0.1, eps: 0.05,
+  kappa: 0.6, dt: 0.016,
+  N: 96, seed: 42, trail: 0.085,
+  // Mode "H" = honest Hamiltonian flow via a symplectic integrator (energy
+  // conserved up to O(dt^order)). Mode "A" = the original PRIME stochastic
+  // recurrence (energy *not* conserved; included as the historical default).
+  mode: "H",
+  // Symplectic integrator order in mode H. 2 = velocity Verlet (cheap, |ΔH/H|
+  // ~ O(dt²)). 4 = Yoshida composition of three Verlet substeps with
+  // coefficients (c, b, c) where c = 1/(2−2^{1/3}), b = −2^{1/3}c. Cost is
+  // ~3× the force evaluations per step but |ΔH/H| typically improves by
+  // 100×–10000× for the same dt. Order-2 default keeps the cheap path on by
+  // default; users opt into order-4 for high-precision conservation demos.
+  order: 2,
+};
+const STATE = {
+  ensemble: null,
+  twin: null,
+  twinOn: false,
+  running: true,
+  step: 0,
+  history: [],            // [{H, K, V, var, lyap}]
+  twinDistanceLog: [],    // for Lyapunov regression
+  bifurcationLog: [],
+  varianceWindow: [],
+  lastFrameTs: 0,
+  smoothedFps: 0,
+  // Mode-H conservation diagnostic: H₀ captured at the start of each H run, used
+  // to compute the canonical relative drift |ΔH / H₀| shown in the metrics panel.
+  hRef: null,
+  hRefStep: -1,
+  // Companion conservation refs for angular momentum L_z and total momentum P.
+  // L_z is *exactly* conserved by H (central forces), so |ΔL_z/L_z₀| is a
+  // very clean symplectic-accuracy diagnostic. P_0 is just stored to show the
+  // bounded oscillation amplitude when the harmonic trap is on.
+  lzRef: null,
+  pxRef: 0, pyRef: 0,
+  // Phase-space portrait trail buffer: small ring of (q_x, v_x) samples for
+  // entity 0, drawn on a dedicated canvas as the iconic Hamiltonian visualisation.
+  phaseTrail: [],
+  // Sliding window of |ΔH/H| samples used for the secular-vs-oscillatory
+  // drift detector. A symplectic integrator's |ΔH/H| oscillates within an
+  // envelope set by the shadow Hamiltonian — *bounded* but not zero. A
+  // non-symplectic integrator (or a symplectic one near breakdown) shows
+  // *secular* (monotone, linear) drift on top of the oscillation. We
+  // distinguish them with an LSQ slope fit and a noise-envelope ratio.
+  driftRing: [],
+};
+const DRIFT_WIN_MAX = 384;
+const DRIFT_WIN_MIN = 32;
+const HISTORY_MAX = 480;
+const VARIANCE_WINDOW = 24;
+const TWIN_PERTURBATION = 1e-3;
+
+// ─── PRNG (mulberry32 — same as svg42) ───────────────────────────────────
+function mulberry32(seed) {
+  let t = seed >>> 0;
+  return function () {
+    t += 0x6d2b79f5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function gauss(rand) {
+  // Box-Muller
+  const u = Math.max(rand(), 1e-12);
+  const v = rand();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function sigmoid(x) { return 1 / (1 + Math.exp(-x)); }
+
+// ─── Ensemble ────────────────────────────────────────────────────────────
+//
+// Two distinct dynamics live in this class. The mode flag PARAMS.mode picks
+// one per step:
+//
+// ── Mode H · honest Hamiltonian flow (default) ───────────────────────────
+//
+// This is a real Hamiltonian system. There is a scalar
+//
+//     H(p, q) = Σ_i  |p_i|² / (2 m_i)                                (kinetic)
+//             + Σ_{i<j}  −G · c_i c_j / sqrt(|q_i − q_j|² + s²)      (Plummer pair)
+//             + Σ_i  ½ ω² |q_i|²                                     (harmonic trap)
+//
+// with c_i = attract_i − repel_i  (signed charge from the schema),
+//      m_i = max(0.1, scale_i)    (mass from the schema),
+//      G   = κ,   s = ε,   ω² = 4η   (the existing sliders, remapped).
+//
+// Forces F_i = −∇_i H satisfy F_ij = −F_ji (Newton's 3rd law) and are derived
+// from a single scalar V, so the system *is* Hamiltonian. The integrator is
+// velocity Verlet (kick-drift-kick, symplectic, time-reversible, order 2),
+// which preserves a nearby shadow Hamiltonian H̃ = H + O(dt²); therefore
+// |ΔH / H| stays bounded and oscillatory rather than drifting secularly.
+// Mode H disables noise, recursive feedback, velocity capping, and toroidal
+// wrap — exactly the ingredients that broke conservation in mode A.
+//
+// ── Mode A · PRIME stochastic recurrence (legacy) ────────────────────────
+//
+// Applied per-channel, with antisymmetric coupling and multiplicative
+// state-dependent noise:
+//
+//     h_ic(t+1) = h_ic(t)                                  // self
+//                + η · h_ic · σ(γ · h_ic)                  // recursive feedback
+//                + κ · Σ_j K_ij · (h_jc - h_ic)            // coupling
+//                + ε · √(1 + β|h_ic|) · 𝒩(0, 1)            // state-dependent noise
+//
+// where K_ij = attract_i · repel_j − repel_i · attract_j (antisymmetric in
+// (i,j) — makes the field look like a curl in the swarm).
+//
+// Mode A is *not* Hamiltonian: (a) the recursive feedback term is not the
+// gradient of any potential, and (b) the noise term has no balancing friction
+// term, so it isn't a Langevin system satisfying fluctuation-dissipation
+// either. K + V is computed and plotted in mode A as a *diagnostic* (sudden
+// jumps mark perturbations or coupling-blowups), but you should expect it to
+// drift, not be conserved. Mode A is kept because it produces visually rich
+// non-equilibrium structure that mode H cannot.
+//
+class Ensemble {
+  constructor(N, seed) {
+    this.N = N;
+    this.seed = seed;
+    // Float64 storage: needed for symplectic accuracy in Hamiltonian mode H,
+    // and free-of-cost for mode A's stochastic recurrence too.
+    this.x = new Float64Array(N);
+    this.y = new Float64Array(N);
+    this.vx = new Float64Array(N);
+    this.vy = new Float64Array(N);
+    this.hue = new Float64Array(N);
+    this.scale = new Float64Array(N);
+    this.attract = new Float64Array(N);
+    this.repel = new Float64Array(N);
+    this.phase = new Float64Array(N);
+    this.life = new Float64Array(N);
+    this.initRandom();
+  }
+  initRandom() {
+    const rand = mulberry32(this.seed);
+    for (let i = 0; i < this.N; i++) {
+      const r = 0.25 + rand() * 0.5;
+      const a = rand() * Math.PI * 2;
+      this.x[i] = Math.cos(a) * r;
+      this.y[i] = Math.sin(a) * r;
+      this.vx[i] = (rand() - 0.5) * 0.4;
+      this.vy[i] = (rand() - 0.5) * 0.4;
+      this.hue[i] = rand() * 360;
+      this.scale[i] = 0.6 + rand() * 0.6;
+      this.attract[i] = (rand() - 0.5) * 1.2;
+      this.repel[i] = (rand() - 0.5) * 1.2;
+      this.phase[i] = rand() * Math.PI * 2;
+      this.life[i] = rand();
+    }
+  }
+  fromArrays(payload) {
+    const N = payload.x.length;
+    this.N = N;
+    for (const k of ["x", "y", "vx", "vy", "hue", "scale", "attract", "repel", "phase", "life"]) {
+      const arr = payload[k];
+      this[k] = new Float64Array(N);
+      if (arr) for (let i = 0; i < N; i++) this[k][i] = arr[i] || 0;
+    }
+  }
+  fork() {
+    const t = new Ensemble(this.N, this.seed + 1);
+    for (const k of ["x", "y", "vx", "vy", "hue", "scale", "attract", "repel", "phase", "life"]) {
+      t[k] = new Float64Array(this[k]);
+    }
+    // perturb a single entity by TWIN_PERTURBATION on x — minimum kick
+    const idx = Math.floor(this.N / 2);
+    t.x[idx] += TWIN_PERTURBATION;
+    return t;
+  }
+  step(p, rand) {
+    const N = this.N;
+    const { eta, gamma, beta, eps, kappa, dt } = p;
+
+    // pre-pass: bounded coupling field per-entity (cheap O(N²))
+    const fx = new Float32Array(N);
+    const fy = new Float32Array(N);
+    const fhue = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let sxi = 0, syi = 0, shi = 0;
+      const ai = this.attract[i], ri = this.repel[i], xi = this.x[i], yi = this.y[i];
+      for (let j = 0; j < N; j++) {
+        if (j === i) continue;
+        const K = ai * this.repel[j] - ri * this.attract[j];
+        const dx = this.x[j] - xi;
+        const dy = this.y[j] - yi;
+        const r2 = dx * dx + dy * dy + 0.04;          // ε-soft
+        const w = K / r2;                              // inverse-square coupling
+        sxi += w * dx;
+        syi += w * dy;
+        shi += K * (this.hue[j] - this.hue[i]) * 0.05;
+      }
+      fx[i] = sxi / N;
+      fy[i] = syi / N;
+      fhue[i] = shi / N;
+    }
+
+    // update — Mode A recurrence per channel
+    const nz = () => gauss(rand);
+    for (let i = 0; i < N; i++) {
+      // velocity feels coupling field; position integrates velocity
+      const recurX = eta * this.vx[i] * sigmoid(gamma * this.vx[i] * 4);
+      const recurY = eta * this.vy[i] * sigmoid(gamma * this.vy[i] * 4);
+      this.vx[i] += dt * (kappa * fx[i] + recurX) + eps * Math.sqrt(1 + beta * Math.abs(this.vx[i])) * nz() * dt;
+      this.vy[i] += dt * (kappa * fy[i] + recurY) + eps * Math.sqrt(1 + beta * Math.abs(this.vy[i])) * nz() * dt;
+      // soft cap velocity magnitude (prevents numerical runaway at high η)
+      const vmag = Math.hypot(this.vx[i], this.vy[i]);
+      if (vmag > 4.0) {
+        const s = 4.0 / vmag;
+        this.vx[i] *= s;
+        this.vy[i] *= s;
+      }
+
+      this.x[i] += this.vx[i] * dt;
+      this.y[i] += this.vy[i] * dt;
+      // toroidal wrap at radius 2 — keeps the attractor on screen
+      const R = 2.0;
+      if (this.x[i] > R) this.x[i] -= 2 * R;
+      if (this.x[i] < -R) this.x[i] += 2 * R;
+      if (this.y[i] > R) this.y[i] -= 2 * R;
+      if (this.y[i] < -R) this.y[i] += 2 * R;
+
+      // hue drifts via coupling + recurrence (wraps 0..360)
+      this.hue[i] += dt * (kappa * fhue[i] * 60 + 8 * eta * sigmoid(gamma * 0.05));
+      if (this.hue[i] > 360) this.hue[i] -= 360;
+      if (this.hue[i] < 0) this.hue[i] += 360;
+
+      // life slow decay + replenish near origin (keeps palette alive)
+      this.life[i] = clamp(this.life[i] - 0.001 + 0.001 * (1.5 - Math.hypot(this.x[i], this.y[i])), 0, 1);
+      this.phase[i] += dt * (0.4 + this.life[i] * 0.6);
+    }
+  }
+
+  // ── Hamiltonian flow (mode H) ─────────────────────────────────────────────
+  //
+  // Concrete H(p, q):
+  //
+  //     H = Σ_i  |p_i|² / (2 m_i)                              kinetic
+  //       + Σ_{i<j}  −G · c_i c_j / sqrt(|q_i − q_j|² + s²)    softened pair (Plummer)
+  //       + Σ_i  ½ ω² |q_i|²                                   harmonic confining trap
+  //
+  // with c_i = attract_i − repel_i  (signed "charge" derived from the schema),
+  //       m_i = max(0.1, scale_i)  (mass derived from scale channel),
+  //       G   = κ        (the κ slider becomes the gravitational constant),
+  //       s   = ε        (the ε slider becomes the Plummer softening length),
+  //       ω²  = 4 η      (the η slider becomes the trap stiffness;  factor 4 just
+  //                       scales it into a useful range).
+  //
+  // The resulting forces F_i = −∇_i H satisfy F_ij = −F_ji (Newton's 3rd law)
+  // and are derived from a single scalar V, so this *is* a Hamiltonian system.
+  //
+  // The integrator is velocity Verlet (a.k.a. leapfrog in kick-drift-kick form),
+  // which is symplectic of order 2 and time-reversible. It does *not* exactly
+  // preserve H, but it preserves a nearby "shadow Hamiltonian" H̃ = H + O(dt²),
+  // so |ΔH/H| stays bounded and oscillatory rather than drifting secularly.
+  //
+  // Mode H disables: noise, recursive feedback, velocity capping, toroidal wrap.
+  // Those are exactly the ingredients that broke conservation in mode A.
+  //
+  _computeForces(fx, fy, G, s2, omega2) {
+    const N = this.N;
+    fx.fill(0);
+    fy.fill(0);
+    // Pair forces: V_ij = −G c_i c_j / sqrt(r² + s²)   (counted once, i<j)
+    //   ∇_i V_ij = +G c_i c_j (q_i − q_j) / (r² + s²)^{3/2}
+    //   F on i from j = −∇_i V_ij = −G c_i c_j (q_i − q_j) / (r² + s²)^{3/2}
+    //   F on j from i = +G c_i c_j (q_i − q_j) / (r² + s²)^{3/2}  (Newton 3rd)
+    for (let i = 0; i < N; i++) {
+      const ci = this.attract[i] - this.repel[i];
+      const xi = this.x[i], yi = this.y[i];
+      let fxi = fx[i], fyi = fy[i];
+      for (let j = i + 1; j < N; j++) {
+        const cj = this.attract[j] - this.repel[j];
+        const dx = xi - this.x[j];
+        const dy = yi - this.y[j];
+        const r2 = dx * dx + dy * dy + s2;
+        const inv_r3 = 1 / (r2 * Math.sqrt(r2));
+        const k = -G * ci * cj * inv_r3;
+        const ax = k * dx, ay = k * dy;
+        fxi += ax;       fyi += ay;
+        fx[j] -= ax;     fy[j] -= ay;
+      }
+      // Confining harmonic trap: V_conf = ½ ω² |q|², F = −ω² q
+      fxi += -omega2 * xi;
+      fyi += -omega2 * yi;
+      fx[i] = fxi;
+      fy[i] = fyi;
+    }
+  }
+
+  // Single 2nd-order velocity-Verlet substep at an arbitrary signed step.
+  // Used as the building block for both order-2 (single call with dt) and
+  // order-4 Yoshida composition (three calls with weights c, b, c).
+  _verletSubstep(p, h) {
+    const N = this.N;
+    const G = +p.kappa;
+    const soft = Math.max(1e-3, +p.eps || 0.05);
+    const s2 = soft * soft;
+    const omega2 = 4 * Math.max(0, +p.eta || 0);
+    const half = h * 0.5;
+
+    if (!this._fx || this._fx.length !== N) {
+      this._fx = new Float64Array(N);
+      this._fy = new Float64Array(N);
+    }
+    const fx = this._fx, fy = this._fy;
+
+    // Velocity Verlet (kick-drift-kick) at step h:
+    //   v_{+½} = v + (h/2) F(q)/m
+    //   q'     = q + h   v_{+½}
+    //   v'     = v_{+½} + (h/2) F(q')/m
+    this._computeForces(fx, fy, G, s2, omega2);
+    for (let i = 0; i < N; i++) {
+      const inv_m = 1 / Math.max(0.1, this.scale[i]);
+      this.vx[i] += half * fx[i] * inv_m;
+      this.vy[i] += half * fy[i] * inv_m;
+    }
+    for (let i = 0; i < N; i++) {
+      this.x[i] += h * this.vx[i];
+      this.y[i] += h * this.vy[i];
+    }
+    this._computeForces(fx, fy, G, s2, omega2);
+    for (let i = 0; i < N; i++) {
+      const inv_m = 1 / Math.max(0.1, this.scale[i]);
+      this.vx[i] += half * fx[i] * inv_m;
+      this.vy[i] += half * fy[i] * inv_m;
+    }
+  }
+
+  stepHamiltonian(p) {
+    const dt = +p.dt;
+    const order = (+p.order === 4) ? 4 : 2;
+
+    if (order === 4) {
+      // ── Yoshida 4th-order symplectic composition ────────────────────────
+      // Yoshida (1990) showed that any 2nd-order time-symmetric symplectic
+      // integrator Y₂(τ) can be lifted to 4th order via the triple step
+      //
+      //     Y₄(τ) = Y₂(c·τ) ∘ Y₂(b·τ) ∘ Y₂(c·τ)
+      //
+      // with coefficients
+      //
+      //     c = 1 / (2 − 2^{1/3}),   b = −2^{1/3} · c,   2c + b = 1.
+      //
+      // Note b < 0 — the middle substep runs *backward* in time. This is a
+      // genuine feature of high-order symplectic methods, not a bug. The
+      // composition is still symplectic and time-reversible, and the energy
+      // error scales as O(dt⁴) instead of O(dt²). Cost: 3× the force
+      // evaluations of order-2 Verlet (6 force evals/step instead of 2),
+      // for typically 100×–10000× better |ΔH/H| at the same dt.
+      const cbrt2 = Math.cbrt(2);
+      const c = 1 / (2 - cbrt2);
+      const b = -cbrt2 * c;
+      this._verletSubstep(p, c * dt);
+      this._verletSubstep(p, b * dt);
+      this._verletSubstep(p, c * dt);
+    } else {
+      this._verletSubstep(p, dt);
+    }
+
+    // Decorative passive channels (do not enter H, do not affect conservation).
+    const N = this.N;
+    for (let i = 0; i < N; i++) {
+      this.hue[i] += dt * 6;
+      while (this.hue[i] > 360) this.hue[i] -= 360;
+      while (this.hue[i] < 0) this.hue[i] += 360;
+      this.life[i] = clamp(this.life[i] - 0.0005, 0, 1);
+      this.phase[i] += dt * 0.4;
+    }
+  }
+
+  energyHamiltonian(p) {
+    const N = this.N;
+    const G = +p.kappa;
+    const soft = Math.max(1e-3, +p.eps || 0.05);
+    const s2 = soft * soft;
+    const omega2 = 4 * Math.max(0, +p.eta || 0);
+
+    let K = 0;
+    for (let i = 0; i < N; i++) {
+      const m = Math.max(0.1, this.scale[i]);
+      K += 0.5 * m * (this.vx[i] * this.vx[i] + this.vy[i] * this.vy[i]);
+    }
+
+    let V_pair = 0;
+    for (let i = 0; i < N; i++) {
+      const ci = this.attract[i] - this.repel[i];
+      const xi = this.x[i], yi = this.y[i];
+      for (let j = i + 1; j < N; j++) {
+        const cj = this.attract[j] - this.repel[j];
+        const dx = xi - this.x[j];
+        const dy = yi - this.y[j];
+        const r2 = dx * dx + dy * dy + s2;
+        V_pair += -G * ci * cj / Math.sqrt(r2);
+      }
+    }
+
+    let V_conf = 0;
+    for (let i = 0; i < N; i++) {
+      V_conf += 0.5 * omega2 * (this.x[i] * this.x[i] + this.y[i] * this.y[i]);
+    }
+
+    return { K, V: V_pair + V_conf, V_pair, V_conf, H: K + V_pair + V_conf };
+  }
+
+  // Angular momentum about the origin and total linear momentum, in mode-H units.
+  //
+  //   L_z = Σ_i  m_i (q_x v_y − q_y v_x)              (z-component, 2D system)
+  //   P   = (Σ_i m_i v_x,  Σ_i m_i v_y)
+  //
+  // For our H, L_z is *exactly* a constant of motion: the pair forces are
+  // central in (q_i − q_j) so produce no net torque, and the harmonic trap
+  // F = −ω² q is central about the origin so produces no torque either.
+  // Thus |ΔL_z / L_z(0)| in mode H is a clean diagnostic for symplectic
+  // accuracy, independent of |ΔH/H|.
+  //
+  // P is *not* conserved when the trap is on (the trap exerts an external
+  // force −ω² q on each particle, so dP/dt = −ω² N q_COM ≠ 0 in general).
+  // We still report |P| because the magnitude executes a harmonic oscillation
+  // and the *envelope* of |P| should remain bounded by ~|P(0)| + ω · N |q_COM(0)|.
+  invariants() {
+    const N = this.N;
+    let Px = 0, Py = 0, Lz = 0;
+    for (let i = 0; i < N; i++) {
+      const m = Math.max(0.1, this.scale[i]);
+      const vx = this.vx[i], vy = this.vy[i];
+      Px += m * vx;
+      Py += m * vy;
+      Lz += m * (this.x[i] * vy - this.y[i] * vx);
+    }
+    return { Px, Py, P: Math.hypot(Px, Py), Lz };
+  }
+
+  energy() {
+    let K = 0, V = 0;
+    const N = this.N;
+    for (let i = 0; i < N; i++) {
+      K += 0.5 * (this.vx[i] * this.vx[i] + this.vy[i] * this.vy[i]);
+    }
+    K /= N;
+    // potential: pairwise coupling field — sampled (every-other-pair) for speed
+    let pairs = 0;
+    for (let i = 0; i < N; i += 2) {
+      for (let j = i + 1; j < N; j += 2) {
+        const K_ij = this.attract[i] * this.repel[j] - this.repel[i] * this.attract[j];
+        const dx = this.x[j] - this.x[i], dy = this.y[j] - this.y[i];
+        const r2 = dx * dx + dy * dy + 0.04;
+        V += K_ij * K_ij / r2;
+        pairs++;
+      }
+    }
+    if (pairs) V /= pairs;
+    return { K, V, H: K + V };
+  }
+  variance() {
+    let mx = 0, my = 0;
+    for (let i = 0; i < this.N; i++) { mx += this.x[i]; my += this.y[i]; }
+    mx /= this.N; my /= this.N;
+    let s = 0;
+    for (let i = 0; i < this.N; i++) {
+      const dx = this.x[i] - mx, dy = this.y[i] - my;
+      s += dx * dx + dy * dy;
+    }
+    return s / this.N;
+  }
+  twinDistance(other) {
+    let s = 0;
+    const N = Math.min(this.N, other.N);
+    for (let i = 0; i < N; i++) {
+      const dx = this.x[i] - other.x[i], dy = this.y[i] - other.y[i];
+      s += dx * dx + dy * dy;
+    }
+    return Math.sqrt(s / N);
+  }
+  // ── SVG42 IR bridge ────────────────────────────────────────────────────
+  toSvg42IR() {
+    const ROW_COUNT = 42;
+    const SCHEMA_NAMES = [
+      "x","y","z","scale","rot","pivotX","pivotY","shapeId","shapeVariant","segments",
+      "roundness","innerRatio","aspectX","aspectY","strokeW","strokeAlpha","fillAlpha","hue","sat","light",
+      "paletteSlot","blur","glow","blendModeId","noiseAmt","pixelate","trail","maskId","phase","speed",
+      "ampX","ampY","freqX","freqY","rotSpeed","vx","vy","ax","ay","attract","repel","life",
+    ];
+    const SCHEMA_MODES = {
+      x:"linear",y:"linear",z:"linear",scale:"linear",rot:"wrap360",pivotX:"linear",pivotY:"linear",
+      shapeId:"enum",shapeVariant:"enum",segments:"enum",roundness:"clamp01",innerRatio:"clamp01",
+      aspectX:"linear",aspectY:"linear",strokeW:"linear",strokeAlpha:"clamp01",fillAlpha:"clamp01",
+      hue:"wrap360",sat:"linear",light:"linear",paletteSlot:"enum",blur:"linear",glow:"clamp01",
+      blendModeId:"enum",noiseAmt:"linear",pixelate:"clamp01",trail:"clamp01",maskId:"enum",
+      phase:"linear",speed:"linear",ampX:"linear",ampY:"linear",freqX:"linear",freqY:"linear",
+      rotSpeed:"linear",vx:"linear",vy:"linear",ax:"linear",ay:"linear",attract:"linear",repel:"linear",life:"clamp01",
+    };
+    const schema = SCHEMA_NAMES.map((name, i) => ({
+      row: i + 1, name,
+      min: name === "hue" || name === "rot" ? 0 : -500,
+      max: name === "hue" || name === "rot" ? 360 : 500,
+      mode: SCHEMA_MODES[name] || "linear",
+    }));
+    const entities = [];
+    for (let i = 0; i < this.N; i++) {
+      const e = { id: i };
+      for (const nm of SCHEMA_NAMES) e[nm] = 0;
+      // map active channels — rest stay at zero / sensible defaults
+      e.x = this.x[i] * 400;
+      e.y = this.y[i] * 400;
+      e.scale = clamp(this.scale[i], 0.1, 4);
+      e.rot = (this.phase[i] * 60) % 360;
+      e.hue = this.hue[i];
+      e.sat = 70;
+      e.light = 55 + this.life[i] * 20;
+      e.fillAlpha = 0.7;
+      e.strokeAlpha = 0.9;
+      e.strokeW = 1.2;
+      e.shapeId = i % 5;
+      e.shapeVariant = i % 8;
+      e.segments = 6 + (i % 18);
+      e.aspectX = 1; e.aspectY = 1;
+      e.phase = this.phase[i];
+      e.speed = 1;
+      e.ampX = 0; e.ampY = 0;
+      e.freqX = 1; e.freqY = 1;
+      e.vx = this.vx[i];
+      e.vy = this.vy[i];
+      e.ax = 0; e.ay = 0;
+      e.attract = clamp(this.attract[i], -1, 1);
+      e.repel = clamp(this.repel[i], -1, 1);
+      e.life = this.life[i];
+      e.glow = 0.4 + this.life[i] * 0.5;
+      entities.push(e);
+    }
+    return {
+      schema, entities,
+      meta: {
+        schemaVersion: 2, hardened: true, maxEntities: 600,
+        phase4: { step: STATE.step, params: { ...PARAMS }, source: "prime-evolution" },
+      },
+    };
+  }
+  loadFromSvg42IR(ir) {
+    if (!ir || !Array.isArray(ir.entities)) throw new Error("not an svg42 IR");
+    const N = Math.min(ir.entities.length, 256);
+    this.N = N;
+    this.x = new Float64Array(N);
+    this.y = new Float64Array(N);
+    this.vx = new Float64Array(N);
+    this.vy = new Float64Array(N);
+    this.hue = new Float64Array(N);
+    this.scale = new Float64Array(N);
+    this.attract = new Float64Array(N);
+    this.repel = new Float64Array(N);
+    this.phase = new Float64Array(N);
+    this.life = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      const e = ir.entities[i];
+      this.x[i] = (e.x || 0) / 400;
+      this.y[i] = (e.y || 0) / 400;
+      this.vx[i] = e.vx || 0;
+      this.vy[i] = e.vy || 0;
+      this.hue[i] = e.hue || (i * 9) % 360;
+      this.scale[i] = e.scale || 1;
+      this.attract[i] = e.attract || 0;
+      this.repel[i] = e.repel || 0;
+      this.phase[i] = e.phase || 0;
+      this.life[i] = e.life != null ? e.life : 1;
+    }
+  }
+}
+
+// ─── Detector ────────────────────────────────────────────────────────────
+class BifurcationDetector {
+  constructor() {
+    this.window = [];
+    this.cooldown = 0;
+    this.lastRegime = "boot";
+  }
+  push(variance) {
+    this.window.push(variance);
+    if (this.window.length > VARIANCE_WINDOW) this.window.shift();
+    if (this.cooldown > 0) this.cooldown--;
+  }
+  // Detect critical slowing-down: variance acceleration crosses threshold
+  detect() {
+    if (this.window.length < VARIANCE_WINDOW) return null;
+    const w = this.window;
+    const half = w.length >> 1;
+    const meanA = w.slice(0, half).reduce((s, v) => s + v, 0) / half;
+    const meanB = w.slice(half).reduce((s, v) => s + v, 0) / (w.length - half);
+    const ratio = meanB / Math.max(meanA, 1e-9);
+    if (this.cooldown > 0) return null;
+    if (ratio > 1.65 || ratio < 0.55) {
+      this.cooldown = VARIANCE_WINDOW;
+      return { kind: ratio > 1 ? "expansion" : "collapse", ratio };
+    }
+    return null;
+  }
+  // Crude regime classification from energy + lyapunov + variance
+  regime(K, V, varNorm, lyap) {
+    if (Math.abs(K) < 1e-3 && varNorm < 0.05) return "frozen";
+    if (lyap > 0.4) return "chaotic";
+    if (lyap > 0.05) return "turbulent";
+    if (varNorm > 0.6) return "expanding";
+    if (Math.abs(K - V) < 0.05 * Math.max(Math.abs(K), Math.abs(V), 1)) return "equilibrium";
+    return "limit-cycle";
+  }
+}
+const DETECTOR = new BifurcationDetector();
+
+// ─── Lyapunov regression ─────────────────────────────────────────────────
+//
+// Standard largest-Lyapunov estimate on a continuously rescaled twin orbit:
+// every K steps, log d_n = log|x - x'|, then renormalize x' = x + δ·(x'-x)/|...|
+// over a rolling window. The slope of log d vs step is the Lyapunov estimate.
+//
+function lyapunovEstimate() {
+  const log = STATE.twinDistanceLog;
+  if (log.length < 8) return 0;
+  const recent = log.slice(-32);
+  const n = recent.length;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    const x = recent[i].step;
+    const y = Math.log(Math.max(recent[i].dist, 1e-12));
+    sx += x; sy += y; sxx += x * x; sxy += x * y;
+  }
+  const denom = n * sxx - sx * sx;
+  if (Math.abs(denom) < 1e-9) return 0;
+  return (n * sxy - sx * sy) / denom;
+}
+
+// Distinguish bounded oscillation from secular drift.
+//
+// A correctly-implemented symplectic integrator does *not* exactly conserve
+// the original Hamiltonian H — it conserves a *shadow* Hamiltonian H̃ that
+// differs from H by O(dtᵖ). The observable |H − H̃| is bounded but the
+// observable |ΔH/H₀| oscillates within an envelope set by H̃. This is
+// "bounded oscillation" — normal behaviour, not breakdown.
+//
+// A non-symplectic integrator (or a symplectic one near close-approach
+// blow-up where the Plummer regularisation fails) shows *secular* drift:
+// |ΔH/H₀| grows roughly linearly with time, on top of the oscillation.
+// The two regimes are visually distinct on the energy plot but easy to
+// confuse from a single end-of-run number.
+//
+// We separate them with a least-squares slope fit over a sliding window:
+//   • slope · window ≡ "secular displacement" (linear trend over the window)
+//   • std of residuals ≡ "oscillation amplitude" (noise around the trend)
+//   • ratio = displacement / amplitude
+// Ratio > ~1.5 ⇒ the linear trend exits the noise envelope: secular drift.
+function analyzeDrift(ring) {
+  const n = ring.length;
+  if (n < DRIFT_WIN_MIN) {
+    return { ok: false, slope: NaN, residStd: NaN, secular: false, ratio: NaN, trendPerStep: NaN };
+  }
+  let sx = 0, sy = 0, sxy = 0, sx2 = 0;
+  for (let i = 0; i < n; i++) {
+    const y = ring[i];
+    sx += i; sy += y; sxy += i * y; sx2 += i * i;
+  }
+  const denom = n * sx2 - sx * sx;
+  if (Math.abs(denom) < 1e-12) {
+    return { ok: false, slope: 0, residStd: 0, secular: false, ratio: 0, trendPerStep: 0 };
+  }
+  const slope = (n * sxy - sx * sy) / denom;
+  const intercept = (sy - slope * sx) / n;
+  let s2 = 0;
+  for (let i = 0; i < n; i++) {
+    const r = ring[i] - (slope * i + intercept);
+    s2 += r * r;
+  }
+  const residStd = Math.sqrt(s2 / Math.max(1, n - 2));
+  const secularDisp = Math.abs(slope) * (n - 1);
+  // Add a small absolute floor to residStd so that a perfectly-flat noise
+  // signal (all samples equal to f64 round-off) doesn't trip the detector.
+  const denomNoise = Math.max(residStd, 1e-15);
+  const ratio = secularDisp / denomNoise;
+  return { ok: true, slope, residStd, secular: ratio > 1.5, ratio, trendPerStep: slope };
+}
+
+// ─── Per-subsystem drift hint (mode H) ───────────────────────────────────
+//
+// "ΔH/H₀ is amber" is true but unsatisfying — it doesn't say *which* subsystem
+// is doing the work to keep H bounded, and which one (if any) is leaking.
+//
+// In a healthy run the K, V_pair, V_conf series each oscillate substantially
+// (their std-dev across the recent history is large compared to the H drift),
+// because that *is* the conservation mechanism: K and V exchange energy. The H
+// total stays flat because the exchange is exact at the integrator's order.
+//
+// In an unhealthy run the *signature* of the failure is in the decomposition:
+//
+//   • "V_pair-led" — the std of V_pair dwarfs the others. This is the
+//     close-approach blow-up: two entities have come too close, the Plummer
+//     softening is too small to regulate, and the pair potential is spiking.
+//     Fix: raise ε.
+//
+//   • "K-led" — kinetic dominates the drift. Usually means the integrator's
+//     local-truncation error is the limiting factor (dt is too large for the
+//     fastest motion present). Fix: lower dt, or raise order to 4.
+//
+//   • "V_conf-led" — the trap potential is dominating. The system is
+//     stretching out beyond the trap's natural scale; physically the simulation
+//     is fine but the trap is doing all the work. Often means κ is too small
+//     relative to ω². Fix: raise κ, lower ω², or accept the regime as the
+//     "trap-dominated" one (preset 13, harmonic-trap).
+//
+//   • "balanced" — no single subsystem dominates. The exchange is healthy.
+//
+// We measure dominance by the windowed std-dev of each component over the
+// most recent ~64 history samples (or whatever's available). The component
+// with std > 2× the runner-up is the dominator; otherwise we report balanced.
+// Compute windowed means and stds for K, V_pair, V_conf, H over the last W
+// history samples. Used both by the dominator classifier and by the σ_K/σ_H
+// "symplectic mechanism ratio" metric. Returns null if insufficient data.
+function decomposeStats(history, W) {
+  if (!history || history.length < 4) return null;
+  W = Math.min(W || 64, history.length);
+  const start = history.length - W;
+  let mK = 0, mVp = 0, mVc = 0, mH = 0;
+  let n = 0;
+  for (let i = start; i < history.length; i++) {
+    const e = history[i];
+    if (!Number.isFinite(e.V_pair) || !Number.isFinite(e.V_conf)) continue;
+    mK += e.K; mVp += e.V_pair; mVc += e.V_conf; mH += e.H; n++;
+  }
+  if (n < 4) return null;
+  mK /= n; mVp /= n; mVc /= n; mH /= n;
+  let s2K = 0, s2Vp = 0, s2Vc = 0, s2H = 0;
+  for (let i = start; i < history.length; i++) {
+    const e = history[i];
+    if (!Number.isFinite(e.V_pair) || !Number.isFinite(e.V_conf)) continue;
+    s2K  += (e.K      - mK ) ** 2;
+    s2Vp += (e.V_pair - mVp) ** 2;
+    s2Vc += (e.V_conf - mVc) ** 2;
+    s2H  += (e.H      - mH ) ** 2;
+  }
+  const div = Math.max(1, n - 1);
+  return {
+    n, W,
+    mK, mVp, mVc, mH,
+    sK:  Math.sqrt(s2K  / div),
+    sVp: Math.sqrt(s2Vp / div),
+    sVc: Math.sqrt(s2Vc / div),
+    sH:  Math.sqrt(s2H  / div),
+  };
+}
+
+// LED-tooltip per-subsystem hypothesis emitter.
+//
+// Decisive directives (no "consider …", no "you might want to …"). The user
+// looks at the LED, reads the verdict, and knows what to twist. Hedging in
+// the copy undermines the whole point of having the classifier.
+//
+// The classifier maps the σ-dominator to a remedy:
+//
+//   • V_pair-led       → raise ε (close-approach softening too tight)
+//   • K-led            → lower dt or raise order (integrator local-truncation)
+//   • V_conf-led + drifting H → lower dt (trap stiffness exceeds integrator
+//                                          capacity; the trap is loud *and*
+//                                          the integrator can't keep up)
+//   • V_conf-led + healthy H  → no fix (the trap is genuinely the loudest
+//                                        reservoir; this is the by-design
+//                                        "harmonic-trap" regime)
+//   • balanced         → no fix (healthy K↔V exchange across all subsystems)
+//
+// The V_conf gate is important: in a strong-trap regime V_conf will dominate
+// the σ ranking *whether or not the integrator is healthy*, because the trap
+// is the loudest voice in the room. We need the H-drift threshold to
+// distinguish "trap doing its job" from "trap-driven stiffness defeating the
+// integrator".
+function decomposeDriftHint(history, last, energyDrift, order) {
+  if (!history || history.length < 8) {
+    return "Decomposition: gathering samples (need ≥ 8).";
+  }
+  if (!Number.isFinite(last.V_pair) || !Number.isFinite(last.V_conf)) {
+    return "Decomposition: K + V_pair + V_conf split unavailable (mode A).";
+  }
+  const stats = decomposeStats(history, 64);
+  if (!stats) return "Decomposition: gathering samples (need ≥ 4 mode-H frames).";
+  const { n, W, mK, mVp, mVc, sK, sVp, sVc } = stats;
+  // Dominator: the component whose std exceeds 2× the runner-up.
+  const components = [
+    { name: "K",      std: sK  },
+    { name: "V_pair", std: sVp },
+    { name: "V_conf", std: sVc },
+  ];
+  components.sort((a, b) => b.std - a.std);
+  const top = components[0], second = components[1];
+  // H-drift thresholds. 1e-3 is the order-2 ok-threshold; above it the
+  // integrator is in marginal/breakdown territory regardless of which
+  // subsystem is loud. In order-4 mode a healthy system sits at |ΔH/H| ~ 1e-9,
+  // so any drift past 1e-3 isn't merely "underperforming" — it's catastrophic
+  // failure of the symplectic structure, and the right fix is usually to
+  // *drop* order before lowering dt (order-4 with a tiny dt is slower per
+  // unit accuracy than order-2 with a larger dt for very stiff problems —
+  // the higher-order substep amplifies stiffness costs).
+  const driftBad = Number.isFinite(energyDrift) && energyDrift > 1e-3;
+  const ord = (order === 4) ? 4 : 2;
+  const stiffFix = (ord === 4)
+    ? "Fix: drop to order 2 *and* lower dt (order-4 amplifies stiffness costs; in this regime a coarser symmetric step usually outperforms a finer asymmetric composition)."
+    : "Fix: lower dt (the trap-led regime needs more steps per oscillation than a pair-led regime to resolve).";
+  const kFix = (ord === 4)
+    ? "Fix: drop to order 2 *and* lower dt (order-4 with K-led drift past 1e-3 means the higher-order composition is amplifying stiffness; symmetric Verlet at smaller dt is more efficient here)."
+    : "Fix: lower dt or raise order to 4.";
+  let verdict;
+  if (top.std > 2 * Math.max(second.std, 1e-12)) {
+    if (top.name === "V_pair") {
+      verdict = "V_pair-led — close-approach activity dominates the exchange. The Plummer softening ε is being challenged. Fix: raise ε.";
+    } else if (top.name === "K") {
+      verdict = "K-led — kinetic energy dominates the exchange. The integrator's local-truncation error is the bottleneck. " + kFix;
+    } else {
+      // V_conf-led: gated by H-drift health. If H is drifting, the trap is too
+      // stiff for the integrator's current dt/order, even though "trap dominates"
+      // looks the same in the σ ranking.
+      verdict = driftBad
+        ? "V_conf-led with drifting H — the harmonic trap is loud *and* the integrator is failing to keep up. Trap stiffness exceeds integrator capacity. " + stiffFix
+        : "V_conf-led, H healthy — the harmonic trap is the loudest energy reservoir, by design. This is the trap-dominated regime (preset 13, harmonic-trap). No fix needed; the integrator is conserving correctly against a strong trap.";
+    }
+  } else {
+    verdict = "balanced — no single subsystem dominates. Healthy K↔V exchange across all three components.";
+  }
+  return "Decomposition (last " + W + " frames, n=" + n + "): "
+    + "K=" + mK.toFixed(3) + "±" + sK.toExponential(1) + "  ·  "
+    + "V_pair=" + (mVp >= 0 ? "+" : "") + mVp.toFixed(3) + "±" + sVp.toExponential(1) + "  ·  "
+    + "V_conf=+" + mVc.toFixed(3) + "±" + sVc.toExponential(1)
+    + "\n→ " + verdict;
+}
+
+// ─── Renderer ────────────────────────────────────────────────────────────
+const stage = document.getElementById("stage");
+const stageWrap = document.getElementById("stageWrap");
+const ctx = stage.getContext("2d", { alpha: false });
+const energyCanvas = document.getElementById("energyPlot");
+const energyCtx = energyCanvas.getContext("2d");
+const lyapCanvas = document.getElementById("lyapPlot");
+const lyapCtx = lyapCanvas.getContext("2d");
+const phaseCanvas = document.getElementById("phasePlot");
+const phaseCtx = phaseCanvas ? phaseCanvas.getContext("2d") : null;
+
+function fitCanvas(c) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const r = c.getBoundingClientRect();
+  c.width = Math.max(2, Math.round(r.width * dpr));
+  c.height = Math.max(2, Math.round(r.height * dpr));
+  return dpr;
+}
+function fadeBackground(ctx, c, alpha) {
+  ctx.globalCompositeOperation = "source-over";
+  ctx.fillStyle = `rgba(10, 6, 26, ${alpha})`;
+  ctx.fillRect(0, 0, c.width, c.height);
+}
+function drawEnsemble(ens, twin) {
+  const dpr = fitCanvas(stage);
+  fadeBackground(ctx, stage, PARAMS.trail);
+  const w = stage.width, h = stage.height;
+  const cx = w / 2, cy = h / 2;
+  const scale = Math.min(w, h) / 4.4;
+
+  // ─ entities
+  ctx.globalCompositeOperation = "lighter";
+  for (let i = 0; i < ens.N; i++) {
+    const px = cx + ens.x[i] * scale;
+    const py = cy + ens.y[i] * scale;
+    const v = Math.hypot(ens.vx[i], ens.vy[i]);
+    const heat = clamp(v / 2, 0, 1);
+    const hue = ens.hue[i];
+    const sat = 70 + heat * 25;
+    const light = 50 + heat * 25;
+    const r = (1.5 + ens.scale[i] * 1.6 + heat * 1.4) * dpr;
+    const alpha = 0.35 + ens.life[i] * 0.55;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fillStyle = `hsla(${hue.toFixed(1)}, ${sat}%, ${light}%, ${alpha})`;
+    ctx.fill();
+    if (heat > 0.65) {
+      ctx.beginPath();
+      ctx.arc(px, py, r * 1.8, 0, Math.PI * 2);
+      ctx.strokeStyle = `hsla(${hue.toFixed(1)}, 95%, 70%, ${(heat - 0.65) * 0.7})`;
+      ctx.lineWidth = 1 * dpr;
+      ctx.stroke();
+    }
+  }
+  // ─ twin orbit (faint magenta)
+  if (twin) {
+    ctx.globalCompositeOperation = "screen";
+    for (let i = 0; i < twin.N; i++) {
+      const px = cx + twin.x[i] * scale;
+      const py = cy + twin.y[i] * scale;
+      ctx.beginPath();
+      ctx.arc(px, py, 1.4 * dpr, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(244, 114, 182, 0.75)";
+      ctx.fill();
+    }
+  }
+
+  // ─ centroid crosshair
+  ctx.globalCompositeOperation = "source-over";
+  let mx = 0, my = 0;
+  for (let i = 0; i < ens.N; i++) { mx += ens.x[i]; my += ens.y[i]; }
+  mx /= ens.N; my /= ens.N;
+  const cmx = cx + mx * scale, cmy = cy + my * scale;
+  ctx.strokeStyle = "rgba(94, 234, 212, 0.5)";
+  ctx.lineWidth = 1 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(cmx - 8 * dpr, cmy);
+  ctx.lineTo(cmx + 8 * dpr, cmy);
+  ctx.moveTo(cmx, cmy - 8 * dpr);
+  ctx.lineTo(cmx, cmy + 8 * dpr);
+  ctx.stroke();
+}
+
+// Energy strip plot.
+//
+// In mode H we render a 4-line decomposition K + V_pair + V_conf = H so users
+// can watch the symplectic exchange between subsystems directly:
+//
+//   • K       (mint, solid)    : kinetic. Rises on close approach.
+//   • V_pair  (purple, solid)  : pair potential (typically negative for attractive κ).
+//                                Falls on close approach — paying for the K rise.
+//   • V_conf  (amber, solid)   : harmonic trap potential (always ≥ 0). Rises with
+//                                |q|; the slow envelope is the orbital breathing.
+//   • H       (pink, bold)     : total. By the symplectic guarantee this stays
+//                                inside an O(dt^order) envelope; the K↔V exchange
+//                                is *what* the integrator is conserving.
+//
+// In mode A there is no V_pair/V_conf split — the original recurrence's V is a
+// time-explicit aggregate — so we fall back to the legacy K/V/H trio.
+function drawEnergyPlot(history) {
+  fitCanvas(energyCanvas);
+  energyCtx.clearRect(0, 0, energyCanvas.width, energyCanvas.height);
+  if (!history.length) return;
+  const w = energyCanvas.width, h = energyCanvas.height;
+
+  const decompose = PARAMS.mode === "H"
+    && history.length > 0
+    && Number.isFinite(history[history.length - 1].V_pair)
+    && Number.isFinite(history[history.length - 1].V_conf);
+
+  // Auto-scale across all visible series.
+  let mn = Infinity, mx = -Infinity;
+  for (const e of history) {
+    if (e.H < mn) mn = e.H; if (e.H > mx) mx = e.H;
+    if (e.K < mn) mn = e.K; if (e.K > mx) mx = e.K;
+    if (decompose) {
+      if (Number.isFinite(e.V_pair)) {
+        if (e.V_pair < mn) mn = e.V_pair;
+        if (e.V_pair > mx) mx = e.V_pair;
+      }
+      if (Number.isFinite(e.V_conf)) {
+        if (e.V_conf < mn) mn = e.V_conf;
+        if (e.V_conf > mx) mx = e.V_conf;
+      }
+    } else {
+      if (e.V < mn) mn = e.V;
+      if (e.V > mx) mx = e.V;
+    }
+  }
+  const pad = (mx - mn) * 0.1 || 0.1;
+  mn -= pad; mx += pad;
+  const span = mx - mn;
+
+  // Background grid.
+  energyCtx.strokeStyle = "rgba(140, 162, 199, 0.18)";
+  energyCtx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = (h * i) / 4;
+    energyCtx.beginPath();
+    energyCtx.moveTo(0, y); energyCtx.lineTo(w, y);
+    energyCtx.stroke();
+  }
+  // Zero line — useful because V_pair is typically negative and V_conf is positive,
+  // so the y=0 axis separates the two potential subsystems visually.
+  if (mn < 0 && mx > 0) {
+    const yZero = h - ((0 - mn) / span) * h;
+    energyCtx.strokeStyle = "rgba(140, 162, 199, 0.35)";
+    energyCtx.setLineDash([4, 4]);
+    energyCtx.beginPath();
+    energyCtx.moveTo(0, yZero); energyCtx.lineTo(w, yZero);
+    energyCtx.stroke();
+    energyCtx.setLineDash([]);
+  }
+
+  function drawSeries(field, color, weight) {
+    energyCtx.beginPath();
+    let started = false;
+    for (let i = 0; i < history.length; i++) {
+      const v = history[i][field];
+      if (!Number.isFinite(v)) continue;
+      const x = (i / (HISTORY_MAX - 1)) * w;
+      const y = h - ((v - mn) / span) * h;
+      if (!started) { energyCtx.moveTo(x, y); started = true; }
+      else energyCtx.lineTo(x, y);
+    }
+    energyCtx.strokeStyle = color;
+    energyCtx.lineWidth = weight;
+    energyCtx.stroke();
+  }
+
+  if (decompose) {
+    drawSeries("V_pair", "rgba(192, 132, 252, 0.90)", 1.3);  // purple — pair potential
+    drawSeries("V_conf", "rgba(251, 191,  36, 0.85)", 1.3);  // amber  — harmonic trap
+    drawSeries("K",      "rgba( 94, 234, 212, 0.85)", 1.3);  // mint   — kinetic
+    drawSeries("H",      "rgba(244, 114, 182, 0.95)", 1.9);  // pink   — total (bold)
+  } else {
+    drawSeries("V", "rgba(217,  70, 239, 0.85)", 1.4);
+    drawSeries("K", "rgba( 94, 234, 212, 0.85)", 1.4);
+    drawSeries("H", "rgba(244, 114, 182, 0.95)", 1.6);
+  }
+
+  // Inline legend — top-left of the canvas. Tiny so it doesn't dominate.
+  const legendItems = decompose
+    ? [
+        ["K",      "rgba( 94, 234, 212, 0.95)"],
+        ["V_pair", "rgba(192, 132, 252, 0.95)"],
+        ["V_conf", "rgba(251, 191,  36, 0.95)"],
+        ["H",      "rgba(244, 114, 182, 1.00)"],
+      ]
+    : [
+        ["K", "rgba( 94, 234, 212, 0.95)"],
+        ["V", "rgba(217,  70, 239, 0.95)"],
+        ["H", "rgba(244, 114, 182, 1.00)"],
+      ];
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  energyCtx.save();
+  energyCtx.font = `${10 * dpr}px "JetBrains Mono", "Cascadia Code", monospace`;
+  energyCtx.textBaseline = "top";
+  let lx = 6 * dpr;
+  const ly = 4 * dpr;
+  const swatch = 8 * dpr;
+  const gap = 4 * dpr;
+  for (const [label, color] of legendItems) {
+    energyCtx.fillStyle = color;
+    energyCtx.fillRect(lx, ly + 1 * dpr, swatch, swatch);
+    energyCtx.fillStyle = "rgba(231, 232, 251, 0.85)";
+    energyCtx.fillText(label, lx + swatch + 3 * dpr, ly);
+    lx += swatch + 3 * dpr + energyCtx.measureText(label).width + gap;
+  }
+  energyCtx.restore();
+}
+function drawLyapPlot(log) {
+  fitCanvas(lyapCanvas);
+  lyapCtx.clearRect(0, 0, lyapCanvas.width, lyapCanvas.height);
+  if (log.length < 2) return;
+  const w = lyapCanvas.width, h = lyapCanvas.height;
+  let mn = Infinity, mx = -Infinity;
+  for (const e of log) {
+    const lv = Math.log(Math.max(e.dist, 1e-12));
+    if (lv < mn) mn = lv;
+    if (lv > mx) mx = lv;
+  }
+  const span = (mx - mn) || 1;
+  // baseline at log(δ)
+  const base = Math.log(TWIN_PERTURBATION);
+  if (base >= mn && base <= mx) {
+    const y = h - ((base - mn) / span) * h;
+    lyapCtx.strokeStyle = "rgba(140, 162, 199, 0.35)";
+    lyapCtx.setLineDash([4, 4]);
+    lyapCtx.beginPath();
+    lyapCtx.moveTo(0, y); lyapCtx.lineTo(w, y);
+    lyapCtx.stroke();
+    lyapCtx.setLineDash([]);
+  }
+  // series
+  lyapCtx.beginPath();
+  for (let i = 0; i < log.length; i++) {
+    const x = (i / (log.length - 1)) * w;
+    const lv = Math.log(Math.max(log[i].dist, 1e-12));
+    const y = h - ((lv - mn) / span) * h;
+    if (i === 0) lyapCtx.moveTo(x, y);
+    else lyapCtx.lineTo(x, y);
+  }
+  const lyap = lyapunovEstimate();
+  const isChaos = lyap > 0.05;
+  lyapCtx.strokeStyle = isChaos ? "rgba(217, 70, 239, 0.95)" : "rgba(94, 234, 212, 0.85)";
+  lyapCtx.lineWidth = 1.6;
+  lyapCtx.stroke();
+}
+
+// Phase-space portrait — the iconic Hamiltonian visualisation. For an integrable
+// or near-integrable Hamiltonian system, the (q_x, p_x) trajectory of any single
+// degree of freedom should trace out closed curves (level sets of an effective
+// 1D Hamiltonian after tracing out the others). For a chaotic Hamiltonian system,
+// it should fill out an ergodic region. Either way, a *symplectic* integrator
+// preserves phase-space *area*, so the portrait should look coherent rather
+// than spiraling in or out — that's what makes this the canonical demo of
+// symplectic-vs-non-symplectic integration.
+function drawPhasePlot(trail) {
+  if (!phaseCtx) return;
+  const card = document.getElementById("phaseCard");
+  if (card) card.dataset.mode = PARAMS.mode;
+  fitCanvas(phaseCanvas);
+  phaseCtx.clearRect(0, 0, phaseCanvas.width, phaseCanvas.height);
+  if (PARAMS.mode !== "H") return;          // mode A: card is dimmed, plot empty
+  if (!trail || trail.length < 2) return;
+  const w = phaseCanvas.width, h = phaseCanvas.height;
+
+  // Auto-scale around the trail's bounding box, with a little padding so the
+  // trace doesn't kiss the canvas edges.
+  let qmin = Infinity, qmax = -Infinity, pmin = Infinity, pmax = -Infinity;
+  for (const s of trail) {
+    if (s.q < qmin) qmin = s.q; if (s.q > qmax) qmax = s.q;
+    if (s.p < pmin) pmin = s.p; if (s.p > pmax) pmax = s.p;
+  }
+  const qspan = Math.max(1e-3, qmax - qmin);
+  const pspan = Math.max(1e-3, pmax - pmin);
+  const padQ = qspan * 0.1, padP = pspan * 0.1;
+  qmin -= padQ; qmax += padQ; pmin -= padP; pmax += padP;
+  const sx = w / (qmax - qmin), sy = h / (pmax - pmin);
+
+  // Crosshair through (q=0, p=0) — visual reference for symmetric trajectories.
+  phaseCtx.save();
+  phaseCtx.strokeStyle = "rgba(140, 162, 199, 0.18)";
+  phaseCtx.lineWidth = 1;
+  phaseCtx.setLineDash([3, 5]);
+  if (qmin <= 0 && qmax >= 0) {
+    const x0 = (0 - qmin) * sx;
+    phaseCtx.beginPath(); phaseCtx.moveTo(x0, 0); phaseCtx.lineTo(x0, h); phaseCtx.stroke();
+  }
+  if (pmin <= 0 && pmax >= 0) {
+    const y0 = h - (0 - pmin) * sy;
+    phaseCtx.beginPath(); phaseCtx.moveTo(0, y0); phaseCtx.lineTo(w, y0); phaseCtx.stroke();
+  }
+  phaseCtx.setLineDash([]);
+  phaseCtx.restore();
+
+  // Trail with fading alpha — older samples darker, newer brighter (mint-pink).
+  const n = trail.length;
+  for (let i = 1; i < n; i++) {
+    const a = i / n;
+    const s0 = trail[i - 1], s1 = trail[i];
+    const x0 = (s0.q - qmin) * sx;
+    const y0 = h - (s0.p - pmin) * sy;
+    const x1 = (s1.q - qmin) * sx;
+    const y1 = h - (s1.p - pmin) * sy;
+    // Interpolate mint → pink along the trail, alpha ramps with age.
+    const r = Math.round(94  + (244 - 94)  * a);
+    const g = Math.round(234 + (114 - 234) * a);
+    const b = Math.round(212 + (182 - 212) * a);
+    phaseCtx.strokeStyle = `rgba(${r},${g},${b},${0.15 + a * 0.7})`;
+    phaseCtx.lineWidth = 1 + a * 0.8;
+    phaseCtx.beginPath();
+    phaseCtx.moveTo(x0, y0);
+    phaseCtx.lineTo(x1, y1);
+    phaseCtx.stroke();
+  }
+  // Highlight the most recent sample as a small filled dot.
+  const last = trail[n - 1];
+  const lx = (last.q - qmin) * sx;
+  const ly = h - (last.p - pmin) * sy;
+  phaseCtx.fillStyle = "rgba(244, 114, 182, 0.95)";
+  phaseCtx.beginPath();
+  phaseCtx.arc(lx, ly, 2.2, 0, Math.PI * 2);
+  phaseCtx.fill();
+}
+
+// ─── Loop ────────────────────────────────────────────────────────────────
+let RAND = mulberry32(PARAMS.seed * 7919);
+function init() {
+  STATE.ensemble = new Ensemble(PARAMS.N, PARAMS.seed);
+  STATE.twin = STATE.twinOn ? STATE.ensemble.fork() : null;
+  STATE.step = 0;
+  STATE.history = [];
+  STATE.twinDistanceLog = [];
+  STATE.varianceWindow = [];
+  STATE.hRef = null;
+  STATE.hRefStep = -1;
+  STATE.lzRef = null;
+  STATE.phaseTrail = [];
+  STATE.driftRing = [];
+  RAND = mulberry32(PARAMS.seed * 7919 + 1);
+  log("info", `init · N=${PARAMS.N} seed=${PARAMS.seed} mode=${PARAMS.mode} order=${PARAMS.order}`);
+}
+function tick() {
+  if (!STATE.running) return;
+  doStep();
+}
+function doStep() {
+  STATE.step++;
+  // Mode dispatch: H = symplectic Hamiltonian flow (deterministic, energy-conserving),
+  //                A = original PRIME stochastic recurrence (drifts).
+  const isH = PARAMS.mode === "H";
+  if (isH) {
+    STATE.ensemble.stepHamiltonian(PARAMS);
+  } else {
+    STATE.ensemble.step(PARAMS, RAND);
+  }
+  if (STATE.twin && STATE.twinOn) {
+    if (isH) {
+      STATE.twin.stepHamiltonian(PARAMS);
+    } else {
+      STATE.twin.step(PARAMS, mulberry32(PARAMS.seed * 7919 + 17 + STATE.step));
+    }
+    if (STATE.step % 2 === 0) {
+      const d = STATE.ensemble.twinDistance(STATE.twin);
+      STATE.twinDistanceLog.push({ step: STATE.step, dist: d });
+      if (STATE.twinDistanceLog.length > 256) STATE.twinDistanceLog.shift();
+      // Renormalize: pull twin back to within TWIN_PERTURBATION while preserving direction.
+      // (In Hamiltonian mode the twin would otherwise diverge or stay glued depending on
+      // whether the flow has positive Lyapunov exponent; renormalization makes the
+      // estimator well-defined either way.)
+      if (d > 0.2) {
+        const k = TWIN_PERTURBATION / d;
+        for (let i = 0; i < STATE.ensemble.N; i++) {
+          STATE.twin.x[i] = STATE.ensemble.x[i] + (STATE.twin.x[i] - STATE.ensemble.x[i]) * k;
+          STATE.twin.y[i] = STATE.ensemble.y[i] + (STATE.twin.y[i] - STATE.ensemble.y[i]) * k;
+          STATE.twin.vx[i] = STATE.ensemble.vx[i] + (STATE.twin.vx[i] - STATE.ensemble.vx[i]) * k;
+          STATE.twin.vy[i] = STATE.ensemble.vy[i] + (STATE.twin.vy[i] - STATE.ensemble.vy[i]) * k;
+        }
+      }
+    }
+  }
+  const e = isH ? STATE.ensemble.energyHamiltonian(PARAMS) : STATE.ensemble.energy();
+  const inv = isH ? STATE.ensemble.invariants() : null;
+  // In mode H, also remember the *initial* H (first step after a mode change /
+  // reset) so the metrics panel can show |ΔE/E|, the canonical conservation
+  // diagnostic for symplectic integrators. L_z and P get the same anchoring.
+  if (isH) {
+    if (STATE.hRef == null || !Number.isFinite(STATE.hRef)) {
+      STATE.hRef = e.H;
+      STATE.hRefStep = STATE.step;
+    }
+    if (STATE.lzRef == null || !Number.isFinite(STATE.lzRef)) {
+      STATE.lzRef = inv.Lz;
+      STATE.pxRef = inv.Px;
+      STATE.pyRef = inv.Py;
+    }
+    // Phase-space portrait sample for entity 0: store last ~512 samples.
+    if (STATE.ensemble.N > 0) {
+      STATE.phaseTrail.push({ q: STATE.ensemble.x[0], p: STATE.ensemble.vx[0] * Math.max(0.1, STATE.ensemble.scale[0]) });
+      if (STATE.phaseTrail.length > 512) STATE.phaseTrail.shift();
+    }
+  } else {
+    STATE.hRef = null;
+    STATE.lzRef = null;
+    if (STATE.phaseTrail.length) STATE.phaseTrail.length = 0;
+    if (STATE.driftRing.length) STATE.driftRing.length = 0;
+  }
+  const v = STATE.ensemble.variance();
+  const lyap = STATE.twinOn ? lyapunovEstimate() : 0;
+  // Record full energy decomposition in mode H so the strip plot can render
+  // K, V_pair, V_conf, H as four lines; in mode A only K, V, H are meaningful.
+  // V_pair/V_conf are present in `e` only when mode H computed them (energyHamiltonian
+  // returns the split; energy() does not). When absent we leave them undefined
+  // and the renderer falls back to the legacy K/V/H trio.
+  STATE.history.push({
+    H: e.H, K: e.K, V: e.V,
+    V_pair: (isH && Number.isFinite(e.V_pair)) ? e.V_pair : undefined,
+    V_conf: (isH && Number.isFinite(e.V_conf)) ? e.V_conf : undefined,
+    var: v, lyap
+  });
+  if (STATE.history.length > HISTORY_MAX) STATE.history.shift();
+  // Sliding |ΔH/H| series for the secular-vs-oscillatory detector. Only
+  // populated in mode H; cleared on mode switch / order toggle / init.
+  if (isH && Number.isFinite(STATE.hRef) && STATE.hRef !== 0) {
+    const d = Math.abs(e.H - STATE.hRef) / Math.max(1e-9, Math.abs(STATE.hRef));
+    STATE.driftRing.push(d);
+    if (STATE.driftRing.length > DRIFT_WIN_MAX) STATE.driftRing.shift();
+  }
+  DETECTOR.push(v);
+  const event = DETECTOR.detect();
+  if (event) {
+    log(event.kind === "expansion" ? "warn" : "crit",
+      `bifurcation · ${event.kind} · variance ratio ${event.ratio.toFixed(2)} @ step ${STATE.step}`);
+    stageWrap.classList.remove("alarm");
+    void stageWrap.offsetWidth;
+    stageWrap.classList.add("alarm");
+  }
+  const regime = DETECTOR.regime(e.K, e.V, Math.min(v, 1), lyap);
+  if (regime !== DETECTOR.lastRegime) {
+    log("info", `regime · ${DETECTOR.lastRegime} → ${regime}`);
+    DETECTOR.lastRegime = regime;
+  }
+}
+
+let lastFrame = 0;
+function frame(ts) {
+  if (lastFrame > 0) {
+    const dt = (ts - lastFrame) / 1000;
+    if (dt > 0) {
+      const inst = 1 / dt;
+      STATE.smoothedFps = STATE.smoothedFps ? STATE.smoothedFps * 0.9 + inst * 0.1 : inst;
+    }
+  }
+  lastFrame = ts;
+  tick();
+  drawEnsemble(STATE.ensemble, STATE.twinOn ? STATE.twin : null);
+  drawEnergyPlot(STATE.history);
+  drawLyapPlot(STATE.twinDistanceLog);
+  drawPhasePlot(STATE.phaseTrail);
+  updateMetrics();
+  requestAnimationFrame(frame);
+}
+function updateMetrics() {
+  const last = STATE.history[STATE.history.length - 1] || { H: 0, K: 0, V: 0, var: 0, lyap: 0 };
+  const lyap = STATE.twinOn ? lyapunovEstimate() : 0;
+  const regime = DETECTOR.lastRegime;
+  $("m-fps").textContent = STATE.smoothedFps.toFixed(0);
+  $("m-step").textContent = String(STATE.step);
+  $("m-H").textContent = last.H.toFixed(3);
+  $("m-K").textContent = last.K.toFixed(3);
+  $("m-V").textContent = last.V.toFixed(3);
+  // Decomposed potentials — only meaningful in mode H. We display them with
+  // explicit signs (V_pair is typically negative for κ > 0; V_conf ≥ 0) so the
+  // K↔V exchange is readable as a tug-of-war between the two subsystems.
+  const vpEl = $("m-Vpair"), vcEl = $("m-Vconf");
+  if (vpEl) {
+    if (Number.isFinite(last.V_pair)) {
+      vpEl.textContent = (last.V_pair >= 0 ? "+" : "") + last.V_pair.toFixed(3);
+      vpEl.className = "";
+    } else { vpEl.textContent = "—"; vpEl.className = ""; }
+  }
+  if (vcEl) {
+    if (Number.isFinite(last.V_conf)) {
+      vcEl.textContent = "+" + last.V_conf.toFixed(3);
+      vcEl.className = "";
+    } else { vcEl.textContent = "—"; vcEl.className = ""; }
+  }
+  // σ_K / σ_H — the symplectic-mechanism ratio. This number says, in one
+  // dimensionless quantity, "the K↔V exchange is doing X× more work than the
+  // integrator is failing to conserve". Healthy mode-H runs land in 10²–10⁴.
+  // We compute it over the same 64-frame window the dominator uses so the
+  // metric and the LED tooltip share a single statistical lens.
+  //
+  // Color thresholds are at MULTIPLICATIVE landmarks (powers of 10), not
+  // arithmetic ones — the underlying quantity is a ratio that spans many
+  // decades, so equal *factor* steps are the right unit of "improvement":
+  //   ratio ≥ 100  → pos    (two decades of separation; integrator is
+  //                          conserving against a working exchange)
+  //   ratio ≥ 10   → neutral (one decade — exchange present but
+  //                          conservation margin is thinner than typical)
+  //   ratio < 10   → neg    (less than one decade — the integrator is
+  //                          drifting at a scale comparable to the K↔V
+  //                          exchange itself; the symplectic claim is in
+  //                          danger because the "shadow Hamiltonian"
+  //                          envelope is no longer separated from the
+  //                          mechanism it's supposed to be conserving)
+  // Doubling 50→100 crosses a multiplicative boundary; doubling 5→10 also
+  // does; doubling 200→400 doesn't. That's why the breakpoints are at
+  // {10, 100} rather than {30, 200} or any arithmetic spacing.
+  const symEl = $("m-symRatio");
+  if (symEl) {
+    if (PARAMS.mode === "H") {
+      const stats = decomposeStats(STATE.history, 64);
+      if (stats && stats.sH > 0 && Number.isFinite(stats.sK)) {
+        const ratio = stats.sK / stats.sH;
+        if (Number.isFinite(ratio)) {
+          // Sub-100 is suspicious for a working integrator — either the system
+          // is frozen (no exchange) or H is drifting at the same scale as K.
+          symEl.textContent = ratio >= 1e3
+            ? ratio.toExponential(2)
+            : ratio.toFixed(0);
+          symEl.className = ratio >= 100 ? "pos" : (ratio >= 10 ? "" : "neg");
+          symEl.title = `σ_K/σ_H = ${ratio.toExponential(3)} over ${stats.W} frames (n=${stats.n}). σ_K=${stats.sK.toExponential(3)}, σ_H=${stats.sH.toExponential(3)}.`;
+        } else {
+          symEl.textContent = "—"; symEl.className = "";
+        }
+      } else {
+        symEl.textContent = stats ? "∞" : "gathering";
+        symEl.className = "";
+        symEl.title = stats
+          ? "σ_H = 0 — H is exactly constant over the window (typically only happens with a frozen ensemble)."
+          : "Gathering samples for the K↔V/H ratio (need ≥ 4 mode-H frames).";
+      }
+    } else {
+      symEl.textContent = "—"; symEl.className = "";
+      symEl.title = "σ_K / σ_H is only meaningful in mode H (the symplectic conservation diagnostic).";
+    }
+  }
+  $("m-var").textContent = last.var.toFixed(3);
+  // Conservation diagnostics — only meaningful in mode H.
+  const isH = PARAMS.mode === "H";
+  let energyDrift = NaN;
+  const driftEl = $("m-Hdrift");
+  if (driftEl) {
+    if (isH && Number.isFinite(STATE.hRef) && STATE.hRef !== 0) {
+      energyDrift = Math.abs(last.H - STATE.hRef) / Math.max(1e-9, Math.abs(STATE.hRef));
+      driftEl.textContent = energyDrift.toExponential(2);
+      // Symplectic integrators should keep ΔH/H bounded by O(dt^order) over
+      // arbitrary long times; flag values > 1% as "off" so the user notices
+      // integrator breakdown (dt too large, or κ-blowup at close approach).
+      driftEl.className = energyDrift > 0.01 ? "neg" : "pos";
+    } else {
+      driftEl.textContent = "—";
+      driftEl.className = "";
+    }
+  }
+  // Secular-vs-oscillatory detector: bounded oscillation around the shadow
+  // Hamiltonian is *normal* even when |ΔH/H| isn't tiny; a linear trend that
+  // exits the residual envelope is the breakdown signal.
+  const trendInfo = isH ? analyzeDrift(STATE.driftRing) : null;
+  const trendEl = $("m-Htrend");
+  if (trendEl) {
+    if (!isH) {
+      trendEl.textContent = "—";
+      trendEl.className = "";
+    } else if (!trendInfo.ok) {
+      trendEl.textContent = `gathering · ${STATE.driftRing.length}/${DRIFT_WIN_MIN}`;
+      trendEl.className = "";
+    } else if (trendInfo.secular) {
+      trendEl.textContent = `↗ secular · ${trendInfo.ratio.toFixed(1)}σ`;
+      trendEl.className = "neg";
+    } else {
+      trendEl.textContent = `● bounded · ${trendInfo.ratio.toFixed(2)}σ`;
+      trendEl.className = "pos";
+    }
+  }
+  // Angular momentum drift (L_z is exactly conserved by the continuous flow).
+  const ldEl = $("m-Ldrift");
+  const pEl = $("m-P");
+  if (ldEl && pEl) {
+    if (isH) {
+      const inv = STATE.ensemble.invariants();
+      if (Number.isFinite(STATE.lzRef) && Math.abs(STATE.lzRef) > 1e-9) {
+        const dL = Math.abs(inv.Lz - STATE.lzRef) / Math.abs(STATE.lzRef);
+        ldEl.textContent = dL.toExponential(2);
+        ldEl.className = dL > 0.05 ? "neg" : "pos";
+      } else if (Number.isFinite(STATE.lzRef)) {
+        // L_z₀ is essentially zero — show the absolute |L_z| instead so the user sees
+        // it remains tiny rather than a divide-by-zero NaN.
+        ldEl.textContent = "|L_z|=" + Math.abs(inv.Lz).toExponential(2);
+        ldEl.className = Math.abs(inv.Lz) > 1e-3 ? "neg" : "pos";
+      } else {
+        ldEl.textContent = "—";
+        ldEl.className = "";
+      }
+      pEl.textContent = inv.P.toFixed(3);
+      pEl.className = "";
+    } else {
+      ldEl.textContent = "—";  ldEl.className = "";
+      pEl.textContent  = "—";  pEl.className  = "";
+    }
+  }
+
+  // Conservation LED — driven by *both* the magnitude and the trend.
+  // Bounded oscillation at modest |ΔH/H| is normal symplectic behaviour;
+  // a small but secularly-growing |ΔH/H| is the actual breakdown signal.
+  // We combine the threshold check with the secular detector so the LED
+  // means "the integrator is in trouble", not just "ΔH happens to be big right now".
+  const led = $("ledConserve");
+  if (led) {
+    if (!isH || !Number.isFinite(energyDrift)) {
+      led.dataset.state = "off";
+      const lbl = led.querySelector(".led-label");
+      if (lbl) lbl.textContent = "—";
+      led.title = isH
+        ? "Conservation LED — anchoring H₀ on the next step"
+        : "Conservation diagnostic only meaningful in mode H";
+    } else {
+      // Order-2 thresholds: ok < 1e-2, warn < 1e-1, otherwise bad.
+      // Order-4 thresholds are stricter because we expect 100×–10000× tighter conservation.
+      const okT  = PARAMS.order === 4 ? 1e-5 : 1e-3;
+      const warnT = PARAMS.order === 4 ? 1e-3 : 1e-2;
+      let state = "ok", label = "conserved";
+      if (energyDrift >= warnT) { state = "bad";  label = "breakdown"; }
+      else if (energyDrift >= okT) { state = "warn"; label = "marginal"; }
+      // Promote one notch if a secular trend is detected — even small drifts
+      // are worrying if they're monotone rather than oscillatory.
+      if (trendInfo && trendInfo.ok && trendInfo.secular) {
+        if (state === "ok") { state = "warn"; label = "secular trend"; }
+        else if (state === "warn") { state = "bad"; label = "secular drift"; }
+      }
+      led.dataset.state = state;
+      const lbl = led.querySelector(".led-label");
+      if (lbl) lbl.textContent = label + " · " + energyDrift.toExponential(1);
+      const trendBit = (trendInfo && trendInfo.ok)
+        ? (trendInfo.secular
+            ? `Secular drift detected (ratio ${trendInfo.ratio.toFixed(1)}σ over ${STATE.driftRing.length}-sample window): the linear trend exits the noise envelope, indicating the integrator is leaking energy. Bounded oscillation is normal (a symplectic integrator conserves a *shadow* Hamiltonian H̃ = H + O(dt^order), so |ΔH/H| oscillates within an O(dt^order) envelope without secular growth). Secular drift is breakdown. Fixes: lower dt (push deeper into the asymptotic regime); raise ε (soften close approaches where the Plummer kernel's higher derivatives blow up); or raise integrator order to 4.`
+            : `Bounded oscillation (ratio ${trendInfo.ratio.toFixed(2)}σ over ${STATE.driftRing.length}-sample window): the integrator is conserving the shadow Hamiltonian H̃ ≈ H + O(dt^order). |ΔH/H| oscillates within an envelope set by H̃; this is the normal long-time behaviour of a symplectic method, not breakdown.`)
+        : "Gathering samples for the secular-vs-oscillatory detector.";
+      // Per-subsystem decomposition snapshot — answers "which line is doing the work?".
+      // We report current K, V_pair, V_conf and their windowed std-dev so the user can
+      // identify the dominant exchange. The dominator hint surfaces as natural-language
+      // failure modes (V_pair-led → close-approach blowup; K-led → integrator drift).
+      const decompBit = decomposeDriftHint(STATE.history, last, energyDrift, PARAMS.order);
+      led.title = "Conservation diagnostic — mode H, order " + PARAMS.order
+        + ".\n|ΔH/H₀| = " + energyDrift.toExponential(3)
+        + "  ·  thresholds: ok < " + okT.toExponential(0) + ", warn < " + warnT.toExponential(0)
+        + "\n\n" + trendBit
+        + "\n\n" + decompBit
+        + "\n\nFailure-mode hints: lower dt (asymptotic regime), raise ε (close-approach softening), raise order, or shrink κ.";
+    }
+  }
+  const lyapEl = $("m-lyap");
+  lyapEl.textContent = STATE.twinOn ? lyap.toFixed(3) : "—";
+  lyapEl.className = lyap > 0.05 ? "neg" : "pos";
+  $("m-regime").textContent = regime;
+  $("hud-step").textContent = String(STATE.step);
+  $("hud-N").textContent = String(STATE.ensemble.N);
+  $("hud-regime").textContent = regime;
+}
+function $(id) { return document.getElementById(id); }
+function log(kind, text) {
+  const el = $("bifurcationLog");
+  const t = new Date();
+  const ts = `${t.getMinutes().toString().padStart(2, "0")}:${t.getSeconds().toString().padStart(2, "0")}.${(t.getMilliseconds() / 100 | 0)}`;
+  const div = document.createElement("div");
+  div.className = "ev-" + kind;
+  div.textContent = `[${ts}] ${text}`;
+  el.appendChild(div);
+  while (el.childNodes.length > 60) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ─── Presets ─────────────────────────────────────────────────────────────
+//
+// Each preset is one regime in the parameter space. They form a curated tour
+// of the recurrence's qualitative behavior — fixed point, limit cycle, weakly
+// chaotic, fully chaotic, frozen, breathing, expansion, collapse.
+//
+// Each preset carries its `mode`. Mode-A presets use the original PRIME stochastic
+// recurrence (γ, β, the noise scale ε, and the recursive feedback η matter).
+// Mode-H presets describe a Hamiltonian flow: η becomes the harmonic-trap
+// stiffness ω², κ becomes the gravitational constant G, ε becomes the Plummer
+// softening length, and γ, β are ignored.
+const PRESETS = [
+  // ── Mode A · stochastic PRIME recurrence ───────────────────────────────
+  { id:  1, mode: "A", name: "calm-orbit",       desc: "fixed-point spiral",     params: { eta: 0.10, gamma: 0.20, beta: 0.05, eps: 0.020, kappa: 0.45, dt: 0.018 } },
+  { id:  2, mode: "A", name: "limit-cycle",      desc: "stable periodic",        params: { eta: 0.30, gamma: 0.35, beta: 0.10, eps: 0.040, kappa: 0.55, dt: 0.018 } },
+  { id:  3, mode: "A", name: "default-prime",    desc: "η=0.4 mode A canonical", params: { eta: 0.40, gamma: 0.30, beta: 0.10, eps: 0.050, kappa: 0.60, dt: 0.016 } },
+  { id:  4, mode: "A", name: "edge-of-chaos",    desc: "λ ≈ 0",                  params: { eta: 0.55, gamma: 0.45, beta: 0.15, eps: 0.050, kappa: 0.70, dt: 0.014 } },
+  { id:  5, mode: "A", name: "turbulent",        desc: "λ > 0, organized",       params: { eta: 0.80, gamma: 0.60, beta: 0.20, eps: 0.060, kappa: 0.85, dt: 0.012 } },
+  { id:  6, mode: "A", name: "fully-chaotic",    desc: "max divergence",         params: { eta: 1.05, gamma: 0.95, beta: 0.30, eps: 0.080, kappa: 1.00, dt: 0.010 } },
+  { id:  7, mode: "A", name: "frozen",           desc: "underdamped low-energy", params: { eta: 0.05, gamma: 0.10, beta: 0.05, eps: 0.005, kappa: 0.15, dt: 0.020 } },
+  { id:  8, mode: "A", name: "breathing-shell",  desc: "global radial pulse",    params: { eta: 0.25, gamma: 0.20, beta: 0.05, eps: 0.030, kappa: 1.20, dt: 0.018 } },
+  { id:  9, mode: "A", name: "stretching",       desc: "expansion regime",       params: { eta: 0.45, gamma: 0.55, beta: 0.20, eps: 0.040, kappa: 0.30, dt: 0.016 } },
+  { id: 10, mode: "A", name: "collapsing",       desc: "potential dominates",    params: { eta: 0.20, gamma: 0.20, beta: 0.05, eps: 0.020, kappa: 1.50, dt: 0.014 } },
+  { id: 11, mode: "A", name: "neon-storm",       desc: "high noise, high κ",     params: { eta: 0.50, gamma: 0.40, beta: 0.40, eps: 0.180, kappa: 1.10, dt: 0.012 } },
+  { id: 12, mode: "A", name: "cold-dust",        desc: "long settle, sparse",    params: { eta: 0.15, gamma: 0.15, beta: 0.05, eps: 0.015, kappa: 0.25, dt: 0.022 } },
+  // ── Mode H · honest Hamiltonian flow (velocity Verlet) ─────────────────
+  // (γ, β are ignored; remappings: ω²=4η, G=κ, s=ε.)
+  { id: 13, mode: "H", name: "harmonic-trap",    desc: "ω² > 0, κ ≈ 0 → SHM",       params: { eta: 0.50, gamma: 0.30, beta: 0.10, eps: 0.060, kappa: 0.05, dt: 0.012 } },
+  { id: 14, mode: "H", name: "kepler-ring",      desc: "trap + soft pair → orbits",  params: { eta: 0.20, gamma: 0.30, beta: 0.10, eps: 0.080, kappa: 0.40, dt: 0.010 } },
+  { id: 15, mode: "H", name: "soft-plasma",      desc: "mixed charges scatter",      params: { eta: 0.15, gamma: 0.30, beta: 0.10, eps: 0.100, kappa: 0.70, dt: 0.008 } },
+  { id: 16, mode: "H", name: "gravity-cluster",  desc: "deep G, careful s",          params: { eta: 0.10, gamma: 0.30, beta: 0.10, eps: 0.150, kappa: 1.20, dt: 0.006 } },
+  { id: 17, mode: "H", name: "breathing-cold",   desc: "low T, slow ω oscillation",  params: { eta: 0.40, gamma: 0.30, beta: 0.10, eps: 0.060, kappa: 0.20, dt: 0.014 } },
+  { id: 18, mode: "H", name: "kicked-rotor",     desc: "weak trap, strong coupling", params: { eta: 0.05, gamma: 0.30, beta: 0.10, eps: 0.090, kappa: 0.95, dt: 0.008 } },
+];
+function buildPresetGrid() {
+  const root = $("presetGrid");
+  root.innerHTML = "";
+  for (const p of PRESETS) {
+    const b = document.createElement("button");
+    b.className = "row";
+    const modeBadge = p.mode === "H"
+      ? `<span style="color:#5eead4;font-weight:700;letter-spacing:0.1em">[H]</span>`
+      : `<span style="color:#f472b6;font-weight:700;letter-spacing:0.1em">[A]</span>`;
+    b.innerHTML = `<span class="name">${p.id.toString().padStart(2, " ")} · ${modeBadge} ${p.name}</span><br><span class="desc">${p.desc}</span>`;
+    b.addEventListener("click", () => applyPreset(p));
+    root.appendChild(b);
+  }
+}
+function applyPreset(p) {
+  // A mode change is a phase-space discontinuity; do it before parameter assignment
+  // so refreshModeUi() sees the right slider opacities and history is reset cleanly.
+  if (p.mode && p.mode !== PARAMS.mode) setMode(p.mode);
+  Object.assign(PARAMS, p.params);
+  syncParamUI();
+  // Mode H presets are deterministic; reseed initial conditions so the user sees
+  // the canonical orbit family for that preset rather than whatever residual state
+  // the previous preset left behind.
+  if (p.mode === "H") init();
+  log("info", `preset · ${p.mode || "A"} · ${p.name} · η=${p.params.eta} κ=${p.params.kappa} ε=${p.params.eps} dt=${p.params.dt}`);
+}
+
+// ─── UI wiring ───────────────────────────────────────────────────────────
+function syncParamUI() {
+  for (const k of ["eta","gamma","beta","eps","kappa","dt","N","seed","trail"]) {
+    const el = $(k);
+    if (!el) continue;
+    el.value = String(PARAMS[k]);
+    const lab = document.querySelector(`.val[data-for="${k}"]`);
+    if (lab) lab.textContent = formatParam(k, PARAMS[k]);
+  }
+}
+function formatParam(k, v) {
+  if (k === "N" || k === "seed") return String(v | 0);
+  if (k === "dt") return Number(v).toFixed(3);
+  return Number(v).toFixed(3);
+}
+function bindParam(k) {
+  const el = $(k);
+  if (!el) return;
+  el.addEventListener("input", () => {
+    let v = Number(el.value);
+    if (k === "N") {
+      v = v | 0;
+      PARAMS.N = v;
+      // resize ensemble preserving overlap of channels
+      const newE = new Ensemble(v, PARAMS.seed);
+      const overlap = Math.min(STATE.ensemble.N, v);
+      for (let i = 0; i < overlap; i++) {
+        for (const f of ["x","y","vx","vy","hue","scale","attract","repel","phase","life"]) {
+          newE[f][i] = STATE.ensemble[f][i];
+        }
+      }
+      STATE.ensemble = newE;
+      STATE.twin = STATE.twinOn ? newE.fork() : null;
+    } else if (k === "seed") {
+      PARAMS.seed = v | 0;
+      RAND = mulberry32(PARAMS.seed * 7919 + STATE.step);
+    } else {
+      PARAMS[k] = v;
+    }
+    const lab = document.querySelector(`.val[data-for="${k}"]`);
+    if (lab) lab.textContent = formatParam(k, v);
+  });
+}
+for (const k of ["eta","gamma","beta","eps","kappa","dt","N","seed","trail"]) bindParam(k);
+
+$("btnPlay").addEventListener("click", togglePlay);
+$("btnStep").addEventListener("click", () => { if (!STATE.running) doStep(); });
+$("btnReset").addEventListener("click", () => { init(); });
+$("btnPerturb").addEventListener("click", perturb);
+$("btnTwin").addEventListener("click", toggleTwin);
+$("btnMode").addEventListener("click", toggleMode);
+$("btnOrder").addEventListener("click", toggleOrder);
+$("btnExportIr").addEventListener("click", exportIr);
+$("btnImportIr").addEventListener("click", () => $("fileImport").click());
+$("fileImport").addEventListener("change", importIr);
+$("btnSnapshot").addEventListener("click", snapshotPng);
+$("btnDeriveSeed").addEventListener("click", derivePhase2Seed);
+
+function togglePlay() {
+  STATE.running = !STATE.running;
+  const b = $("btnPlay");
+  b.classList.toggle("on", STATE.running);
+  b.textContent = STATE.running ? "▶ running" : "⏸ paused";
+}
+// Mode H = honest Hamiltonian flow (velocity Verlet).
+// Mode A = original PRIME stochastic recurrence.
+function setMode(mode) {
+  if (mode !== "H" && mode !== "A") return;
+  if (PARAMS.mode === mode) { refreshModeUi(); return; }
+  PARAMS.mode = mode;
+  // A mode flip is a discontinuity for every conservation diagnostic; re-anchor.
+  STATE.hRef = null;
+  STATE.hRefStep = -1;
+  STATE.lzRef = null;
+  STATE.phaseTrail = [];
+  STATE.driftRing = [];
+  // Reset the strip plot too — mixing two energy axes is just noise.
+  STATE.history = [];
+  // In mode H we want a clean canvas for trails since particles aren't wrapped.
+  refreshModeUi();
+  log("info", `mode · switched to ${mode === "H" ? "Hamiltonian (symplectic)" : "PRIME recurrence (stochastic)"}`);
+}
+function toggleMode() { setMode(PARAMS.mode === "H" ? "A" : "H"); }
+function setOrder(order) {
+  const o = (+order === 4) ? 4 : 2;
+  if (PARAMS.order === o) { refreshModeUi(); return; }
+  PARAMS.order = o;
+  // Changing the integrator order is a discontinuity for the conservation
+  // diagnostic (the shadow Hamiltonian changes), so re-anchor H₀.
+  STATE.hRef = null;
+  STATE.hRefStep = -1;
+  STATE.lzRef = null;
+  STATE.history = [];
+  STATE.driftRing = [];
+  refreshModeUi();
+  log("info", `order · symplectic ${o === 4 ? "Yoshida 4 (3× Verlet substeps, |ΔH/H| ~ O(dt⁴))" : "velocity Verlet 2 (|ΔH/H| ~ O(dt²))"}`);
+}
+function toggleOrder() { setOrder(PARAMS.order === 4 ? 2 : 4); }
+function refreshModeUi() {
+  const isH = PARAMS.mode === "H";
+  const isY4 = isH && PARAMS.order === 4;
+
+  const b = $("btnMode");
+  if (b) {
+    b.classList.toggle("on", isH);
+    b.textContent = isH ? "mode H · hamiltonian" : "mode A · stochastic";
+  }
+
+  // Order toggle is only meaningful in mode H — disable + de-emphasise in mode A.
+  const ob = $("btnOrder");
+  if (ob) {
+    ob.classList.toggle("on", isY4);
+    ob.textContent = PARAMS.order === 4 ? "order 4 · yoshida" : "order 2 · verlet";
+    ob.disabled = !isH;
+    ob.style.opacity = isH ? "" : "0.45";
+  }
+
+  const tag = $("modeTag");
+  if (tag) {
+    if (isH) {
+      tag.textContent = "hamiltonian flow · symplectic · " + (isY4 ? "yoshida 4 (O(dt⁴))" : "velocity verlet (O(dt²))");
+    } else {
+      tag.textContent = "recursive coupled recurrence · mode A · stochastic";
+    }
+  }
+
+  // Strip card title reflects whether energy is *meant* to be conserved, at what
+  // order, and — in mode H — that the plot is the K + V_pair + V_conf decomposition.
+  // Spelling out the breakdown in the title is what makes the K↔V exchange legible:
+  // the user reads the title, then watches mint rise as purple falls, and the
+  // mechanism by which H stays bounded is no longer abstract.
+  const energyTitle = document.querySelector("#log .strip-card h3");
+  if (energyTitle) {
+    energyTitle.textContent = isH
+      ? ("energy · K + V_pair + V_conf = H · symplectic (ΔH/H ~ O(dt" + (isY4 ? "⁴" : "²") + "))")
+      : "pseudo-energy · K(t) + V(t) · not conserved";
+  }
+
+  // Stochastic-only sliders get a visual hint when mode H ignores them.
+  for (const k of ["gamma", "beta"]) {
+    const inp = $(k);
+    if (!inp) continue;
+    const lab = inp.closest("label");
+    if (!lab) continue;
+    if (isH) {
+      lab.style.opacity = "0.45";
+      lab.title = "stochastic-mode parameter; ignored in Hamiltonian flow (mode H)";
+    } else {
+      lab.style.opacity = "";
+      lab.title = "";
+    }
+  }
+
+  // Conservation LED: gray-off in mode A, otherwise driven by the latest |ΔH/H|.
+  const led = $("ledConserve");
+  if (led && !isH) {
+    led.dataset.state = "off";
+    const lbl = led.querySelector(".led-label");
+    if (lbl) lbl.textContent = "—";
+    led.title = "Conservation diagnostic only meaningful in mode H";
+  }
+}
+function perturb() {
+  if (!STATE.ensemble) return;
+  const i = (Math.random() * STATE.ensemble.N) | 0;
+  STATE.ensemble.vx[i] += (Math.random() - 0.5) * 2;
+  STATE.ensemble.vy[i] += (Math.random() - 0.5) * 2;
+  log("warn", `perturb · entity ${i} kicked`);
+}
+function toggleTwin() {
+  STATE.twinOn = !STATE.twinOn;
+  $("btnTwin").classList.toggle("on", STATE.twinOn);
+  if (STATE.twinOn) {
+    STATE.twin = STATE.ensemble.fork();
+    STATE.twinDistanceLog = [];
+    log("info", "twin orbit · enabled (δ=1e-3)");
+  } else {
+    STATE.twin = null;
+    log("info", "twin orbit · disabled");
+  }
+}
+function exportIr() {
+  const ir = STATE.ensemble.toSvg42IR();
+  const json = JSON.stringify(ir, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `svg42_phase4_step${STATE.step}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  log("info", `export IR · ${ir.entities.length} entities · step ${STATE.step}`);
+}
+function importIr(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const ir = JSON.parse(String(r.result || ""));
+      STATE.ensemble.loadFromSvg42IR(ir);
+      STATE.twin = STATE.twinOn ? STATE.ensemble.fork() : null;
+      STATE.history = [];
+      STATE.twinDistanceLog = [];
+      STATE.step = 0;
+      STATE.hRef = null;
+      STATE.hRefStep = -1;
+      STATE.lzRef = null;
+      STATE.phaseTrail = [];
+      STATE.driftRing = [];
+      log("info", `import IR · ${ir.entities.length} entities loaded as initial conditions`);
+    } catch (e) {
+      log("crit", `import failed · ${e.message || e}`);
+    }
+    ev.target.value = "";
+  };
+  r.readAsText(file);
+}
+function snapshotPng() {
+  const a = document.createElement("a");
+  a.href = stage.toDataURL("image/png");
+  a.download = `svg42_phase4_step${STATE.step}.png`;
+  a.click();
+  log("info", "snapshot · png saved");
+}
+function derivePhase2Seed() {
+  // Emit a Phase 2 script that reproduces the current bulk state
+  const ens = STATE.ensemble;
+  let cx = 0, cy = 0, vmag = 0, hueMean = 0;
+  for (let i = 0; i < ens.N; i++) {
+    cx += ens.x[i]; cy += ens.y[i];
+    vmag += Math.hypot(ens.vx[i], ens.vy[i]);
+    hueMean += ens.hue[i];
+  }
+  cx /= ens.N; cy /= ens.N; vmag /= ens.N; hueMean /= ens.N;
+  const lines = [
+    "# derived from phase4 prime evolution",
+    `# step=${STATE.step} regime=${DETECTOR.lastRegime} N=${ens.N}`,
+    `entities ${ens.N}`,
+    "preset swarm",
+    `set hue ${hueMean.toFixed(1)}`,
+    `wave x ${(160 + vmag * 80).toFixed(1)} 2.4 0`,
+    `wave y ${(140 + vmag * 70).toFixed(1)} 1.7 1.2`,
+    `noise hue ${(60 + vmag * 30).toFixed(0)}`,
+    `quantize rot ${Math.max(6, Math.round(24 - vmag * 10))}`,
+  ];
+  navigator.clipboard.writeText(lines.join("\n")).then(
+    () => log("info", "phase 2 · seed copied to clipboard"),
+    () => log("warn", `phase 2 · could not copy; logged below\n${lines.join("\n")}`),
+  );
+}
+
+// keyboard
+window.addEventListener("keydown", (ev) => {
+  if (ev.target && /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName)) return;
+  if (ev.key === " " || ev.code === "Space") { ev.preventDefault(); togglePlay(); return; }
+  if (ev.key === "n") { if (!STATE.running) doStep(); return; }
+  if (ev.key === "r") { init(); return; }
+  if (ev.key === "p") { perturb(); return; }
+  if (ev.key === "t") { toggleTwin(); return; }
+  if (ev.key === "m" || ev.key === "M") { toggleMode(); return; }
+  if (ev.key === "y" || ev.key === "Y") { toggleOrder(); return; }
+  const num = Number(ev.key);
+  if (!isNaN(num) && num >= 1 && num <= 9) {
+    const p = PRESETS.find((x) => x.id === num);
+    if (p) applyPreset(p);
+  }
+});
+
+// init
+buildPresetGrid();
+syncParamUI();
+refreshModeUi();
+init();
+log("info", `phase 4 · ready · mode ${PARAMS.mode} (${PARAMS.mode === "H" ? "Hamiltonian / symplectic" : "PRIME recurrence / stochastic"})`);
+log("info", "press space to pause · m to toggle H/A · 1-9 for presets · t for twin orbit");
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

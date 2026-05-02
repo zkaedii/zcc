@@ -1,0 +1,3 @@
+error[RUST-UNS-E0409]: unsupported Rust feature: modules (`mod`)
+  --> tests/rust/unsupported-mod.rs:1:1
+  hint: single-file programs only; `mod` / module trees are not implemented

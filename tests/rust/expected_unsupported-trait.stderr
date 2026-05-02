@@ -1,0 +1,3 @@
+error[RUST-UNS-E0407]: unsupported Rust feature: trait definitions
+  --> tests/rust/unsupported-trait.rs:1:1
+  hint: traits / trait objects are not implemented in this Rust subset

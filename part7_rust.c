@@ -40,7 +40,8 @@ enum {
     RUST_TK_LAND,
     RUST_TK_LOR,
     RUST_TK_BANG,
-    RUST_TK_ARROW
+    RUST_TK_ARROW,
+    RUST_TK_AMP
 };
 
 enum {
@@ -297,6 +298,11 @@ static void rust_next(RustParser *p) {
     if (c == '|' && p->pos + 1 < p->len && p->src[p->pos + 1] == '|') {
         rust_read(p); rust_read(p);
         p->tk.kind = RUST_TK_LOR;
+        return;
+    }
+    if (c == '&') {
+        rust_read(p);
+        p->tk.kind = RUST_TK_AMP;
         return;
     }
     if (c == '>' && p->pos + 1 < p->len && p->src[p->pos + 1] == '=') {
@@ -558,8 +564,122 @@ static int rust_next_token_kind_lookahead(const RustParser *p) {
     return probe.tk.kind;
 }
 
+static void rust_phase_line(int enabled, const char *phase) {
+    if (enabled && phase) fprintf(stderr, "rust-phase: %s\n", phase);
+}
+
+static void rust_sync_to_next_fn(RustParser *p) {
+    int depth = 0;
+    if (!p) return;
+    while (p->tk.kind != RUST_TK_EOF) {
+        if (depth == 0 && p->tk.kind == RUST_TK_FN) return;
+        if (p->tk.kind == RUST_TK_LBRACE) depth++;
+        else if (p->tk.kind == RUST_TK_RBRACE) {
+            if (depth > 0) depth--;
+        }
+        rust_next(p);
+    }
+}
+
+static void rust_sync_stmt_semi(RustParser *p) {
+    int brace = 0;
+    if (!p) return;
+    while (p->tk.kind != RUST_TK_EOF) {
+        if (brace == 0 && p->tk.kind == RUST_TK_SEMI) {
+            rust_next(p);
+            return;
+        }
+        if (p->tk.kind == RUST_TK_LBRACE) brace++;
+        else if (p->tk.kind == RUST_TK_RBRACE && brace > 0) brace--;
+        rust_next(p);
+    }
+}
+
+static int rust_try_diagnose_unsupported_top_level(RustParser *p) {
+    int line;
+    int col;
+    if (!p || p->tk.kind != RUST_TK_IDENT) return 0;
+    line = p->tk.line;
+    col = p->tk.col;
+    if (strcmp(p->tk.text, "struct") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0401", line, col, "unsupported Rust feature: struct definitions",
+                      "this frontend accepts only top-level `fn` items; see docs/rust_frontend_plan.md (P2)");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "enum") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0402", line, col, "unsupported Rust feature: enum definitions",
+                      "this frontend accepts only top-level `fn` items; enums are planned for P2/P3");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "mod") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0409", line, col, "unsupported Rust feature: modules (`mod`)",
+                      "single-file programs only; `mod` / module trees are not implemented");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "use") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0410", line, col, "unsupported Rust feature: `use` imports",
+                      "declare items in one file; import paths are not implemented");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "trait") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0407", line, col, "unsupported Rust feature: trait definitions",
+                      "traits / trait objects are not implemented in this Rust subset");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "impl") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0406", line, col, "unsupported Rust feature: `impl` blocks",
+                      "`impl` / inherent methods are not implemented; use free functions");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "async") == 0 && rust_next_token_kind_lookahead(p) == RUST_TK_FN) {
+        rust_add_diag(p, "RUST-UNS-E0405", line, col, "unsupported Rust feature: `async fn`",
+                      "async is not implemented; use synchronous `fn` only");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "unsafe") == 0 && rust_next_token_kind_lookahead(p) == RUST_TK_FN) {
+        rust_add_diag(p, "RUST-UNS-E0411", line, col, "unsupported Rust feature: `unsafe fn`",
+                      "the `unsafe` keyword is not supported; use plain `fn`");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    if (strcmp(p->tk.text, "const") == 0 || strcmp(p->tk.text, "static") == 0 ||
+        strcmp(p->tk.text, "type") == 0 || strcmp(p->tk.text, "union") == 0 ||
+        strcmp(p->tk.text, "extern") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0413", line, col, "unsupported Rust item: const/static/type/alias/union/extern",
+                      "only function items (`fn`) are supported at the top level today");
+        rust_next(p);
+        rust_sync_to_next_fn(p);
+        return 1;
+    }
+    return 0;
+}
+
 static int rust_parse_type_name(RustParser *p, char *buf, int buf_len) {
     if (!p || !buf || buf_len <= 0) return 0;
+    if (p->tk.kind == RUST_TK_AMP) {
+        rust_add_diag(p, "RUST-UNS-E0408", p->tk.line, p->tk.col, "unsupported Rust feature: reference types (`&T`, `&mut T`)",
+                      "only `i32` and `bool` value types are supported; references are planned for P5");
+        rust_next(p);
+        if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "mut") == 0) rust_next(p);
+        if (p->tk.kind == RUST_TK_I32) rust_next(p);
+        else if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "bool") == 0) rust_next(p);
+        return 0;
+    }
     if (p->tk.kind == RUST_TK_I32) {
         strncpy(buf, "i32", (size_t)buf_len - 1);
         buf[buf_len - 1] = 0;
@@ -590,6 +710,20 @@ static RustStmt *rust_parse_stmt(RustParser *p) {
     RustStmt *s;
     int line = p->tk.line;
     int col = p->tk.col;
+    if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "match") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0403", line, col, "unsupported Rust feature: `match` expressions",
+                      "use `if` / `else` chains for now; `match` lowering is not implemented");
+        rust_next(p);
+        rust_sync_stmt_semi(p);
+        return 0;
+    }
+    if (p->tk.kind == RUST_TK_IDENT && strcmp(p->tk.text, "async") == 0) {
+        rust_add_diag(p, "RUST-UNS-E0405", line, col, "unsupported Rust feature: `async` blocks",
+                      "`async` is not implemented; use synchronous code only");
+        rust_next(p);
+        rust_sync_stmt_semi(p);
+        return 0;
+    }
     if (rust_accept(p, RUST_TK_LET)) {
         s = rust_new_stmt(RUST_STMT_LET, line);
         s->col = col;
@@ -609,7 +743,8 @@ static RustStmt *rust_parse_stmt(RustParser *p) {
         if (rust_accept(p, RUST_TK_COLON)) {
             s->has_type_annotation = 1;
             if (!rust_parse_type_name(p, s->type_name, 64)) {
-                rust_add_diag(p, "RUSTPARSE004", p->tk.line, p->tk.col, "expected type in let binding", "v1 supports only 'i32' and 'bool'");
+                if (p->tk.kind != RUST_TK_ASSIGN)
+                    rust_add_diag(p, "RUSTPARSE004", p->tk.line, p->tk.col, "expected type in let binding", "v1 supports only 'i32' and 'bool'");
             }
         } else {
             s->has_type_annotation = 0;
@@ -681,6 +816,14 @@ static RustFunction *rust_parse_function(RustParser *p) {
         rust_add_diag(p, "RUSTPARSE005", p->tk.line, p->tk.col, "expected function name", "provide identifier after 'fn'");
         strncpy(fn->name, "<anon>", 127);
     }
+    if (p->tk.kind == RUST_TK_LT) {
+        rust_add_diag(p, "RUST-UNS-E0404", p->tk.line, p->tk.col,
+                      "unsupported Rust feature: generic type parameters (`fn name<...>(...)`)",
+                      "monomorphic functions only; remove `<...>` type parameter lists");
+        rust_sync_to_next_fn(p);
+        free(fn);
+        return 0;
+    }
     rust_expect(p, RUST_TK_LPAREN, "expected '(' after function name", "write function parameter list");
     while (p->tk.kind != RUST_TK_RPAREN && p->tk.kind != RUST_TK_EOF) {
         if (fn->num_params >= MAX_PARAMS) {
@@ -700,7 +843,8 @@ static RustFunction *rust_parse_function(RustParser *p) {
         }
         rust_expect(p, RUST_TK_COLON, "expected ':' in parameter", "use syntax: name: i32");
         if (!rust_parse_type_name(p, fn->param_types[param_idx], 64)) {
-            rust_add_diag(p, "RUSTPARSE010", p->tk.line, p->tk.col, "expected parameter type", "v1 supports only i32 and bool parameters");
+            if (p->tk.kind != RUST_TK_RPAREN && p->tk.kind != RUST_TK_COMMA)
+                rust_add_diag(p, "RUSTPARSE010", p->tk.line, p->tk.col, "expected parameter type", "v1 supports only i32 and bool parameters");
             strncpy(fn->param_types[param_idx], "i32", 63);
         }
         fn->param_symbol_ids[param_idx] = RUST_SYMBOL_INVALID;
@@ -733,12 +877,15 @@ static RustAst *rust_parse_program_internal(RustParser *p) {
     while (p->tk.kind != RUST_TK_EOF) {
         RustFunction *fn;
         if (p->tk.kind != RUST_TK_FN) {
-            rust_add_diag(p, "RUSTPARSE007", p->tk.line, p->tk.col, "expected top-level function", "v1 frontend accepts only top-level fn items");
-            rust_next(p);
+            if (!rust_try_diagnose_unsupported_top_level(p)) {
+                rust_add_diag(p, "RUSTPARSE007", p->tk.line, p->tk.col, "expected top-level function",
+                              "v1 frontend accepts only top-level `fn` items (see unsupported-feature diagnostics for `struct`, `enum`, `mod`, ...)");
+                rust_next(p);
+            }
             continue;
         }
         fn = rust_parse_function(p);
-        if (!fn) break;
+        if (!fn) continue;
         if (!p->ast.functions) p->ast.functions = fn;
         else tail->next = fn;
         tail = fn;
@@ -2095,7 +2242,7 @@ int rust_lower_to_ir(RustLowerContext *ctx) {
     return ctx->had_error ? 1 : 0;
 }
 
-int rust_frontend_compile_file(const char *filename, const char *source, int source_len, int dump_ast, int dump_ast_with_symbols, int dump_symbol_table, int dump_ir, int strict_let_annotations, int strict_function_signatures) {
+int rust_frontend_compile_file(const char *filename, const char *source, int source_len, int dump_ast, int dump_ast_with_symbols, int dump_symbol_table, int dump_ir, int strict_let_annotations, int strict_function_signatures, int rust_dump_phase) {
     RustParser p;
     RustAst *ast;
     int i;
@@ -2114,6 +2261,7 @@ int rust_frontend_compile_file(const char *filename, const char *source, int sou
     }
     rust_print_diags(filename, p.diags, p.num_diags);
     if (p.num_diags > 0) return 1;
+    rust_phase_line(rust_dump_phase, "rust-parse");
     rctx.filename = filename; rctx.ast = ast;
     rctx.diags = p.diags; rctx.num_diags = &p.num_diags; rctx.max_diags = 256;
     rctx.symbols = 0; rctx.symbol_count = 0; rctx.symbol_capacity = 0; rctx.had_error = 0;
@@ -2127,6 +2275,7 @@ int rust_frontend_compile_file(const char *filename, const char *source, int sou
     lctx.filename = filename; lctx.ast = ast;
     lctx.symbols = 0; lctx.symbol_count = 0;
     lctx.diags = p.diags; lctx.num_diags = &p.num_diags; lctx.max_diags = 256; lctx.had_error = 0; lctx.dump_ir = dump_ir;
+    rust_phase_line(rust_dump_phase, "rust-resolve");
     if (rust_resolve_names(&rctx) != 0) {
         if (dump_ast_with_symbols) {
             rust_dump_ast_with_symbols(stdout, ast);
@@ -2156,12 +2305,14 @@ int rust_frontend_compile_file(const char *filename, const char *source, int sou
     if (dump_symbol_table) {
         rust_dump_symbol_table(&rctx);
     }
+    rust_phase_line(rust_dump_phase, "rust-typecheck");
     if (rust_typecheck(&tctx) != 0) {
         rust_print_diags(filename, p.diags, p.num_diags);
         free(tctx.symbol_types);
         free(rctx.symbols);
         return 1;
     }
+    rust_phase_line(rust_dump_phase, "rust-lower");
     if (rust_lower_to_ir(&lctx) != 0) {
         rust_print_diags(filename, p.diags, p.num_diags);
         free(tctx.symbol_types);
@@ -3082,7 +3233,7 @@ static int rust_backend_extract_const_main(RustParser *p, RustAst *ast, long lon
     return 0;
 }
 
-int rust_backend_bridge_compile_file(const char *filename, const char *source, int source_len, const char *output_file, int compile_only, int strict_let_annotations, int strict_function_signatures) {
+int rust_backend_bridge_compile_file(const char *filename, const char *source, int source_len, const char *output_file, int compile_only, int strict_let_annotations, int strict_function_signatures, int rust_dump_phase) {
     RustParser p;
     RustAst *ast;
     RustResolveContext rctx;
@@ -3107,12 +3258,14 @@ int rust_backend_bridge_compile_file(const char *filename, const char *source, i
         rust_print_diags(filename, p.diags, p.num_diags);
         return 1;
     }
+    rust_phase_line(rust_dump_phase, "rust-parse");
     memset(&rctx, 0, sizeof(rctx));
     rctx.filename = filename;
     rctx.ast = ast;
     rctx.diags = p.diags;
     rctx.num_diags = &p.num_diags;
     rctx.max_diags = 256;
+    rust_phase_line(rust_dump_phase, "rust-resolve");
     if (rust_resolve_names(&rctx) != 0) {
         rust_print_diags(filename, p.diags, p.num_diags);
         free(rctx.symbols);
@@ -3136,7 +3289,14 @@ int rust_backend_bridge_compile_file(const char *filename, const char *source, i
         free(rctx.symbols);
         return 1;
     }
+    rust_phase_line(rust_dump_phase, "rust-typecheck");
     if (rust_typecheck(&tctx) != 0) {
+        rust_print_diags(filename, p.diags, p.num_diags);
+        free(tctx.symbol_types);
+        free(rctx.symbols);
+        return 1;
+    }
+    if (p.num_diags > 0) {
         rust_print_diags(filename, p.diags, p.num_diags);
         free(tctx.symbol_types);
         free(rctx.symbols);
@@ -3161,6 +3321,7 @@ int rust_backend_bridge_compile_file(const char *filename, const char *source, i
         free(rctx.symbols);
         return 1;
     }
+    rust_phase_line(rust_dump_phase, "rust-codegen");
     main_fn = rust_backend_find_main_function(ast);
     if (main_fn && rust_backend_runtime_program_supported(ast)) {
         if (rust_backend_emit_runtime_program(out, &p, ast) != 0) {

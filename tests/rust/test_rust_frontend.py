@@ -684,6 +684,65 @@ def main() -> int:
         print(strict_combined_both.stderr)
         return 1
 
+    unsupported_diag_cases = [
+        ("unsupported-struct", "expected_unsupported-struct.stderr"),
+        ("unsupported-enum", "expected_unsupported-enum.stderr"),
+        ("unsupported-match", "expected_unsupported-match.stderr"),
+        ("unsupported-generics", "expected_unsupported-generics.stderr"),
+        ("unsupported-async", "expected_unsupported-async.stderr"),
+        ("unsupported-async-block", "expected_unsupported-async-block.stderr"),
+        ("unsupported-impl", "expected_unsupported-impl.stderr"),
+        ("unsupported-trait", "expected_unsupported-trait.stderr"),
+        ("unsupported-reference", "expected_unsupported-reference.stderr"),
+        ("unsupported-mod", "expected_unsupported-mod.stderr"),
+        ("unsupported-use", "expected_unsupported-use.stderr"),
+        ("unsupported-const", "expected_unsupported-const.stderr"),
+        ("unsupported-unsafe-fn", "expected_unsupported-unsafe-fn.stderr"),
+    ]
+    for stem, exp_name in unsupported_diag_cases:
+        print(f"[rust] unsupported-feature diagnostic ({stem})")
+        exp_uns = (repo / "tests/rust" / exp_name).read_text(encoding="utf-8")
+        uns = run([*zcc_cmd, f"tests/rust/{stem}.rs"], cwd=repo, check=False)
+        if uns.returncode == 0:
+            print(f"expected {stem}.rs to fail")
+            print(uns.stderr)
+            return 1
+        for line in exp_uns.splitlines():
+            if line not in uns.stderr:
+                print(f"{stem} diagnostic mismatch")
+                print(uns.stderr)
+                return 1
+
+    print("[rust] rust-dump-phase markers on successful frontend path")
+    ph_ok = run([*zcc_cmd, "tests/rust/smoke_ok.rs", "--rust-dump-phase"], cwd=repo, check=True)
+    for needle in (
+        "rust-phase: rust-parse",
+        "rust-phase: rust-resolve",
+        "rust-phase: rust-typecheck",
+        "rust-phase: rust-lower",
+    ):
+        if needle not in ph_ok.stderr:
+            print("expected rust-dump-phase stderr markers")
+            print(ph_ok.stderr)
+            return 1
+
+    print("[rust] backend bridge must not write output when typecheck fails")
+    guard_bin = pathlib.Path(tempfile.gettempdir()) / "zcc_rust_guard_typefail.bin"
+    if guard_bin.exists():
+        guard_bin.unlink()
+    guard = run(
+        [*zcc_cmd, "tests/rust/type-return-bool.rs", "--rust-backend-v1", "-o", str(guard_bin)],
+        cwd=repo,
+        check=False,
+    )
+    if guard.returncode == 0:
+        print("expected type-return-bool to fail under rust backend")
+        print(guard.stderr)
+        return 1
+    if guard_bin.exists():
+        print("output binary must not be created when compilation fails before codegen")
+        return 1
+
     print("[rust] lower return int dump")
     lower_ret = run([*zcc_cmd, "tests/rust/lower-return-int.rs", "--dump-rust-ir"], cwd=repo, check=True)
     if lower_ret.stdout != expected_lower_return_int:

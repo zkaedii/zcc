@@ -1089,6 +1089,7 @@ int main(int argc, char **argv) {
   int rust_backend_v1 = 0;
   int rust_strict_let_annotations = 0;
   int rust_strict_function_signatures = 0;
+  int rust_dump_phase = 0;
   int rust_dump_mode = 0;
 
   int g_ir_primary = 0;
@@ -1120,6 +1121,8 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[i], "--rust-strict") == 0) {
       rust_strict_let_annotations = 1;
       rust_strict_function_signatures = 1;
+    } else if (strcmp(argv[i], "--rust-dump-phase") == 0) {
+      rust_dump_phase = 1;
     } else if (strcmp(argv[i], "-v") == 0) {
       zcc_verbose_flag = 1;
     } else if (strcmp(argv[i], "--quiet") == 0 || strcmp(argv[i], "-q") == 0) {
@@ -1241,19 +1244,19 @@ int main(int argc, char **argv) {
     }
     rust_dump_mode = (dump_rust_ast || dump_rust_ast_with_symbols || dump_rust_symbol_table || dump_rust_ir);
     if (rust_dump_mode) {
-      if (rust_frontend_compile_file(input_file, source, source_len, dump_rust_ast, dump_rust_ast_with_symbols, dump_rust_symbol_table, dump_rust_ir, rust_strict_let_annotations, rust_strict_function_signatures) != 0) {
+      if (rust_frontend_compile_file(input_file, source, source_len, dump_rust_ast, dump_rust_ast_with_symbols, dump_rust_symbol_table, dump_rust_ir, rust_strict_let_annotations, rust_strict_function_signatures, rust_dump_phase) != 0) {
         free(source);
         return 1;
       }
     } else if (rust_backend_v1) {
-      if (rust_backend_bridge_compile_file(input_file, source, source_len, output_file, compile_only, rust_strict_let_annotations, rust_strict_function_signatures) != 0) {
+      if (rust_backend_bridge_compile_file(input_file, source, source_len, output_file, compile_only, rust_strict_let_annotations, rust_strict_function_signatures, rust_dump_phase) != 0) {
         free(source);
         return 1;
       }
       if (!enable_telemetry_stdout) printf("[OK] Rust backend bridge compilation completed.\n");
       free(source);
       return 0;
-    } else if (rust_frontend_compile_file(input_file, source, source_len, 0, 0, 0, 0, rust_strict_let_annotations, rust_strict_function_signatures) != 0) {
+    } else if (rust_frontend_compile_file(input_file, source, source_len, 0, 0, 0, 0, rust_strict_let_annotations, rust_strict_function_signatures, rust_dump_phase) != 0) {
       free(source);
       return 1;
     }

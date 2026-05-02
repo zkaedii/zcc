@@ -86,7 +86,8 @@ venv*/
 *.sarif
 data/
 assets/
-docs/
+docs/*
+!docs/rust_frontend_plan.md
 vault/
 contracts/
 mainnet_contracts/

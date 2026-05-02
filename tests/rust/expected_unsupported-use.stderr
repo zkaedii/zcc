@@ -1,0 +1,3 @@
+error[RUST-UNS-E0410]: unsupported Rust feature: `use` imports
+  --> tests/rust/unsupported-use.rs:1:1
+  hint: declare items in one file; import paths are not implemented

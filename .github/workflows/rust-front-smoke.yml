@@ -32,7 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
+        with:
+          submodules: false
 
       - name: Install host tools
         run: |
@@ -44,8 +46,8 @@ jobs:
           make rust-front-smoke | tee rust-front-smoke.log
 
       - name: Upload rust smoke log
-        if: failure()
-        uses: actions/upload-artifact@v4
+        if: failure() && hashFiles('rust-front-smoke.log') != ''
+        uses: actions/upload-artifact@v5
         with:
           name: rust-front-smoke-log
           path: rust-front-smoke.log

@@ -1,0 +1,3 @@
+error[RUST-UNS-E0406]: unsupported Rust feature: `impl` blocks
+  --> tests/rust/unsupported-impl.rs:1:1
+  hint: `impl` / inherent methods are not implemented; use free functions

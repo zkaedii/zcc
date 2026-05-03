@@ -4309,6 +4309,9 @@ static RegID zcc_lower_expr(LowerCtx *ctx, ZCCNode *node) {
     }
 
     Instr *st = calloc(1, sizeof(Instr));
+    st->id = ctx->next_instr_id++;
+    st->op = OP_STORE;
+    st->dst = 0;
     st->src[0] = val_r;
     st->src[1] = addr_r;
     st->n_src = 2;

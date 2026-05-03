@@ -47,14 +47,14 @@ cat part1.c part2.c part3.c ir.h ir_emit_dispatch.h ir_bridge.h part4.c part5.c 
 
 if [ ! -f zcc ]; then
     info "Building zcc from GCC"
-    gcc -O0 -w -fno-asynchronous-unwind-tables -o zcc zcc_pp.c compiler_passes.c compiler_passes_ir.c -lm
+    gcc -O0 -w -fno-asynchronous-unwind-tables -o zcc zcc_pp.c compiler_passes.c compiler_passes_ir.c ir_pass_manager.c -lm
 fi
 
 # Build zcc2 (AST selfhost) if not present
 if [ ! -f zcc2 ]; then
     info "Building zcc2 (AST selfhost)"
     ./zcc zcc.c -o zcc2.s 2>/dev/null
-    gcc -O0 -w -fno-asynchronous-unwind-tables -o zcc2 zcc2.s compiler_passes.c compiler_passes_ir.c -lm
+    gcc -O0 -w -fno-asynchronous-unwind-tables -o zcc2 zcc2.s compiler_passes.c compiler_passes_ir.c ir_pass_manager.c -lm
 fi
 
 pass "Build environment ready"
@@ -84,8 +84,12 @@ test_file() {
 
     # Link and run AST version
     if gcc -O0 -w -o "$TESTDIR/${name}_ast" "$TESTDIR/${name}_ast.s" -lm 2>/dev/null; then
-        "$TESTDIR/${name}_ast" > "$TESTDIR/${name}_ast.out" 2>&1 || true
+        timeout "$IR_TIMEOUT" "$TESTDIR/${name}_ast" > "$TESTDIR/${name}_ast.out" 2>&1 || true
         AST_RC=$?
+        if [ "$AST_RC" = "124" ]; then
+            fail "$name: AST execution timed out (>${IR_TIMEOUT}s)"
+            return
+        fi
     else
         fail "$name: AST link failed"
         return
@@ -93,8 +97,12 @@ test_file() {
 
     # Link and run IR version
     if gcc -O0 -w -o "$TESTDIR/${name}_ir" "$TESTDIR/${name}_ir.s" -lm 2>/dev/null; then
-        "$TESTDIR/${name}_ir" > "$TESTDIR/${name}_ir.out" 2>&1 || true
+        timeout "$IR_TIMEOUT" "$TESTDIR/${name}_ir" > "$TESTDIR/${name}_ir.out" 2>&1 || true
         IR_RC=$?
+        if [ "$IR_RC" = "124" ]; then
+            fail "$name: IR execution timed out (>${IR_TIMEOUT}s)"
+            return
+        fi
     else
         fail "$name: IR link failed"
         return

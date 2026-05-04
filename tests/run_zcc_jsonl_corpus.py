@@ -84,7 +84,7 @@ def _run(cmd, cwd, timeout=30):
             "stdout": "",
             "stderr": f"TIMEOUT after {timeout}s",
         }
-    except Exception as exc:  # noqa: BLE001
+    except (subprocess.SubprocessError, OSError) as exc:
         return {
             "cmd": cmd,
             "exit_code": -1,
@@ -147,7 +147,7 @@ def run_test_case(tc, zcc, reference, ldflags="-lm", compile_timeout=60, run_tim
         # 1. Materialise source
         try:
             src_path = _materialise_source(tc["source"], tmpdir)
-        except Exception as exc:  # noqa: BLE001
+        except (KeyError, ValueError, OSError, base64.binascii.Error) as exc:
             result["reason"] = f"source materialisation failed: {exc}"
             return result
 
@@ -217,41 +217,50 @@ def run_test_case(tc, zcc, reference, ldflags="-lm", compile_timeout=60, run_tim
         for dim in compare:
             if dim == "exit_code":
                 actual = target_run_data.get("exit_code")
-                if use_reference and ref_run_data:
-                    expected = ref_run_data.get("exit_code")
-                else:
-                    expected = oracle.get("expected_exit")
-                # Also check literal expected_exit if present alongside reference
                 literal_expected = oracle.get("expected_exit")
+                if use_reference and result.get("reference_run"):
+                    expected = ref_run_data.get("exit_code")
+                    if expected is None:
+                        mismatches.append("exit_code: reference_run missing exit_code")
+                        continue
+                else:
+                    expected = literal_expected
                 if actual != expected:
                     mismatches.append(
                         f"exit_code: got {actual!r}, want {expected!r}"
                     )
-                elif literal_expected is not None and actual != literal_expected:
+                elif (
+                    use_reference
+                    and literal_expected is not None
+                    and actual != literal_expected
+                ):
                     mismatches.append(
                         f"exit_code: got {actual!r}, literal oracle says {literal_expected!r}"
                     )
 
             elif dim == "stdout":
                 actual = target_run_data.get("stdout", "")
-                if use_reference and ref_run_data:
+                literal_expected = oracle.get("expected_stdout")
+                if use_reference and result.get("reference_run"):
                     expected = ref_run_data.get("stdout", "")
                 else:
-                    expected = oracle.get("expected_stdout", "")
-                # Also check literal expected_stdout if present alongside reference
-                literal_expected = oracle.get("expected_stdout")
+                    expected = literal_expected if literal_expected is not None else ""
                 if actual != expected:
                     mismatches.append(
                         f"stdout: got {actual!r}, want {expected!r}"
                     )
-                elif literal_expected is not None and actual != literal_expected:
+                elif (
+                    use_reference
+                    and literal_expected is not None
+                    and actual != literal_expected
+                ):
                     mismatches.append(
                         f"stdout: got {actual!r}, literal oracle says {literal_expected!r}"
                     )
 
             elif dim == "stderr":
                 actual = target_run_data.get("stderr", "")
-                if use_reference and ref_run_data:
+                if use_reference and result.get("reference_run"):
                     expected = ref_run_data.get("stderr", "")
                 else:
                     expected = oracle.get("expected_stderr", "")

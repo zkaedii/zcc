@@ -1,7 +1,7 @@
 {
   "_comment": "WSL environment overrides for Windows hosts. Bug hunter applies these substitutions to corpus argv before execution.",
   "compiler_map": {
-    "zcc": ["wsl", "--", "/mnt/c/Users/zkaed/Downloads/zcc-main/zcc-main/zcc"],
+    "zcc": ["wsl", "--", "/mnt/c/Users/zkaed/Downloads/zcc-integrate/zcc"],
     "cc":  ["wsl", "--", "gcc"],
     "gcc": ["wsl", "--", "gcc"]
   },

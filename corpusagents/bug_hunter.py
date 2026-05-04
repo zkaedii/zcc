@@ -738,7 +738,32 @@ def cmd_run(args: argparse.Namespace) -> int:
                 # Surface worker exceptions as non-fatal; don't silently absorb.
                 with _PRINT_LOCK:
                     print(f"[WORKER-ERROR] entry #{futures[fut]}: {exc}", file=sys.stderr)
-                continue
+                idx = futures[fut]
+                finding = Finding(
+                    name=entries[idx].get("name", "unknown"),
+                    category="pipeline_crash",
+                    violated_invariant_ids=[],
+                    primary_invariant_name="",
+                    status="confirmed",
+                    severity="P0",
+                    evidence_strength="strong",
+                    trigger="",
+                    expected={},
+                    actual={},
+                    target_run={},
+                    reference_run={},
+                    diffs=[f"Worker thread crashed: {exc}"],
+                    causal_chain="",
+                    suggested_fix="",
+                    regression_test="",
+                    ship_decision="hold",
+                    ship_rationale=["Worker exception prevented assessment"],
+                    repro_sha256="",
+                    notes="",
+                    base64_payload="",
+                    counterexamples_tried=[],
+                    remaining_uncertainty="",
+                )
             results.append((idx, finding))
             counts[finding.ship_decision] = counts.get(finding.ship_decision, 0) + 1
             invs = ",".join(finding.violated_invariant_ids[:3])

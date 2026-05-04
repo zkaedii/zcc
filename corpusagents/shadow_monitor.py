@@ -83,13 +83,13 @@ class ShadowLogger:
 
     def emit(self, event: str, level: str, payload: dict[str, Any]) -> None:
         record = {
+            **payload,
             "ts":      time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "ts_ns":   time.perf_counter_ns(),
             "event":   event,
             "level":   level,   # INFO | WARN | ERROR | FATAL | P0 | P1
             "pid":     os.getpid(),
             "thread":  threading.current_thread().name,
-            **payload,
         }
         line = json.dumps(record, default=str) + "\n"
         with _LOG_LOCK:

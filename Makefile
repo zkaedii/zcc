@@ -18,7 +18,7 @@ COMPAT_SMOKE_SRCS = \
 	tests/test_asm_real.c
 COMPAT_EXTENDED_SRCS = $(COMPAT_SMOKE_SRCS) raytracer.c
 
-.PHONY: all clean selfhost selfhost-fast compat-smoke compat-extended compat-report compat-report-ci pp-crlf-gate fortify-ad fortify-ci fortify-snapshot fortify-recursive fortify-recursive-ci fortify-pack-init fortify-pack-preflight fortify-pack-layout fortify-pack-production fortify-pack-replay fortify-pack-clean supercharge-ad test rust-front-smoke
+.PHONY: all clean selfhost selfhost-fast compat-smoke compat-extended compat-report compat-report-ci pp-crlf-gate fortify-ad fortify-ci fortify-snapshot fortify-recursive fortify-recursive-ci fortify-pack-init fortify-pack-preflight fortify-pack-layout fortify-pack-production fortify-pack-replay fortify-pack-clean supercharge-ad test rust-front-smoke check-phi-liveness-jsonl
 
 all: zcc
 
@@ -336,6 +336,9 @@ supercharge-ad: selfhost-fast compat-smoke
 
 test: zcc
 	bash zcc_test_suite.sh --quick
+
+check-phi-liveness-jsonl: zcc
+	python3 tests/run_zcc_jsonl_corpus.py tests/codegen/zcc_ir_phi_liveness_corpus.jsonl
 
 asan: zcc.c $(PASSES)
 	$(CC) -fsanitize=address -O0 -g -o zcc_asan zcc.c $(PASSES) $(LDFLAGS)

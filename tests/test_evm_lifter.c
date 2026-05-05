@@ -1820,7 +1820,7 @@ static void test_t80_support_accounting(void) {
     
     /* Ensure no basic regression in assignment space */
     CHECK(total_assigned >= 140, "At least 140 opcodes must be assigned to an active class");
-    CHECK(placeholder <= 4, "Placeholder count should strictly diminish (only EXP/SIGNEXTEND/BYTE/SELFDESTRUCT remain)");
+    CHECK(placeholder <= 0, "Zero placeholders remaining (all arithmetic/logic exact)");
 }
 
 /* ── T81: EQ with wide known constants ───────────────────────────── */
@@ -2583,6 +2583,142 @@ static void test_t88_bitwise_wide(void) {
     ir_module_free(mod);
 }
 
+/* ── T89: Exact BYTE / SIGNEXTEND / EXP propagation ───────────────── */
+static void test_t89_byte_signextend_exp(void) {
+    ir_module_t *mod;
+    evm_lifter_t ls;
+    evm_lift_result_t res;
+
+    TEST("T89: Exact wide BYTE / SIGNEXTEND / EXP");
+
+    /* ── BYTE tests ─────────────────── */
+    /* BYTE(0, 0xABCD...): extract byte 0 (MSB) of value 0xABCD..0000
+     * PUSH32(0xAB00..00) then PUSH1(0) then BYTE */
+    {
+        unsigned char bc_byte0[36];
+        memset(bc_byte0, 0, sizeof(bc_byte0));
+        bc_byte0[0] = 0x7f; /* PUSH32 */
+        bc_byte0[1] = 0xAB; /* MSB = 0xAB */
+        /* bytes 2..32 stay 0 */
+        bc_byte0[33] = 0x60; /* PUSH1 */
+        bc_byte0[34] = 0x00; /* pos = 0 */
+        bc_byte0[35] = 0x1a; /* BYTE */
+
+        mod = new_module();
+        lift_bytes(&ls, mod, bc_byte0, 36);
+        res = evm_lift_bytecode(&ls);
+        CHECK(res == EVM_LIFT_OK, "BYTE(0, val) lift OK");
+        CHECK(ls.stack.state[0] == EVM_VAL_KNOWN_WIDE, "BYTE yields wide known");
+        CHECK(ls.stack.const_vals[0] == 0xAB, "BYTE(0, 0xAB00...) = 0xAB");
+        evm_lifter_destroy(&ls);
+        ir_module_free(mod);
+    }
+
+    /* BYTE(31, 0x00..FF): extract last byte (LSB) */
+    {
+        unsigned char bc_byte31[36];
+        memset(bc_byte31, 0, sizeof(bc_byte31));
+        bc_byte31[0] = 0x7f; /* PUSH32 */
+        /* bytes 1..32: all 0 except last */
+        bc_byte31[32] = 0xCD; /* LSB = 0xCD */
+        bc_byte31[33] = 0x60; /* PUSH1 */
+        bc_byte31[34] = 0x1f; /* pos = 31 */
+        bc_byte31[35] = 0x1a; /* BYTE */
+
+        mod = new_module();
+        lift_bytes(&ls, mod, bc_byte31, 36);
+        res = evm_lift_bytecode(&ls);
+        CHECK(res == EVM_LIFT_OK, "BYTE(31, val) lift OK");
+        CHECK(ls.stack.state[0] == EVM_VAL_KNOWN_WIDE, "BYTE(31) yields wide known");
+        CHECK(ls.stack.const_vals[0] == 0xCD, "BYTE(31, 0x..CD) = 0xCD");
+        evm_lifter_destroy(&ls);
+        ir_module_free(mod);
+    }
+
+    /* BYTE(32, val): out of range → 0 */
+    {
+        unsigned char bc_byte_oor[] = { 0x60, 0xFF, 0x60, 0x20, 0x1a };
+        mod = new_module();
+        lift_bytes(&ls, mod, bc_byte_oor, 5);
+        res = evm_lift_bytecode(&ls);
+        CHECK(res == EVM_LIFT_OK, "BYTE(32, val) out-of-range lift OK");
+        CHECK(ls.stack.const_vals[0] == 0, "BYTE(32, ...) = 0");
+        evm_lifter_destroy(&ls);
+        ir_module_free(mod);
+    }
+
+    /* ── SIGNEXTEND tests ───────────── */
+    /* SIGNEXTEND(0, 0x7F): extend 8-bit 0x7F (positive) → 0x000..7F */
+    {
+        unsigned char bc_sext_pos[] = { 0x60, 0x7f, 0x60, 0x00, 0x0b };
+        mod = new_module();
+        lift_bytes(&ls, mod, bc_sext_pos, 5);
+        res = evm_lift_bytecode(&ls);
+        CHECK(res == EVM_LIFT_OK, "SIGNEXTEND(0, 0x7F) lift OK");
+        CHECK(ls.stack.state[0] == EVM_VAL_KNOWN_WIDE, "SIGNEXTEND yields wide known");
+        CHECK(ls.stack.const_vals[0] == 0x7f, "SIGNEXTEND(0, 0x7F) = 0x7F (positive)");
+        evm_lifter_destroy(&ls);
+        ir_module_free(mod);
+    }
+
+    /* SIGNEXTEND(0, 0x80): extend 8-bit 0x80 (negative) → 0xFFFF..80 */
+    {
+        unsigned char bc_sext_neg[] = { 0x60, 0x80, 0x60, 0x00, 0x0b };
+        mod = new_module();
+        lift_bytes(&ls, mod, bc_sext_neg, 5);
+        res = evm_lift_bytecode(&ls);
+        CHECK(res == EVM_LIFT_OK, "SIGNEXTEND(0, 0x80) lift OK");
+        CHECK(ls.stack.state[0] == EVM_VAL_KNOWN_WIDE, "SIGNEXTEND neg yields wide known");
+        CHECK(ls.stack.wide_vals[0].bytes[0] == 0xFF, "SIGNEXTEND(0,0x80) MSB = 0xFF");
+        CHECK(ls.stack.wide_vals[0].bytes[31] == 0x80, "SIGNEXTEND(0,0x80) LSB = 0x80");
+        evm_lifter_destroy(&ls);
+        ir_module_free(mod);
+    }
+
+    /* ── EXP tests ─────────────────── */
+    /* 2^10 = 1024 = 0x400 */
+    {
+        unsigned char bc_exp[] = { 0x61, 0x04, 0x00, 0x60, 0x02, 0x0a };
+        /* PUSH2(0x0400=1024 placeholder; actually we want base=2, exp=10)
+         * Correct order: PUSH1(2), PUSH1(10), EXP */
+        unsigned char bc_exp2[4] = { 0x60, 0x02, 0x60, 0x0a }; /* base=2, exp=10 */
+        /* bc_exp2 = PUSH1 2, PUSH1 10, then EXP */
+        unsigned char bc_exp3[5] = { 0x60, 0x02, 0x60, 0x0a, 0x0a };
+        mod = new_module();
+        lift_bytes(&ls, mod, bc_exp3, 5);
+        res = evm_lift_bytecode(&ls);
+        CHECK(res == EVM_LIFT_OK, "EXP 2^10 lift OK");
+        CHECK(ls.stack.state[0] == EVM_VAL_KNOWN_WIDE, "EXP yields wide known");
+        CHECK(ls.stack.const_vals[0] == 1024, "EXP 2^10 = 1024");
+        evm_lifter_destroy(&ls);
+        ir_module_free(mod);
+    }
+
+    /* 3^0 = 1 */
+    {
+        unsigned char bc_exp_zero[] = { 0x60, 0x03, 0x60, 0x00, 0x0a };
+        mod = new_module();
+        lift_bytes(&ls, mod, bc_exp_zero, 5);
+        res = evm_lift_bytecode(&ls);
+        CHECK(res == EVM_LIFT_OK, "EXP 3^0 lift OK");
+        CHECK(ls.stack.const_vals[0] == 1, "EXP 3^0 = 1");
+        evm_lifter_destroy(&ls);
+        ir_module_free(mod);
+    }
+
+    /* 0^5 = 0 */
+    {
+        unsigned char bc_exp_base0[] = { 0x60, 0x00, 0x60, 0x05, 0x0a };
+        mod = new_module();
+        lift_bytes(&ls, mod, bc_exp_base0, 5);
+        res = evm_lift_bytecode(&ls);
+        CHECK(res == EVM_LIFT_OK, "EXP 0^5 lift OK");
+        CHECK(ls.stack.const_vals[0] == 0, "EXP 0^5 = 0");
+        evm_lifter_destroy(&ls);
+        ir_module_free(mod);
+    }
+}
+
 /* ── main ─────────────────────────────────────────────────────────── */
 
 int main(void) {
@@ -2679,6 +2815,7 @@ int main(void) {
     test_t86_mul_wide();
     test_t87_div_mod_wide();
     test_t88_bitwise_wide();
+    test_t89_byte_signextend_exp();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     if (g_fail > 0) {

@@ -114,6 +114,7 @@ static void test_t01_empty(void) {
     CHECK(res == EVM_LIFT_OK,          "lift returns OK");
     CHECK(ls.insn_count == 0,          "0 instructions counted");
     CHECK(ls.func->node_count == 0,    "0 IR nodes emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -129,6 +130,7 @@ static void test_t02_stop(void) {
     CHECK(res == EVM_LIFT_OK,                      "lift returns OK");
     CHECK(ls.insn_count == 1,                      "1 instruction counted");
     CHECK(count_op(ls.func, IR_RET) == 1,          "1 IR_RET node emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -148,6 +150,7 @@ static void test_t03_push1(void) {
     n = find_op(ls.func, IR_CONST);
     CHECK(n != NULL,                       "IR_CONST node emitted");
     if (n) CHECK(n->imm == 0x42,           "IR_CONST imm == 0x42");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -168,6 +171,7 @@ static void test_t04_push8(void) {
     n = find_op(ls.func, IR_CONST);
     CHECK(n != NULL,             "IR_CONST node emitted");
     if (n) CHECK(n->imm == 0x0102030405060708L, "PUSH8 imm correct");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -194,6 +198,7 @@ static void test_t05_push32_truncation(void) {
     CHECK(n != NULL,              "IR_CONST node emitted");
     /* The truncated 64-bit value is the last 8 of the 32 bytes pushed.
      * Bytes shifted left: first byte 0xAB dominates high bits of long. */
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -211,6 +216,7 @@ static void test_t06_push_add(void) {
     CHECK(ls.stack.depth == 1,             "stack depth 1 after ADD");
     CHECK(count_op(ls.func, IR_CONST) == 2,"2 IR_CONST nodes");
     CHECK(count_op(ls.func, IR_ADD)   == 1,"1 IR_ADD node");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -238,6 +244,7 @@ static void test_t07_call_tag(void) {
     CHECK(count_tagged(ls.func, (int)IR_TAG_UNTRUSTED_EXTERNAL_CALL) == 1,
           "1 IR node tagged UNTRUSTED_EXTERNAL_CALL");
     CHECK(ls.stack.depth == 1, "success flag on stack after CALL");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -258,6 +265,7 @@ static void test_t08_delegatecall_tag(void) {
     CHECK(ls.call_count == 1, "call_count == 1");
     CHECK(count_tagged(ls.func, (int)IR_TAG_UNTRUSTED_EXTERNAL_CALL) == 1,
           "1 node tagged UNTRUSTED_EXTERNAL_CALL for DELEGATECALL");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -277,6 +285,7 @@ static void test_t09_callcode_tag(void) {
     CHECK(res == EVM_LIFT_OK, "lift returns OK");
     CHECK(count_tagged(ls.func, (int)IR_TAG_UNTRUSTED_EXTERNAL_CALL) == 1,
           "1 node tagged UNTRUSTED_EXTERNAL_CALL for CALLCODE");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -296,6 +305,7 @@ static void test_t10_staticcall_tag(void) {
     CHECK(res == EVM_LIFT_OK, "lift returns OK");
     CHECK(count_tagged(ls.func, (int)IR_TAG_STATIC_CALL) == 1,
           "1 node tagged IR_TAG_STATIC_CALL for STATICCALL");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -315,6 +325,7 @@ static void test_t11_sstore_tag(void) {
     CHECK(res == EVM_LIFT_OK, "lift returns OK");
     CHECK(count_tagged(ls.func, (int)IR_TAG_SSTORE) == 1,
           "1 node tagged IR_TAG_SSTORE");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -334,6 +345,7 @@ static void test_t12_selfdestruct_tag(void) {
     CHECK(res == EVM_LIFT_OK, "lift returns OK");
     CHECK(count_tagged(ls.func, (int)IR_TAG_SELFDESTRUCT) == 1,
           "1 node tagged IR_TAG_SELFDESTRUCT");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -353,6 +365,7 @@ static void test_t13_revert_tag(void) {
     CHECK(res == EVM_LIFT_OK, "lift returns OK");
     CHECK(count_tagged(ls.func, (int)IR_TAG_EVM_BARRIER) == 1,
           "1 node tagged IR_TAG_EVM_BARRIER for REVERT");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -368,6 +381,7 @@ static void test_t14_invalid_tag(void) {
     CHECK(res == EVM_LIFT_OK, "lift returns OK for INVALID opcode");
     CHECK(count_tagged(ls.func, (int)IR_TAG_EVM_BARRIER) == 1,
           "1 node tagged IR_TAG_EVM_BARRIER for INVALID");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -384,6 +398,7 @@ static void test_t15_push1_truncated(void) {
     CHECK(res == EVM_LIFT_TRUNCATED, "returns EVM_LIFT_TRUNCATED");
     CHECK(ls.error != 0,             "ls.error is set");
     CHECK(ls.errmsg[0] != '\0',      "ls.errmsg is non-empty");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -398,6 +413,7 @@ static void test_t16_push4_truncated(void) {
     lift_bytes(&ls, mod, bc, 3);
     res = evm_lift_step(&ls);
     CHECK(res == EVM_LIFT_TRUNCATED, "returns EVM_LIFT_TRUNCATED");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -413,6 +429,7 @@ static void test_t17_stack_underflow(void) {
     res = evm_lift_step(&ls);
     CHECK(res == EVM_LIFT_STACK_UNDER, "returns EVM_LIFT_STACK_UNDER");
     CHECK(ls.error != 0,               "ls.error is set");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -429,6 +446,7 @@ static void test_t18_dup1(void) {
     CHECK(res == EVM_LIFT_OK,  "lift returns OK");
     CHECK(ls.stack.depth == 2, "stack depth 2 after DUP1");
     CHECK(count_op(ls.func, IR_COPY) == 1, "1 IR_COPY node from DUP");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -459,6 +477,7 @@ static void test_t19_swap1(void) {
           "new TOS is the old second item");
     CHECK(strcmp(ls.stack.slots[ls.stack.depth - 2], top_saved)   == 0,
           "new second item is the old TOS");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -476,6 +495,7 @@ static void test_t20_jumpdest_label(void) {
     n = find_op(ls.func, IR_LABEL);
     CHECK(n != NULL, "IR_LABEL node emitted");
     if (n) CHECK(n->label[0] == '.', "label starts with '.'");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -537,6 +557,7 @@ static void test_t24_ir_dump(void) {
     ir_module_emit_text(mod, stderr);
     CHECK(ls.func->node_count > 0, "function has IR nodes after lift");
     CHECK(ls.call_count == 1,      "1 CALL-family instruction logged");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -561,6 +582,7 @@ static void test_t25_multi_call_counters(void) {
           "tagged_count >= 2 (at least one tag per CALL)");
     CHECK(count_tagged(ls.func, (int)IR_TAG_UNTRUSTED_EXTERNAL_CALL) == 2,
           "2 nodes tagged UNTRUSTED_EXTERNAL_CALL");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -590,6 +612,7 @@ static void test_t26_sub(void) {
     CHECK(res == EVM_LIFT_OK,               "lift returns OK");
     CHECK(ls.stack.depth == 1,              "stack depth 1 after SUB");
     CHECK(count_op(ls.func, IR_SUB) == 1,   "1 IR_SUB node emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -607,6 +630,7 @@ static void test_t27_mul(void) {
     CHECK(res == EVM_LIFT_OK,             "lift returns OK");
     CHECK(ls.stack.depth == 1,            "stack depth 1 after MUL");
     CHECK(count_op(ls.func, IR_MUL) == 1, "1 IR_MUL node emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -625,6 +649,7 @@ static void test_t28_div_sdiv(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "DIV: lift returns OK");
     CHECK(count_op(ls.func, IR_DIV) == 1, "DIV: 1 IR_DIV emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -632,6 +657,7 @@ static void test_t28_div_sdiv(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "SDIV: lift returns OK");
     CHECK(count_op(ls.func, IR_DIV) == 1, "SDIV: 1 IR_DIV emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -649,6 +675,7 @@ static void test_t29_mod_smod(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "MOD: lift returns OK");
     CHECK(count_op(ls.func, IR_MOD) == 1, "MOD: 1 IR_MOD emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -656,6 +683,7 @@ static void test_t29_mod_smod(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "SMOD: lift returns OK");
     CHECK(count_op(ls.func, IR_MOD) == 1, "SMOD: 1 IR_MOD emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -670,23 +698,25 @@ static void test_t30_addmod_mulmod(void) {
     ir_module_t *mod;
     evm_lifter_t ls;
     evm_lift_result_t res;
-    /* PUSH0 x2, ADDMOD (0x08) — scaffold pops 2, pushes 1 */
-    static const unsigned char bc_addmod[] = { 0x5f, 0x5f, 0x08 };
-    /* PUSH0 x2, MULMOD (0x09) */
-    static const unsigned char bc_mulmod[] = { 0x5f, 0x5f, 0x09 };
-    TEST("T30: ADDMOD/MULMOD emit IR_NOP and push result (scaffold pop-2 contract)");
+    /* PUSH0 x3, ADDMOD (0x08) — scaffold pops 3, pushes 1 */
+    static const unsigned char bc_addmod[] = { 0x5f, 0x5f, 0x5f, 0x08 };
+    /* PUSH0 x3, MULMOD (0x09) */
+    static const unsigned char bc_mulmod[] = { 0x5f, 0x5f, 0x5f, 0x09 };
+    TEST("T30: ADDMOD/MULMOD emit IR_NOP and push result (scaffold pop-3 contract)");
     mod = new_module();
-    lift_bytes(&ls, mod, bc_addmod, 3);
+    lift_bytes(&ls, mod, bc_addmod, 4);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,  "ADDMOD: lift returns OK");
     CHECK(ls.stack.depth == 1, "ADDMOD: 1 result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
-    lift_bytes(&ls, mod, bc_mulmod, 3);
+    lift_bytes(&ls, mod, bc_mulmod, 4);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,  "MULMOD: lift returns OK");
     CHECK(ls.stack.depth == 1, "MULMOD: 1 result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -703,6 +733,7 @@ static void test_t31_exp(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,  "lift returns OK");
     CHECK(ls.stack.depth == 1, "1 result on stack after EXP");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -721,6 +752,7 @@ static void test_t32_signextend_byte(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,  "SIGNEXTEND: lift returns OK");
     CHECK(ls.stack.depth == 1, "SIGNEXTEND: 1 result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -728,6 +760,7 @@ static void test_t32_signextend_byte(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,  "BYTE: lift returns OK");
     CHECK(ls.stack.depth == 1, "BYTE: 1 result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -747,6 +780,7 @@ static void test_t33_lt_slt(void) {
     CHECK(res == EVM_LIFT_OK,            "LT: lift returns OK");
     CHECK(count_op(ls.func, IR_LT) == 1, "LT: 1 IR_LT emitted");
     CHECK(ls.stack.depth == 1,           "LT: result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -754,6 +788,7 @@ static void test_t33_lt_slt(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,            "SLT: lift returns OK");
     CHECK(count_op(ls.func, IR_LT) == 1, "SLT: 1 IR_LT emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -771,6 +806,7 @@ static void test_t34_gt_sgt(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,            "GT: lift returns OK");
     CHECK(count_op(ls.func, IR_GT) == 1, "GT: 1 IR_GT emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -778,6 +814,7 @@ static void test_t34_gt_sgt(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,            "SGT: lift returns OK");
     CHECK(count_op(ls.func, IR_GT) == 1, "SGT: 1 IR_GT emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -795,6 +832,7 @@ static void test_t35_eq(void) {
     CHECK(res == EVM_LIFT_OK,            "EQ: lift returns OK");
     CHECK(count_op(ls.func, IR_EQ) == 1, "EQ: 1 IR_EQ emitted");
     CHECK(ls.stack.depth == 1,           "EQ: result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -813,6 +851,7 @@ static void test_t36_iszero(void) {
     /* ISZERO emits CONST 0 + EQ */
     CHECK(count_op(ls.func, IR_EQ) >= 1, "ISZERO: at least 1 IR_EQ emitted");
     CHECK(ls.stack.depth == 1,           "ISZERO: result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -830,6 +869,7 @@ static void test_t37_and(void) {
     CHECK(res == EVM_LIFT_OK,             "AND: lift returns OK");
     CHECK(count_op(ls.func, IR_AND) == 1, "AND: 1 IR_AND emitted");
     CHECK(ls.stack.depth == 1,            "AND: result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -846,6 +886,7 @@ static void test_t38_or(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,            "OR: lift returns OK");
     CHECK(count_op(ls.func, IR_OR) == 1, "OR: 1 IR_OR emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -862,6 +903,7 @@ static void test_t39_xor(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "XOR: lift returns OK");
     CHECK(count_op(ls.func, IR_XOR) == 1, "XOR: 1 IR_XOR emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -879,6 +921,7 @@ static void test_t40_not(void) {
     CHECK(res == EVM_LIFT_OK,             "NOT: lift returns OK");
     CHECK(count_op(ls.func, IR_NOT) == 1, "NOT: 1 IR_NOT emitted");
     CHECK(ls.stack.depth == 1,            "NOT: result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -895,6 +938,7 @@ static void test_t41_shl(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "SHL: lift returns OK");
     CHECK(count_op(ls.func, IR_SHL) == 1, "SHL: 1 IR_SHL emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -912,6 +956,7 @@ static void test_t42_shr_sar(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "SHR: lift returns OK");
     CHECK(count_op(ls.func, IR_SHR) == 1, "SHR: 1 IR_SHR emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -919,6 +964,7 @@ static void test_t42_shr_sar(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "SAR: lift returns OK");
     CHECK(count_op(ls.func, IR_SHR) == 1, "SAR: 1 IR_SHR emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -929,12 +975,15 @@ static void test_t43_sha3(void) {
     evm_lift_result_t res;
     /* PUSH0 x2, SHA3 (0x20) */
     static const unsigned char bc[] = { 0x5f, 0x5f, 0x20 };
-    TEST("T43: SHA3 emits IR_NOP result on stack");
+    TEST("T43: SHA3 emits IR_CALL tagged IR_TAG_SHA3 result on stack");
     mod = new_module();
     lift_bytes(&ls, mod, bc, 3);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,  "SHA3: lift returns OK");
     CHECK(ls.stack.depth == 1, "SHA3: result on stack");
+    CHECK(count_op(ls.func, IR_CALL) == 1, "SHA3: 1 IR_CALL emitted");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_SHA3) == 1, "SHA3: 1 IR_TAG_SHA3 emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -952,6 +1001,7 @@ static void test_t44_mload(void) {
     CHECK(res == EVM_LIFT_OK,               "MLOAD: lift returns OK");
     CHECK(count_op(ls.func, IR_LOAD) == 1,  "MLOAD: 1 IR_LOAD emitted");
     CHECK(ls.stack.depth == 1,              "MLOAD: result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -969,6 +1019,7 @@ static void test_t45_mstore(void) {
     CHECK(res == EVM_LIFT_OK,               "MSTORE: lift returns OK");
     CHECK(count_op(ls.func, IR_STORE) == 1, "MSTORE: 1 IR_STORE emitted");
     CHECK(ls.stack.depth == 0,              "MSTORE: nothing left on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -986,6 +1037,7 @@ static void test_t46_mstore8(void) {
     CHECK(res == EVM_LIFT_OK,               "MSTORE8: lift returns OK");
     CHECK(count_op(ls.func, IR_STORE) == 1, "MSTORE8: 1 IR_STORE emitted");
     CHECK(ls.stack.depth == 0,              "MSTORE8: no leftover stack items");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1003,6 +1055,7 @@ static void test_t47_sload(void) {
     CHECK(res == EVM_LIFT_OK,              "SLOAD: lift returns OK");
     CHECK(count_op(ls.func, IR_LOAD) == 1, "SLOAD: 1 IR_LOAD emitted");
     CHECK(ls.stack.depth == 1,             "SLOAD: result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1019,6 +1072,7 @@ static void test_t48_pop_success(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "POP: lift returns OK");
     CHECK(ls.stack.depth == 0,  "POP: stack empty after pop");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1027,14 +1081,21 @@ static void test_t49_jump(void) {
     ir_module_t *mod;
     evm_lifter_t ls;
     evm_lift_result_t res;
-    /* PUSH0, JUMP (0x56) */
-    static const unsigned char bc[] = { 0x5f, 0x56 };
-    TEST("T49: JUMP emits IR_NOP with target temp");
+    const ir_node_t *br;
+    /* PUSH1 0x04, JUMP (0x56), STOP, JUMPDEST (at 0x04) */
+    static const unsigned char bc[] = { 0x60, 0x04, 0x56, 0x00, 0x5b };
+    TEST("T49: JUMP emits IR_BR with resolved constant target");
     mod = new_module();
-    lift_bytes(&ls, mod, bc, 2);
+    evm_lifter_init(&ls, bc, 5, mod);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "JUMP: lift returns OK");
     CHECK(ls.stack.depth == 0,  "JUMP: consumes target, nothing left on stack");
+    br = find_op(ls.func, IR_BR);
+    CHECK(br != NULL, "JUMP: IR_BR emitted for constant target");
+    if (br && br->label) {
+        CHECK(strcmp(br->label, ".L_evm_4") == 0, "JUMP: resolved target label correctly");
+    }
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1043,15 +1104,22 @@ static void test_t50_jumpi(void) {
     ir_module_t *mod;
     evm_lifter_t ls;
     evm_lift_result_t res;
-    /* PUSH0 x2, JUMPI (0x57) */
-    static const unsigned char bc[] = { 0x5f, 0x5f, 0x57 };
-    TEST("T50: JUMPI emits IR_BR_IF");
+    const ir_node_t *br;
+    /* PUSH1 0x01 (cond), PUSH1 0x08 (target), JUMPI (0x57), STOP, STOP, STOP, JUMPDEST (at 0x08) */
+    static const unsigned char bc[] = { 0x60, 0x01, 0x60, 0x08, 0x57, 0x00, 0x00, 0x00, 0x5b };
+    TEST("T50: JUMPI emits IR_BR_IF with resolved constant target");
     mod = new_module();
-    lift_bytes(&ls, mod, bc, 3);
+    evm_lifter_init(&ls, bc, 9, mod);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,                "JUMPI: lift returns OK");
     CHECK(count_op(ls.func, IR_BR_IF) == 1,  "JUMPI: 1 IR_BR_IF emitted");
     CHECK(ls.stack.depth == 0,               "JUMPI: nothing left on stack");
+    br = find_op(ls.func, IR_BR_IF);
+    CHECK(br != NULL, "JUMPI: IR_BR_IF emitted");
+    if (br && br->label) {
+        CHECK(strcmp(br->label, ".L_evm_8") == 0, "JUMPI: resolved target label correctly");
+    }
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1068,6 +1136,7 @@ static void test_t51_return(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,             "RETURN: lift returns OK");
     CHECK(count_op(ls.func, IR_RET) == 1, "RETURN: 1 IR_RET emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1088,6 +1157,7 @@ static void test_t52_push0_standalone(void) {
     n = find_op(ls.func, IR_CONST);
     CHECK(n != NULL,            "PUSH0: IR_CONST emitted");
     if (n) CHECK(n->imm == 0L,  "PUSH0: imm == 0");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1107,6 +1177,7 @@ static void test_t53_push2(void) {
     n = find_op(ls.func, IR_CONST);
     CHECK(n != NULL,                  "PUSH2: IR_CONST emitted");
     if (n) CHECK(n->imm == 0x1234L,   "PUSH2: imm == 0x1234");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1122,14 +1193,18 @@ static void test_t54_push16(void) {
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08
     };
     const ir_node_t *n;
-    TEST("T54: PUSH16 (wide push, low 8 bytes kept)");
+    TEST("T54: PUSH16 (wide push, low 8 bytes kept and tagged)");
     mod = new_module();
     lift_bytes(&ls, mod, bc, 17);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,                      "PUSH16: lift returns OK");
     n = find_op(ls.func, IR_CONST);
     CHECK(n != NULL,                               "PUSH16: IR_CONST emitted");
-    if (n) CHECK(n->imm == 0x0102030405060708L,    "PUSH16: low 8 bytes correct");
+    if (n) {
+        CHECK(n->imm == 0x0102030405060708L,       "PUSH16: low 8 bytes correct");
+        CHECK(n->tag == (int)IR_TAG_TRUNCATED_WIDE_CONST, "PUSH16: tagged TRUNCATED_WIDE_CONST");
+    }
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1147,6 +1222,7 @@ static void test_t55_env_zero_arg_a(void) {
     CHECK(res == EVM_LIFT_OK,                    "ENV-0: lift returns OK");
     CHECK(ls.stack.depth == 3,                   "ENV-0: 3 items on stack");
     CHECK(count_op(ls.func, IR_CONST) == 3,      "ENV-0: 3 IR_CONST nodes");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1163,6 +1239,7 @@ static void test_t56_env_zero_arg_b(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,               "ENV-0b: lift returns OK");
     CHECK(ls.stack.depth == 3,              "ENV-0b: 3 items on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1179,6 +1256,7 @@ static void test_t57_env_zero_arg_c(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "GASPRICE/RTDATASIZE: lift OK");
     CHECK(ls.stack.depth == 2,  "GASPRICE/RTDATASIZE: 2 items on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1195,6 +1273,7 @@ static void test_t58_block_zero_arg_a(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "block-0a: lift returns OK");
     CHECK(ls.stack.depth == 3,  "block-0a: 3 items on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1211,6 +1290,7 @@ static void test_t59_block_zero_arg_b(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "block-0b: lift returns OK");
     CHECK(ls.stack.depth == 3,  "block-0b: 3 items on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1227,6 +1307,7 @@ static void test_t60_block_zero_arg_c(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "block-0c: lift returns OK");
     CHECK(ls.stack.depth == 2,  "block-0c: 2 items on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1243,6 +1324,7 @@ static void test_t61_pc_msize_gas(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "PC/MSIZE/GAS: lift returns OK");
     CHECK(ls.stack.depth == 3,  "PC/MSIZE/GAS: 3 items on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1262,6 +1344,7 @@ static void test_t62_env_one_arg_a(void) {
     CHECK(res == EVM_LIFT_OK,              "BALANCE: lift OK");
     CHECK(count_op(ls.func, IR_LOAD) == 1, "BALANCE: 1 IR_LOAD emitted");
     CHECK(ls.stack.depth == 1,             "BALANCE: result on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -1269,6 +1352,7 @@ static void test_t62_env_one_arg_a(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,              "CALLDATALOAD: lift OK");
     CHECK(count_op(ls.func, IR_LOAD) == 1, "CALLDATALOAD: 1 IR_LOAD emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1289,6 +1373,7 @@ static void test_t63_env_one_arg_b(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,              "EXTCODESIZE: lift OK");
     CHECK(count_op(ls.func, IR_LOAD) == 1, "EXTCODESIZE: IR_LOAD emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -1296,6 +1381,7 @@ static void test_t63_env_one_arg_b(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,              "EXTCODEHASH: lift OK");
     CHECK(count_op(ls.func, IR_LOAD) == 1, "EXTCODEHASH: IR_LOAD emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -1303,37 +1389,39 @@ static void test_t63_env_one_arg_b(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,              "BLOCKHASH: lift OK");
     CHECK(count_op(ls.func, IR_LOAD) == 1, "BLOCKHASH: IR_LOAD emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
-/* ── T64: CALLDATACOPY / CODECOPY (scaffold: pops 2, pushes 1 IR_NOP) ─
+/* ── T64: CALLDATACOPY / CODECOPY (pops 3, pushes 0 IR_CALL) ─
  *
- * The scaffold lifter groups CALLDATACOPY/CODECOPY with SHA3 in the same
- * case (all pop 2, push 1 NOP result). True EVM semantics pop 3 and push 0.
- * This test documents and verifies the scaffold's simplified contract.
- * Tests use a 2-item preamble matching the scaffold's pop-2 behaviour.
+ * True EVM semantics pop 3 and push 0.
  */
 static void test_t64_copy_ops_3arg(void) {
     ir_module_t *mod;
     evm_lifter_t ls;
     evm_lift_result_t res;
-    /* PUSH0 x2, CALLDATACOPY (0x37) — scaffold pops 2, pushes 1 */
-    static const unsigned char bc_cdc[] = { 0x5f, 0x5f, 0x37 };
-    /* PUSH0 x2, CODECOPY (0x39) */
-    static const unsigned char bc_cc[]  = { 0x5f, 0x5f, 0x39 };
-    TEST("T64: CALLDATACOPY/CODECOPY scaffold: pop 2, push 1 NOP result");
+    /* PUSH0 x3, CALLDATACOPY (0x37) */
+    static const unsigned char bc_cdc[] = { 0x5f, 0x5f, 0x5f, 0x37 };
+    /* PUSH0 x3, CODECOPY (0x39) */
+    static const unsigned char bc_cc[]  = { 0x5f, 0x5f, 0x5f, 0x39 };
+    TEST("T64: CALLDATACOPY/CODECOPY pop 3, push 0, emit IR_TAG_MEMORY_COPY");
     mod = new_module();
-    lift_bytes(&ls, mod, bc_cdc, 3);
+    lift_bytes(&ls, mod, bc_cdc, 4);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "CALLDATACOPY: lift OK");
-    CHECK(ls.stack.depth == 1,  "CALLDATACOPY: 1 NOP result on stack (scaffold)");
+    CHECK(ls.stack.depth == 0,  "CALLDATACOPY: 0 result on stack");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_MEMORY_COPY) == 1, "CALLDATACOPY: 1 IR_TAG_MEMORY_COPY emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
-    lift_bytes(&ls, mod, bc_cc, 3);
+    lift_bytes(&ls, mod, bc_cc, 4);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "CODECOPY: lift OK");
-    CHECK(ls.stack.depth == 1,  "CODECOPY: 1 NOP result on stack (scaffold)");
+    CHECK(ls.stack.depth == 0,  "CODECOPY: 0 result on stack");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_MEMORY_COPY) == 1, "CODECOPY: 1 IR_TAG_MEMORY_COPY emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1344,21 +1432,25 @@ static void test_t65_copy_ops_4arg(void) {
     evm_lift_result_t res;
     /* PUSH0 x4, EXTCODECOPY (0x3c) */
     static const unsigned char bc_exc[] = { 0x5f, 0x5f, 0x5f, 0x5f, 0x3c };
-    /* PUSH0 x4, RETURNDATACOPY (0x3e) */
-    static const unsigned char bc_rdc[] = { 0x5f, 0x5f, 0x5f, 0x5f, 0x3e };
-    TEST("T65: EXTCODECOPY/RETURNDATACOPY pop 4, no result");
+    /* PUSH0 x3, RETURNDATACOPY (0x3e) */
+    static const unsigned char bc_rdc[] = { 0x5f, 0x5f, 0x5f, 0x3e };
+    TEST("T65: EXTCODECOPY pop 4, RETURNDATACOPY pop 3, emit IR_TAG_MEMORY_COPY");
     mod = new_module();
     lift_bytes(&ls, mod, bc_exc, 5);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "EXTCODECOPY: lift OK");
     CHECK(ls.stack.depth == 0,  "EXTCODECOPY: stack empty after");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_MEMORY_COPY) == 1, "EXTCODECOPY: 1 IR_TAG_MEMORY_COPY emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
-    lift_bytes(&ls, mod, bc_rdc, 5);
+    lift_bytes(&ls, mod, bc_rdc, 4);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "RETURNDATACOPY: lift OK");
     CHECK(ls.stack.depth == 0,  "RETURNDATACOPY: stack empty after");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_MEMORY_COPY) == 1, "RETURNDATACOPY: 1 IR_TAG_MEMORY_COPY emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1369,12 +1461,14 @@ static void test_t66_log0(void) {
     evm_lift_result_t res;
     /* PUSH0 x2, LOG0 (0xa0) */
     static const unsigned char bc[] = { 0x5f, 0x5f, 0xa0 };
-    TEST("T66: LOG0 pops 2, emits IR_NOP");
+    TEST("T66: LOG0 pops 2, emits IR_CALL tagged IR_TAG_LOG");
     mod = new_module();
     lift_bytes(&ls, mod, bc, 3);
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "LOG0: lift returns OK");
     CHECK(ls.stack.depth == 0,  "LOG0: nothing left on stack");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_LOG) == 1, "LOG0: 1 IR_TAG_LOG emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1399,6 +1493,8 @@ static void test_t67_log1_to_log4(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "LOG1: lift OK");
     CHECK(ls.stack.depth == 0,  "LOG1: stack empty");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_LOG) == 1, "LOG1: 1 IR_TAG_LOG emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -1406,6 +1502,8 @@ static void test_t67_log1_to_log4(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "LOG2: lift OK");
     CHECK(ls.stack.depth == 0,  "LOG2: stack empty");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_LOG) == 1, "LOG2: 1 IR_TAG_LOG emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -1413,6 +1511,8 @@ static void test_t67_log1_to_log4(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "LOG3: lift OK");
     CHECK(ls.stack.depth == 0,  "LOG3: stack empty");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_LOG) == 1, "LOG3: 1 IR_TAG_LOG emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -1420,6 +1520,8 @@ static void test_t67_log1_to_log4(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "LOG4: lift OK");
     CHECK(ls.stack.depth == 0,  "LOG4: stack empty");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_LOG) == 1, "LOG4: 1 IR_TAG_LOG emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1437,6 +1539,7 @@ static void test_t68_create(void) {
     CHECK(res == EVM_LIFT_OK,                              "CREATE: lift OK");
     CHECK(count_tagged(ls.func, (int)IR_TAG_CREATE) == 1,  "CREATE: tagged CREATE");
     CHECK(ls.stack.depth == 1,                             "CREATE: new addr on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1454,6 +1557,7 @@ static void test_t69_create2(void) {
     CHECK(res == EVM_LIFT_OK,                              "CREATE2: lift OK");
     CHECK(count_tagged(ls.func, (int)IR_TAG_CREATE) == 1,  "CREATE2: tagged CREATE");
     CHECK(ls.stack.depth == 1,                             "CREATE2: new addr on stack");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1477,6 +1581,7 @@ static void test_t70_dup_higher(void) {
     CHECK(res == EVM_LIFT_OK,   "DUP2: lift OK");
     CHECK(ls.stack.depth == 3,  "DUP2: stack depth 3 after DUP2");
     CHECK(count_op(ls.func, IR_COPY) == 1, "DUP2: 1 IR_COPY emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 
     mod = new_module();
@@ -1484,6 +1589,7 @@ static void test_t70_dup_higher(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,   "DUP16: lift OK");
     CHECK(ls.stack.depth == 17, "DUP16: stack depth 17 after DUP16");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1503,6 +1609,7 @@ static void test_t71_swap_higher(void) {
     CHECK(res == EVM_LIFT_OK,   "SWAP2: lift OK");
     CHECK(ls.stack.depth == 3,  "SWAP2: depth unchanged at 3");
     /* After SWAP2: slot[2] was originally t0 (val 1), slot[0] was t2 (val 3) */
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1523,6 +1630,7 @@ static void test_t72_dup_underflow(void) {
     CHECK(res == EVM_LIFT_STACK_UNDER, "DUP underflow returns STACK_UNDER");
     CHECK(ls.error != 0,               "ls.error is set on DUP underflow");
     CHECK(ls.errmsg[0] != '\0',        "errmsg non-empty on DUP underflow");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1541,6 +1649,7 @@ static void test_t73_swap_underflow(void) {
     res = evm_lift_step(&ls);  /* SWAP3 */
     CHECK(res == EVM_LIFT_STACK_UNDER, "SWAP underflow returns STACK_UNDER");
     CHECK(ls.error != 0,               "ls.error is set on SWAP underflow");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1567,6 +1676,7 @@ static void test_t74_stack_overflow(void) {
     CHECK(ls.error != 0,              "ls.error is set on overflow");
     CHECK(ls.errmsg[0] != '\0',       "errmsg non-empty on overflow");
     free(bc);
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1583,6 +1693,7 @@ static void test_t75_unknown_opcode(void) {
     res = evm_lift_bytecode(&ls);
     CHECK(res == EVM_LIFT_OK,                "unknown ops: lift returns OK");
     CHECK(count_op(ls.func, IR_NOP) >= 4,    "unknown ops: at least 4 IR_NOP emitted");
+    evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }
 
@@ -1622,6 +1733,7 @@ static void test_t76_full_opcode_scan(void) {
         mod = new_module();
         lift_bytes(&ls, mod, bc, bc_len);
         evm_lift_bytecode(&ls); /* result ignored — just check no crash */
+        evm_lifter_destroy(&ls);
         ir_module_free(mod);
         pass_count++;
     }
@@ -1629,12 +1741,89 @@ static void test_t76_full_opcode_scan(void) {
     (void)fail_count;
 }
 
-/* ── T77: Coverage report — list covered and uncovered opcode groups ─
+/* ── T77: Invalid JUMP targets emit EVM_BARRIER instead of IR_BR ── */
+static void test_t77_invalid_jump(void) {
+    ir_module_t *mod;
+    evm_lifter_t ls;
+    evm_lift_result_t res;
+    
+    /* PUSH1 0x02, JUMP (0x56) — target is 2, which is NOT a JUMPDEST (it's the JUMP opcode itself) */
+    static const unsigned char bc[] = { 0x60, 0x02, 0x56 };
+    TEST("T77: JUMP to invalid target emits EVM_BARRIER fallback");
+    mod = new_module();
+    evm_lifter_init(&ls, bc, 3, mod); /* Ensure init is used for pre-scan */
+    res = evm_lift_bytecode(&ls);
+    CHECK(res == EVM_LIFT_OK,   "JUMP invalid: lift returns OK");
+    CHECK(ls.stack.depth == 0,  "JUMP invalid: consumes target");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_EVM_BARRIER) == 1, "JUMP invalid: 1 IR_TAG_EVM_BARRIER emitted");
+    evm_lifter_destroy(&ls);
+    ir_module_free(mod);
+}
+
+/* ── T78: Invalid JUMPI target into PUSH immediate ─────────────── */
+static void test_t78_invalid_jumpi(void) {
+    ir_module_t *mod;
+    evm_lifter_t ls;
+    evm_lift_result_t res;
+    
+    /* PUSH1 1 (cond), PUSH1 0x04 (target), JUMPI (0x57), PUSH1 0x5b (immediate looks like JUMPDEST!) */
+    static const unsigned char bc[] = { 0x60, 0x01, 0x60, 0x04, 0x57, 0x60, 0x5b };
+    TEST("T78: JUMPI to immediate byte 0x5b emits EVM_BARRIER");
+    mod = new_module();
+    evm_lifter_init(&ls, bc, 7, mod);
+    res = evm_lift_bytecode(&ls);
+    CHECK(res == EVM_LIFT_TRUNCATED || res == EVM_LIFT_OK, "JUMPI invalid: lift returns TRUNCATED or OK");
+    CHECK(count_tagged(ls.func, (int)IR_TAG_EVM_BARRIER) == 1, "JUMPI invalid: 1 IR_TAG_EVM_BARRIER emitted");
+    evm_lifter_destroy(&ls);
+    ir_module_free(mod);
+}
+
+/* ── T80: Issue #15 EVM Lifter Support Accounting ─────────────────────
+ *
+ * This test audits the 256 opcode space against the strict support
+ * classification schema introduced for final closure tracking.
+ */
+static void test_t80_support_accounting(void) {
+    int i;
+    int fully_supported = 0;
+    int approximated = 0;
+    int placeholder = 0;
+    int unassigned = 0;
+    
+    printf("\n=== EVM Issue #15 Support Accounting ===\n");
+    for (i = 0; i < 256; i++) {
+        evm_support_class_t sc = evm_opcode_support(i);
+        switch (sc) {
+            case EVM_SUPPORT_FULLY_SUPPORTED: fully_supported++; break;
+            case EVM_SUPPORT_APPROXIMATED_ANALYZABLE: approximated++; break;
+            case EVM_SUPPORT_PLACEHOLDER_ONLY: placeholder++; break;
+            case EVM_SUPPORT_INVALID_OR_UNASSIGNED: unassigned++; break;
+        }
+    }
+    int total_assigned = fully_supported + approximated + placeholder;
+    printf("FULLY_SUPPORTED:         %3d\n", fully_supported);
+    printf("APPROXIMATED_ANALYZABLE: %3d\n", approximated);
+    printf("PLACEHOLDER_ONLY:        %3d\n", placeholder);
+    printf("INVALID_OR_UNASSIGNED:   %3d\n", unassigned);
+    printf("----------------------------------\n");
+    printf("Total Assigned Opcodes:  %3d\n", total_assigned);
+    
+    if (total_assigned > 0) {
+        printf("Semantic Support (Full + Approx): %.1f%%\n",
+               (double)(fully_supported + approximated) * 100.0 / (double)total_assigned);
+    }
+    
+    /* Ensure no basic regression in assignment space */
+    CHECK(total_assigned >= 140, "At least 140 opcodes must be assigned to an active class");
+    CHECK(placeholder <= 6, "Placeholder count should strictly diminish");
+}
+
+/* ── T79: Coverage report — list covered and uncovered opcode groups ─
  *
  * This test always PASSES; it prints a coverage summary to stdout.
  * The table covers the ~83 distinct EVM mnemonic groups.
  */
-static void test_t77_coverage_report(void) {
+static void test_t79_coverage_report(void) {
     /*
      * Opcode groups and their T-test coverage status.
      * Mark: 1 = covered by at least one test (T01-T76), 0 = not covered.
@@ -1846,7 +2035,10 @@ int main(void) {
     test_t74_stack_overflow();
     test_t75_unknown_opcode();
     test_t76_full_opcode_scan();
-    test_t77_coverage_report();
+    test_t77_invalid_jump();
+    test_t78_invalid_jumpi();
+    test_t79_coverage_report();
+    test_t80_support_accounting();
 
     printf("\n=== Results: %d passed, %d failed ===\n", g_pass, g_fail);
     if (g_fail > 0) {

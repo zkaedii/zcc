@@ -2241,6 +2241,21 @@ static void test_t86_mul_wide(void) {
         0x02 /* MUL */
     };
 
+    /* PUSH32 (0xFFFF), PUSH32 (2), MUL */
+    static const unsigned char bc_mul_stress[] = {
+        0x7f,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, /* 0xFFFF */
+        0x7f,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, /* 2 */
+        0x02 /* MUL */
+    };
+
     TEST("T86: MUL exact modular propagation");
 
     mod = new_module();
@@ -2277,6 +2292,18 @@ static void test_t86_mul_wide(void) {
     CHECK(ls.stack.state[0] == EVM_VAL_KNOWN_WIDE, "MUL wide -1 * -1: yields wide known");
     CHECK(ls.stack.const_vals[0] == 1, "MUL wide -1 * -1: 1 in narrow space");
     CHECK(ls.stack.wide_vals[0].bytes[31] == 1, "MUL wide -1 * -1: wide low byte 1");
+    evm_lifter_destroy(&ls);
+    ir_module_free(mod);
+
+    mod = new_module();
+    lift_bytes(&ls, mod, bc_mul_stress, 67);
+    res = evm_lift_bytecode(&ls);
+    CHECK(res == EVM_LIFT_OK, "MUL wide 0xFFFF * 2: lift OK");
+    CHECK(ls.stack.state[0] == EVM_VAL_KNOWN_WIDE, "MUL wide 0xFFFF * 2: yields wide known");
+    CHECK(ls.stack.const_vals[0] == 0x01FFFE, "MUL wide 0xFFFF * 2: 0x01FFFE");
+    CHECK(ls.stack.wide_vals[0].bytes[29] == 0x01, "MUL wide 0xFFFF * 2: byte 29 is 0x01");
+    CHECK(ls.stack.wide_vals[0].bytes[30] == 0xFF, "MUL wide 0xFFFF * 2: byte 30 is 0xFF");
+    CHECK(ls.stack.wide_vals[0].bytes[31] == 0xFE, "MUL wide 0xFFFF * 2: byte 31 is 0xFE");
     evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }

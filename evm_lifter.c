@@ -34,7 +34,7 @@ static void lifter_fresh_tmp(evm_lifter_t *ls, char *buf) {
     ir_fresh_tmp(ls->func, buf);
 }
 
-static evm_lift_result_t stack_push_const(evm_lifter_t *ls, const char *name, long val) {
+static evm_lift_result_t stack_push_const_narrow(evm_lifter_t *ls, const char *name, long val) {
     int i;
     if (ls->stack.depth >= EVM_STACK_MAX) {
         snprintf(ls->errmsg, sizeof(ls->errmsg),
@@ -47,16 +47,47 @@ static evm_lift_result_t stack_push_const(evm_lifter_t *ls, const char *name, lo
     for (i = 0; i < IR_NAME_MAX - 1 && name[i]; i++)
         ls->stack.slots[ls->stack.depth][i] = name[i];
     ls->stack.slots[ls->stack.depth][i] = '\0';
-    ls->stack.is_const[ls->stack.depth] = 1;
+    ls->stack.state[ls->stack.depth] = EVM_VAL_KNOWN_NARROW;
     ls->stack.const_vals[ls->stack.depth] = val;
+    memset(ls->stack.wide_vals[ls->stack.depth].bytes, 0, 32);
+    /* copy narrow val into wide bytes (big endian) */
+    for (i = 0; i < 8; i++) {
+        ls->stack.wide_vals[ls->stack.depth].bytes[31 - i] = (unsigned char)((val >> (i * 8)) & 0xFF);
+    }
+    ls->stack.depth++;
+    return EVM_LIFT_OK;
+}
+
+static evm_lift_result_t stack_push_const_wide(evm_lifter_t *ls, const char *name, const unsigned char *payload, int payload_len, long truncated_val) {
+    int i;
+    int pad_start;
+    if (ls->stack.depth >= EVM_STACK_MAX) {
+        snprintf(ls->errmsg, sizeof(ls->errmsg),
+                 "EVM stack overflow at pc=0x%x (depth=%d)",
+                 ls->pc, ls->stack.depth);
+        ls->error = 1;
+        return EVM_LIFT_STACK_OVER;
+    }
+    for (i = 0; i < IR_NAME_MAX - 1 && name[i]; i++)
+        ls->stack.slots[ls->stack.depth][i] = name[i];
+    ls->stack.slots[ls->stack.depth][i] = '\0';
+    
+    ls->stack.state[ls->stack.depth] = EVM_VAL_KNOWN_WIDE;
+    ls->stack.const_vals[ls->stack.depth] = truncated_val;
+    memset(ls->stack.wide_vals[ls->stack.depth].bytes, 0, 32);
+    if (payload_len > 32) payload_len = 32;
+    pad_start = 32 - payload_len;
+    for (i = 0; i < payload_len; i++) {
+        ls->stack.wide_vals[ls->stack.depth].bytes[pad_start + i] = payload[i];
+    }
     ls->stack.depth++;
     return EVM_LIFT_OK;
 }
 
 static evm_lift_result_t stack_push(evm_lifter_t *ls, const char *name) {
-    evm_lift_result_t res = stack_push_const(ls, name, 0L);
+    evm_lift_result_t res = stack_push_const_narrow(ls, name, 0L);
     if (res == EVM_LIFT_OK) {
-        ls->stack.is_const[ls->stack.depth - 1] = 0;
+        ls->stack.state[ls->stack.depth - 1] = EVM_VAL_UNKNOWN;
     }
     return res;
 }
@@ -351,7 +382,7 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         ls->pc++;
         lifter_fresh_tmp(ls, tmp_dst);
         ir_emit(ls->func, IR_CONST, IR_TY_I64, tmp_dst, NULL, NULL, NULL, 0L, ls->pc);
-        return stack_push_const(ls, tmp_dst, 0L);
+        return stack_push_const_narrow(ls, tmp_dst, 0L);
     }
 
     /* ── PUSH1..PUSH32 ─────────────────────────────────────────────── */
@@ -384,18 +415,21 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         lifter_fresh_tmp(ls, tmp_dst);
         if (push_bytes > 8) {
             tagged_emit(ls, IR_CONST, IR_TY_I64, tmp_dst, NULL, NULL, NULL, imm_val, ls->pc, IR_TAG_TRUNCATED_WIDE_CONST);
+            res = stack_push_const_wide(ls, tmp_dst, &ls->bytecode[ls->pc - push_bytes], push_bytes, imm_val);
         } else {
             ir_emit(ls->func, IR_CONST, IR_TY_I64, tmp_dst, NULL, NULL, NULL, imm_val, ls->pc);
+            res = stack_push_const_narrow(ls, tmp_dst, imm_val);
         }
-        return stack_push_const(ls, tmp_dst, imm_val);
+        return res;
     }
 
     /* ── DUP1..DUP16 ───────────────────────────────────────────────── */
     if (op >= (unsigned int)EVM_DUP1 && op <= (unsigned int)EVM_DUP16) {
         int depth = (int)(op - (unsigned int)EVM_DUP1); /* 0 = DUP1 → copies TOS */
         const char *src;
-        int is_c;
+        evm_val_state_t st;
         long c_val;
+        evm_u256_t w_val;
         ls->pc++;
         if (ls->stack.depth <= depth) {
             snprintf(ls->errmsg, sizeof(ls->errmsg),
@@ -405,14 +439,16 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
             return EVM_LIFT_STACK_UNDER;
         }
         src = stack_peek(ls, depth);
-        is_c = ls->stack.is_const[ls->stack.depth - 1 - depth];
+        st = ls->stack.state[ls->stack.depth - 1 - depth];
         c_val = ls->stack.const_vals[ls->stack.depth - 1 - depth];
+        memcpy(w_val.bytes, ls->stack.wide_vals[ls->stack.depth - 1 - depth].bytes, 32);
         lifter_fresh_tmp(ls, tmp_dst);
         ir_emit(ls->func, IR_COPY, IR_TY_I64, tmp_dst, src, NULL, NULL, 0L, ls->pc);
         res = stack_push(ls, tmp_dst);
         if (res == EVM_LIFT_OK) {
-            ls->stack.is_const[ls->stack.depth - 1] = is_c;
+            ls->stack.state[ls->stack.depth - 1] = st;
             ls->stack.const_vals[ls->stack.depth - 1] = c_val;
+            memcpy(ls->stack.wide_vals[ls->stack.depth - 1].bytes, w_val.bytes, 32);
         }
         return res;
     }
@@ -422,8 +458,9 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         int depth = (int)(op - (unsigned int)EVM_SWAP1 + 1); /* SWAP1: swap top with [1] */
         int top_idx, tgt_idx;
         char tmp_swap[IR_NAME_MAX];
-        char tmp_c;
+        evm_val_state_t tmp_st;
         long tmp_v;
+        evm_u256_t tmp_w;
         ls->pc++;
         if (ls->stack.depth <= depth) {
             snprintf(ls->errmsg, sizeof(ls->errmsg),
@@ -438,12 +475,19 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         memcpy(tmp_swap, ls->stack.slots[top_idx], IR_NAME_MAX);
         memcpy(ls->stack.slots[top_idx], ls->stack.slots[tgt_idx], IR_NAME_MAX);
         memcpy(ls->stack.slots[tgt_idx], tmp_swap, IR_NAME_MAX);
-        tmp_c = ls->stack.is_const[top_idx];
-        ls->stack.is_const[top_idx] = ls->stack.is_const[tgt_idx];
-        ls->stack.is_const[tgt_idx] = tmp_c;
+        
+        tmp_st = ls->stack.state[top_idx];
+        ls->stack.state[top_idx] = ls->stack.state[tgt_idx];
+        ls->stack.state[tgt_idx] = tmp_st;
+        
         tmp_v = ls->stack.const_vals[top_idx];
         ls->stack.const_vals[top_idx] = ls->stack.const_vals[tgt_idx];
         ls->stack.const_vals[tgt_idx] = tmp_v;
+        
+        memcpy(tmp_w.bytes, ls->stack.wide_vals[top_idx].bytes, 32);
+        memcpy(ls->stack.wide_vals[top_idx].bytes, ls->stack.wide_vals[tgt_idx].bytes, 32);
+        memcpy(ls->stack.wide_vals[tgt_idx].bytes, tmp_w.bytes, 32);
+        
         /* Emit a NOP marker so the IR record shows the swap */
         ir_emit(ls->func, IR_NOP, IR_TY_VOID, NULL, NULL, NULL, NULL, 0L, ls->pc);
         return EVM_LIFT_OK;
@@ -632,7 +676,7 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         int target_is_const = 0;
         long target_val = 0;
         if (ls->stack.depth > 0) {
-            target_is_const = ls->stack.is_const[ls->stack.depth - 1];
+            target_is_const = (ls->stack.state[ls->stack.depth - 1] == EVM_VAL_KNOWN_NARROW);
             target_val = ls->stack.const_vals[ls->stack.depth - 1];
         }
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
@@ -657,7 +701,7 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         int target_is_const = 0;
         long target_val = 0;
         if (ls->stack.depth > 0) {
-            target_is_const = ls->stack.is_const[ls->stack.depth - 1];
+            target_is_const = (ls->stack.state[ls->stack.depth - 1] == EVM_VAL_KNOWN_NARROW);
             target_val = ls->stack.const_vals[ls->stack.depth - 1];
         }
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;

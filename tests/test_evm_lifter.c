@@ -1204,6 +1204,10 @@ static void test_t54_push16(void) {
         CHECK(n->imm == 0x0102030405060708L,       "PUSH16: low 8 bytes correct");
         CHECK(n->tag == (int)IR_TAG_TRUNCATED_WIDE_CONST, "PUSH16: tagged TRUNCATED_WIDE_CONST");
     }
+    CHECK(ls.stack.state[0] == EVM_VAL_KNOWN_WIDE, "PUSH16: state is KNOWN_WIDE");
+    CHECK(ls.stack.wide_vals[0].bytes[16] == 0x00, "PUSH16: wide payload start is 0");
+    CHECK(ls.stack.wide_vals[0].bytes[24] == 0x01, "PUSH16: wide payload middle is 1");
+    CHECK(ls.stack.wide_vals[0].bytes[31] == 0x08, "PUSH16: wide payload end is 8");
     evm_lifter_destroy(&ls);
     ir_module_free(mod);
 }

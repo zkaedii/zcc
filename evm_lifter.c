@@ -27,6 +27,32 @@
 
 /* ── Internal helpers ────────────────────────────────────────────────── */
 
+static int evm_u256_is_zero(const evm_u256_t *a) {
+    int i;
+    for (i = 0; i < 32; i++) {
+        if (a->bytes[i] != 0) return 0;
+    }
+    return 1;
+}
+
+static int evm_u256_eq(const evm_u256_t *a, const evm_u256_t *b) {
+    int i;
+    for (i = 0; i < 32; i++) {
+        if (a->bytes[i] != b->bytes[i]) return 0;
+    }
+    return 1;
+}
+
+/* Returns 1 if a > b, -1 if a < b, 0 if a == b. (Unsigned comparison) */
+static int evm_u256_cmp(const evm_u256_t *a, const evm_u256_t *b) {
+    int i;
+    for (i = 0; i < 32; i++) {
+        if (a->bytes[i] > b->bytes[i]) return 1;
+        if (a->bytes[i] < b->bytes[i]) return -1;
+    }
+    return 0;
+}
+
 /* Allocate a fresh VReg name aligned with ir_bridge.h convention ("t<N>"). */
 static void lifter_fresh_tmp(evm_lifter_t *ls, char *buf) {
     /* ir_bridge.h uses "%t<N>"; ir.c uses "t<N>".  We follow ir.c style
@@ -569,36 +595,85 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
 
     /* ── Comparison ops: pops 2, pushes i32 0/1 ─────────────────── */
     case EVM_LT:
-    case EVM_SLT:
+    case EVM_SLT: {
+        int a_st = EVM_VAL_UNKNOWN, b_st = EVM_VAL_UNKNOWN;
+        evm_u256_t a_val, b_val;
+        if (ls->stack.depth >= 2) {
+            a_st = ls->stack.state[ls->stack.depth - 2]; /* a is below b */
+            b_st = ls->stack.state[ls->stack.depth - 1]; /* b is top */
+            memcpy(&a_val, &ls->stack.wide_vals[ls->stack.depth - 2], sizeof(evm_u256_t));
+            memcpy(&b_val, &ls->stack.wide_vals[ls->stack.depth - 1], sizeof(evm_u256_t));
+        }
         res = stack_pop(ls, tmp_b); if (res != EVM_LIFT_OK) return res;
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
         lifter_fresh_tmp(ls, tmp_dst);
         ir_emit(ls->func, IR_LT, IR_TY_I32, tmp_dst, tmp_a, tmp_b, NULL, 0L, ls->pc);
+        if (op == EVM_LT && (a_st == EVM_VAL_KNOWN_NARROW || a_st == EVM_VAL_KNOWN_WIDE) &&
+            (b_st == EVM_VAL_KNOWN_NARROW || b_st == EVM_VAL_KNOWN_WIDE)) {
+            return stack_push_const_narrow(ls, tmp_dst, (evm_u256_cmp(&a_val, &b_val) < 0) ? 1L : 0L);
+        }
         return stack_push(ls, tmp_dst);
+    }
 
     case EVM_GT:
-    case EVM_SGT:
+    case EVM_SGT: {
+        int a_st = EVM_VAL_UNKNOWN, b_st = EVM_VAL_UNKNOWN;
+        evm_u256_t a_val, b_val;
+        if (ls->stack.depth >= 2) {
+            a_st = ls->stack.state[ls->stack.depth - 2]; /* a is below b */
+            b_st = ls->stack.state[ls->stack.depth - 1]; /* b is top */
+            memcpy(&a_val, &ls->stack.wide_vals[ls->stack.depth - 2], sizeof(evm_u256_t));
+            memcpy(&b_val, &ls->stack.wide_vals[ls->stack.depth - 1], sizeof(evm_u256_t));
+        }
         res = stack_pop(ls, tmp_b); if (res != EVM_LIFT_OK) return res;
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
         lifter_fresh_tmp(ls, tmp_dst);
         ir_emit(ls->func, IR_GT, IR_TY_I32, tmp_dst, tmp_a, tmp_b, NULL, 0L, ls->pc);
+        if (op == EVM_GT && (a_st == EVM_VAL_KNOWN_NARROW || a_st == EVM_VAL_KNOWN_WIDE) &&
+            (b_st == EVM_VAL_KNOWN_NARROW || b_st == EVM_VAL_KNOWN_WIDE)) {
+            return stack_push_const_narrow(ls, tmp_dst, (evm_u256_cmp(&a_val, &b_val) > 0) ? 1L : 0L);
+        }
         return stack_push(ls, tmp_dst);
+    }
 
-    case EVM_EQ:
+    case EVM_EQ: {
+        int a_st = EVM_VAL_UNKNOWN, b_st = EVM_VAL_UNKNOWN;
+        evm_u256_t a_val, b_val;
+        if (ls->stack.depth >= 2) {
+            a_st = ls->stack.state[ls->stack.depth - 2]; /* a is below b */
+            b_st = ls->stack.state[ls->stack.depth - 1]; /* b is top */
+            memcpy(&a_val, &ls->stack.wide_vals[ls->stack.depth - 2], sizeof(evm_u256_t));
+            memcpy(&b_val, &ls->stack.wide_vals[ls->stack.depth - 1], sizeof(evm_u256_t));
+        }
         res = stack_pop(ls, tmp_b); if (res != EVM_LIFT_OK) return res;
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
         lifter_fresh_tmp(ls, tmp_dst);
         ir_emit(ls->func, IR_EQ, IR_TY_I32, tmp_dst, tmp_a, tmp_b, NULL, 0L, ls->pc);
+        if ((a_st == EVM_VAL_KNOWN_NARROW || a_st == EVM_VAL_KNOWN_WIDE) &&
+            (b_st == EVM_VAL_KNOWN_NARROW || b_st == EVM_VAL_KNOWN_WIDE)) {
+            return stack_push_const_narrow(ls, tmp_dst, evm_u256_eq(&a_val, &b_val) ? 1L : 0L);
+        }
         return stack_push(ls, tmp_dst);
+    }
 
-    case EVM_ISZERO:
+    case EVM_ISZERO: {
+        int a_st = EVM_VAL_UNKNOWN;
+        evm_u256_t a_val;
+        if (ls->stack.depth >= 1) {
+            a_st = ls->stack.state[ls->stack.depth - 1];
+            memcpy(&a_val, &ls->stack.wide_vals[ls->stack.depth - 1], sizeof(evm_u256_t));
+        }
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
         /* ISZERO: push (a == 0) */
         lifter_fresh_tmp(ls, tmp_b);
         ir_emit(ls->func, IR_CONST, IR_TY_I64, tmp_b, NULL, NULL, NULL, 0L, ls->pc);
         lifter_fresh_tmp(ls, tmp_dst);
         ir_emit(ls->func, IR_EQ, IR_TY_I32, tmp_dst, tmp_a, tmp_b, NULL, 0L, ls->pc);
+        if (a_st == EVM_VAL_KNOWN_NARROW || a_st == EVM_VAL_KNOWN_WIDE) {
+            return stack_push_const_narrow(ls, tmp_dst, evm_u256_is_zero(&a_val) ? 1L : 0L);
+        }
         return stack_push(ls, tmp_dst);
+    }
 
     /* ── Bitwise ops ─────────────────────────────────────────────── */
     case EVM_AND:

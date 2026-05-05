@@ -34,8 +34,7 @@ static void lifter_fresh_tmp(evm_lifter_t *ls, char *buf) {
     ir_fresh_tmp(ls->func, buf);
 }
 
-/* Push a named temporary onto the simulated EVM stack. */
-static evm_lift_result_t stack_push(evm_lifter_t *ls, const char *name) {
+static evm_lift_result_t stack_push_const(evm_lifter_t *ls, const char *name, long val) {
     int i;
     if (ls->stack.depth >= EVM_STACK_MAX) {
         snprintf(ls->errmsg, sizeof(ls->errmsg),
@@ -48,8 +47,18 @@ static evm_lift_result_t stack_push(evm_lifter_t *ls, const char *name) {
     for (i = 0; i < IR_NAME_MAX - 1 && name[i]; i++)
         ls->stack.slots[ls->stack.depth][i] = name[i];
     ls->stack.slots[ls->stack.depth][i] = '\0';
+    ls->stack.is_const[ls->stack.depth] = 1;
+    ls->stack.const_vals[ls->stack.depth] = val;
     ls->stack.depth++;
     return EVM_LIFT_OK;
+}
+
+static evm_lift_result_t stack_push(evm_lifter_t *ls, const char *name) {
+    evm_lift_result_t res = stack_push_const(ls, name, 0L);
+    if (res == EVM_LIFT_OK) {
+        ls->stack.is_const[ls->stack.depth - 1] = 0;
+    }
+    return res;
 }
 
 /* Pop a named temporary from the simulated EVM stack into `out`. */
@@ -174,7 +183,11 @@ static const char *EVM_TAG_NAMES[] = {
     "IR_TAG_SELFDESTRUCT",
     "IR_TAG_SSTORE",
     "IR_TAG_CREATE",
-    "IR_TAG_EVM_BARRIER"
+    "IR_TAG_EVM_BARRIER",
+    "IR_TAG_TRUNCATED_WIDE_CONST",
+    "IR_TAG_SHA3",
+    "IR_TAG_MEMORY_COPY",
+    "IR_TAG_LOG"
 };
 
 /* ── Public query functions ──────────────────────────────────────────── */
@@ -202,7 +215,7 @@ int evm_is_call_family(unsigned int opcode) {
 void evm_lifter_init(evm_lifter_t *ls,
                      const unsigned char *bytecode, int length,
                      ir_module_t *module) {
-    int i;
+    int i, p;
     memset(ls, 0, sizeof(*ls));
     ls->bytecode = bytecode;
     ls->length   = length;
@@ -213,6 +226,30 @@ void evm_lifter_init(evm_lifter_t *ls,
     /* Warm the stack so all slot strings start NUL-terminated. */
     for (i = 0; i < EVM_STACK_MAX; i++)
         ls->stack.slots[i][0] = '\0';
+        
+    /* Allocate and pre-scan valid JUMPDESTs */
+    ls->valid_jumpdest = (unsigned char *)calloc(length > 0 ? (size_t)length : 1, 1);
+    if (ls->valid_jumpdest && bytecode) {
+        p = 0;
+        while (p < length) {
+            unsigned int op = bytecode[p];
+            if (op == (unsigned int)EVM_JUMPDEST) {
+                ls->valid_jumpdest[p] = 1;
+                p++;
+            } else if (op >= (unsigned int)EVM_PUSH1 && op <= (unsigned int)EVM_PUSH32) {
+                p += 1 + (int)(op - (unsigned int)EVM_PUSH1 + 1);
+            } else {
+                p++;
+            }
+        }
+    }
+}
+
+void evm_lifter_destroy(evm_lifter_t *ls) {
+    if (ls->valid_jumpdest) {
+        free(ls->valid_jumpdest);
+        ls->valid_jumpdest = NULL;
+    }
 }
 
 /* ── Step: lift one EVM instruction ─────────────────────────────────── */
@@ -262,7 +299,7 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         ls->pc++;
         lifter_fresh_tmp(ls, tmp_dst);
         ir_emit(ls->func, IR_CONST, IR_TY_I64, tmp_dst, NULL, NULL, NULL, 0L, ls->pc);
-        return stack_push(ls, tmp_dst);
+        return stack_push_const(ls, tmp_dst, 0L);
     }
 
     /* ── PUSH1..PUSH32 ─────────────────────────────────────────────── */
@@ -293,14 +330,20 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         ls->pc += push_bytes;
 
         lifter_fresh_tmp(ls, tmp_dst);
-        ir_emit(ls->func, IR_CONST, IR_TY_I64, tmp_dst, NULL, NULL, NULL, imm_val, ls->pc);
-        return stack_push(ls, tmp_dst);
+        if (push_bytes > 8) {
+            tagged_emit(ls, IR_CONST, IR_TY_I64, tmp_dst, NULL, NULL, NULL, imm_val, ls->pc, IR_TAG_TRUNCATED_WIDE_CONST);
+        } else {
+            ir_emit(ls->func, IR_CONST, IR_TY_I64, tmp_dst, NULL, NULL, NULL, imm_val, ls->pc);
+        }
+        return stack_push_const(ls, tmp_dst, imm_val);
     }
 
     /* ── DUP1..DUP16 ───────────────────────────────────────────────── */
     if (op >= (unsigned int)EVM_DUP1 && op <= (unsigned int)EVM_DUP16) {
         int depth = (int)(op - (unsigned int)EVM_DUP1); /* 0 = DUP1 → copies TOS */
         const char *src;
+        int is_c;
+        long c_val;
         ls->pc++;
         if (ls->stack.depth <= depth) {
             snprintf(ls->errmsg, sizeof(ls->errmsg),
@@ -310,9 +353,16 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
             return EVM_LIFT_STACK_UNDER;
         }
         src = stack_peek(ls, depth);
+        is_c = ls->stack.is_const[ls->stack.depth - 1 - depth];
+        c_val = ls->stack.const_vals[ls->stack.depth - 1 - depth];
         lifter_fresh_tmp(ls, tmp_dst);
         ir_emit(ls->func, IR_COPY, IR_TY_I64, tmp_dst, src, NULL, NULL, 0L, ls->pc);
-        return stack_push(ls, tmp_dst);
+        res = stack_push(ls, tmp_dst);
+        if (res == EVM_LIFT_OK) {
+            ls->stack.is_const[ls->stack.depth - 1] = is_c;
+            ls->stack.const_vals[ls->stack.depth - 1] = c_val;
+        }
+        return res;
     }
 
     /* ── SWAP1..SWAP16 ─────────────────────────────────────────────── */
@@ -320,6 +370,8 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         int depth = (int)(op - (unsigned int)EVM_SWAP1 + 1); /* SWAP1: swap top with [1] */
         int top_idx, tgt_idx;
         char tmp_swap[IR_NAME_MAX];
+        char tmp_c;
+        long tmp_v;
         ls->pc++;
         if (ls->stack.depth <= depth) {
             snprintf(ls->errmsg, sizeof(ls->errmsg),
@@ -334,6 +386,12 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         memcpy(tmp_swap, ls->stack.slots[top_idx], IR_NAME_MAX);
         memcpy(ls->stack.slots[top_idx], ls->stack.slots[tgt_idx], IR_NAME_MAX);
         memcpy(ls->stack.slots[tgt_idx], tmp_swap, IR_NAME_MAX);
+        tmp_c = ls->stack.is_const[top_idx];
+        ls->stack.is_const[top_idx] = ls->stack.is_const[tgt_idx];
+        ls->stack.is_const[tgt_idx] = tmp_c;
+        tmp_v = ls->stack.const_vals[top_idx];
+        ls->stack.const_vals[top_idx] = ls->stack.const_vals[tgt_idx];
+        ls->stack.const_vals[tgt_idx] = tmp_v;
         /* Emit a NOP marker so the IR record shows the swap */
         ir_emit(ls->func, IR_NOP, IR_TY_VOID, NULL, NULL, NULL, NULL, 0L, ls->pc);
         return EVM_LIFT_OK;
@@ -518,19 +576,57 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         return EVM_LIFT_OK;
 
     /* ── Flow control ────────────────────────────────────────────── */
-    case EVM_JUMP:
+    case EVM_JUMP: {
+        int target_is_const = 0;
+        long target_val = 0;
+        if (ls->stack.depth > 0) {
+            target_is_const = ls->stack.is_const[ls->stack.depth - 1];
+            target_val = ls->stack.const_vals[ls->stack.depth - 1];
+        }
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
-        /* Indirect jump — we can't resolve the target statically here.
-         * Emit a NOP with the target temp as src1 for future CFG pass. */
-        ir_emit(ls->func, IR_NOP, IR_TY_VOID, NULL, tmp_a, NULL, NULL, 0L, ls->pc);
+        
+        if (target_is_const) {
+            if (target_val >= 0 && target_val < ls->length && ls->valid_jumpdest && ls->valid_jumpdest[target_val]) {
+                snprintf(lbl_buf, IR_LABEL_MAX, ".L_evm_%ld", target_val);
+                ir_emit(ls->func, IR_BR, IR_TY_VOID, NULL, NULL, NULL, lbl_buf, 0L, ls->pc);
+            } else {
+                /* Target is known but INVALID: emits an EVM_BARRIER rather than a blind branch */
+                tagged_emit(ls, IR_NOP, IR_TY_VOID, NULL, NULL, NULL, NULL, 0L, ls->pc, IR_TAG_EVM_BARRIER);
+            }
+        } else {
+            /* Indirect jump — we can't resolve the target statically here.
+             * Emit a NOP with the target temp as src1 for future CFG pass. */
+            ir_emit(ls->func, IR_NOP, IR_TY_VOID, NULL, tmp_a, NULL, NULL, 0L, ls->pc);
+        }
         return EVM_LIFT_OK;
+    }
 
-    case EVM_JUMPI:
+    case EVM_JUMPI: {
+        int target_is_const = 0;
+        long target_val = 0;
+        if (ls->stack.depth > 0) {
+            target_is_const = ls->stack.is_const[ls->stack.depth - 1];
+            target_val = ls->stack.const_vals[ls->stack.depth - 1];
+        }
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
         res = stack_pop(ls, tmp_b); if (res != EVM_LIFT_OK) return res;
-        /* Conditional branch — emit BR_IF with condition in src1 */
-        ir_emit(ls->func, IR_BR_IF, IR_TY_VOID, NULL, tmp_b, NULL, tmp_a, 0L, ls->pc);
+        
+        if (target_is_const) {
+            if (target_val >= 0 && target_val < ls->length && ls->valid_jumpdest && ls->valid_jumpdest[target_val]) {
+                snprintf(lbl_buf, IR_LABEL_MAX, ".L_evm_%ld", target_val);
+                ir_emit(ls->func, IR_BR_IF, IR_TY_VOID, NULL, tmp_b, NULL, lbl_buf, 0L, ls->pc);
+            } else {
+                /* Invalid JUMPI target: if taken, it halts. We emit a conditional BR_IF to an error block ideally, 
+                 * but lacking that, we tag a NOP as barrier fallback. Note: a true CFG might split the block here. 
+                 * For now, emit a tagged barrier placeholder so analysis knows it's an invalid conditional path. */
+                tagged_emit(ls, IR_NOP, IR_TY_VOID, NULL, tmp_b, NULL, NULL, 0L, ls->pc, IR_TAG_EVM_BARRIER);
+            }
+        } else {
+            /* Conditional branch — emit BR_IF with condition in src1 */
+            ir_emit(ls->func, IR_BR_IF, IR_TY_VOID, NULL, tmp_b, NULL, tmp_a, 0L, ls->pc);
+        }
         return EVM_LIFT_OK;
+    }
 
     case EVM_JUMPDEST:
         /* Define a labelled entry point in the IR */
@@ -574,30 +670,64 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         ir_emit(ls->func, IR_LOAD, IR_TY_I64, tmp_dst, tmp_a, NULL, NULL, 0L, ls->pc);
         return stack_push(ls, tmp_dst);
 
-    case EVM_SHA3:
-    case EVM_CALLDATACOPY:
-    case EVM_CODECOPY:
-    case EVM_ADDMOD:
-    case EVM_MULMOD:
-    case EVM_EXP:
-    case EVM_SIGNEXTEND:
-    case EVM_BYTE:
-        /* Pop 2 or 3, push 0 or 1 — emit NOP for scaffold */
+    case EVM_SHA3: {
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
         res = stack_pop(ls, tmp_b); if (res != EVM_LIFT_OK) return res;
         lifter_fresh_tmp(ls, tmp_dst);
-        ir_emit(ls->func, IR_NOP, IR_TY_I64, tmp_dst, tmp_a, tmp_b, NULL, 0L, ls->pc);
+        tagged_emit(ls, IR_CALL, IR_TY_I64, tmp_dst, NULL, NULL, "__evm_sha3", 0L, ls->pc, IR_TAG_SHA3);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, tmp_a, NULL, NULL, 0L, ls->pc);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, tmp_b, NULL, NULL, 0L, ls->pc);
         return stack_push(ls, tmp_dst);
+    }
 
-    case EVM_EXTCODECOPY:
-    case EVM_RETURNDATACOPY:
-        /* Pop 4 */
+    case EVM_ADDMOD:
+    case EVM_MULMOD:
         res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
         res = stack_pop(ls, tmp_b); if (res != EVM_LIFT_OK) return res;
         res = stack_pop(ls, tmp_c); if (res != EVM_LIFT_OK) return res;
-        res = stack_pop(ls, tmp_dst); if (res != EVM_LIFT_OK) return res;
-        ir_emit(ls->func, IR_NOP, IR_TY_VOID, NULL, NULL, NULL, NULL, 0L, ls->pc);
+        lifter_fresh_tmp(ls, tmp_dst);
+        ir_emit(ls->func, IR_NOP, IR_TY_I64, tmp_dst, tmp_a, tmp_b, NULL, 0L, ls->pc); /* Still scaffold */
+        return stack_push(ls, tmp_dst);
+
+    case EVM_EXP:
+    case EVM_SIGNEXTEND:
+    case EVM_BYTE:
+        res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
+        res = stack_pop(ls, tmp_b); if (res != EVM_LIFT_OK) return res;
+        lifter_fresh_tmp(ls, tmp_dst);
+        ir_emit(ls->func, IR_NOP, IR_TY_I64, tmp_dst, tmp_a, tmp_b, NULL, 0L, ls->pc); /* Still scaffold */
+        return stack_push(ls, tmp_dst);
+
+    case EVM_CALLDATACOPY:
+    case EVM_CODECOPY:
+    case EVM_RETURNDATACOPY: {
+        const char *fn = "";
+        if (op == (unsigned int)EVM_CALLDATACOPY) fn = "__evm_calldatacopy";
+        else if (op == (unsigned int)EVM_CODECOPY) fn = "__evm_codecopy";
+        else fn = "__evm_returndatacopy";
+        res = stack_pop(ls, tmp_a); if (res != EVM_LIFT_OK) return res;
+        res = stack_pop(ls, tmp_b); if (res != EVM_LIFT_OK) return res;
+        res = stack_pop(ls, tmp_c); if (res != EVM_LIFT_OK) return res;
+        tagged_emit(ls, IR_CALL, IR_TY_VOID, NULL, NULL, NULL, fn, 0L, ls->pc, IR_TAG_MEMORY_COPY);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, tmp_a, NULL, NULL, 0L, ls->pc);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, tmp_b, NULL, NULL, 0L, ls->pc);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, tmp_c, NULL, NULL, 0L, ls->pc);
         return EVM_LIFT_OK;
+    }
+
+    case EVM_EXTCODECOPY: {
+        char ext_a[IR_NAME_MAX], ext_b[IR_NAME_MAX], ext_c[IR_NAME_MAX], ext_d[IR_NAME_MAX];
+        res = stack_pop(ls, ext_a); if (res != EVM_LIFT_OK) return res;
+        res = stack_pop(ls, ext_b); if (res != EVM_LIFT_OK) return res;
+        res = stack_pop(ls, ext_c); if (res != EVM_LIFT_OK) return res;
+        res = stack_pop(ls, ext_d); if (res != EVM_LIFT_OK) return res;
+        tagged_emit(ls, IR_CALL, IR_TY_VOID, NULL, NULL, NULL, "__evm_extcodecopy", 0L, ls->pc, IR_TAG_MEMORY_COPY);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, ext_a, NULL, NULL, 0L, ls->pc);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, ext_b, NULL, NULL, 0L, ls->pc);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, ext_c, NULL, NULL, 0L, ls->pc);
+        ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, ext_d, NULL, NULL, 0L, ls->pc);
+        return EVM_LIFT_OK;
+    }
 
     /* ── LOG0..LOG4 ──────────────────────────────────────────────── */
     case EVM_LOG0:
@@ -609,11 +739,17 @@ evm_lift_result_t evm_lift_step(evm_lifter_t *ls) {
         int log_topics = (int)(op - (unsigned int)EVM_LOG0);
         int log_pops   = 2 + log_topics;
         int j;
+        char args[7][IR_NAME_MAX]; /* Max pops is 6 (LOG4) */
+        char fn[32];
+        snprintf(fn, sizeof(fn), "__evm_log%d", log_topics);
         for (j = 0; j < log_pops; j++) {
-            res = stack_pop(ls, tmp_a);
+            res = stack_pop(ls, args[j]);
             if (res != EVM_LIFT_OK) return res;
         }
-        ir_emit(ls->func, IR_NOP, IR_TY_VOID, NULL, NULL, NULL, NULL, 0L, ls->pc);
+        tagged_emit(ls, IR_CALL, IR_TY_VOID, NULL, NULL, NULL, fn, 0L, ls->pc, IR_TAG_LOG);
+        for (j = 0; j < log_pops; j++) {
+            ir_emit(ls->func, IR_ARG, IR_TY_I64, NULL, args[j], NULL, NULL, 0L, ls->pc);
+        }
         return EVM_LIFT_OK;
     }
 

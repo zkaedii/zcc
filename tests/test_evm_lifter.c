@@ -1820,7 +1820,7 @@ static void test_t80_support_accounting(void) {
     
     /* Ensure no basic regression in assignment space */
     CHECK(total_assigned >= 140, "At least 140 opcodes must be assigned to an active class");
-    CHECK(placeholder <= 6, "Placeholder count should strictly diminish");
+    CHECK(placeholder <= 4, "Placeholder count should strictly diminish (only EXP/SIGNEXTEND/BYTE/SELFDESTRUCT remain)");
 }
 
 /* ── T81: EQ with wide known constants ───────────────────────────── */

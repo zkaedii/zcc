@@ -487,7 +487,7 @@ evm_support_class_t evm_opcode_support(unsigned int opcode) {
      * primitives. PUSH, DUP, SWAP, basic arithmetic, memory/storage layout.
      */
     if (opcode == EVM_STOP || opcode == EVM_RETURN || opcode == EVM_REVERT || opcode == EVM_INVALID || opcode == EVM_POP || opcode == EVM_JUMPDEST) return EVM_SUPPORT_FULLY_SUPPORTED;
-    if (opcode >= EVM_ADD && opcode <= EVM_SMOD) return EVM_SUPPORT_FULLY_SUPPORTED;
+    if (opcode >= EVM_ADD && opcode <= EVM_MULMOD) return EVM_SUPPORT_FULLY_SUPPORTED; /* ADD..MULMOD all exact */
     if (opcode >= EVM_LT && opcode <= EVM_SAR) return EVM_SUPPORT_FULLY_SUPPORTED;
     if (opcode == EVM_MLOAD || opcode == EVM_MSTORE || opcode == EVM_MSTORE8 || opcode == EVM_SLOAD || opcode == EVM_SSTORE) return EVM_SUPPORT_FULLY_SUPPORTED;
     if (opcode >= EVM_PUSH1 && opcode <= EVM_PUSH32) return EVM_SUPPORT_FULLY_SUPPORTED;
@@ -511,10 +511,17 @@ evm_support_class_t evm_opcode_support(unsigned int opcode) {
     if (opcode >= EVM_CODESIZE && opcode <= EVM_BASEFEE) return EVM_SUPPORT_APPROXIMATED_ANALYZABLE;
     if (opcode >= EVM_PC && opcode <= EVM_GAS) return EVM_SUPPORT_APPROXIMATED_ANALYZABLE;
     
+    /* SHA3/KECCAK256 emits tagged IR_CALL — analyzable */
+    if (opcode == EVM_SHA3) return EVM_SUPPORT_APPROXIMATED_ANALYZABLE;
+
     /* ── 3. PLACEHOLDER_ONLY ─────────────────────────────────────────────
      * Opcodes with no real analyzable structure beyond popping/pushing.
+     * EXP: exponentiation-by-squaring (complex, deferred)
+     * SIGNEXTEND: sign-extension helper (deferred)
+     * BYTE: single byte extraction (deferred)
+     * SELFDESTRUCT: terminal effect (deferred)
      */
-    if (opcode == EVM_ADDMOD || opcode == EVM_MULMOD || opcode == EVM_EXP || opcode == EVM_SIGNEXTEND || opcode == EVM_BYTE) return EVM_SUPPORT_PLACEHOLDER_ONLY;
+    if (opcode == EVM_EXP || opcode == EVM_SIGNEXTEND || opcode == EVM_BYTE) return EVM_SUPPORT_PLACEHOLDER_ONLY;
     if (opcode == EVM_SELFDESTRUCT) return EVM_SUPPORT_PLACEHOLDER_ONLY;
 
     /* ── 4. INVALID_OR_UNASSIGNED ──────────────────────────────────────── */

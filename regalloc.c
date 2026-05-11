@@ -92,7 +92,7 @@ void ra_free(RegAllocator *ra) {
 static int iv_cmp_start(const void *a, const void *b) {
     const LiveInterval *ia = (const LiveInterval *)a;
     const LiveInterval *ib = (const LiveInterval *)b;
-    if (ia->start != ib->start) return ia->start - ib->start;
+    if (ia->start != ib->start) return (ia->start > ib->start) ? 1 : -1;
     return strcmp(ia->name, ib->name);
 }
 
@@ -126,6 +126,15 @@ static void build_intervals(RegAllocator *ra, const ir_func_t *fn) {
 }
 
 /* ── Phase 2: Chaitin-Briggs Graph Coloring ──────────────────────────── */
+/*
+ * Physical register preference order — DO NOT reorder.
+ *
+ * These tables are iterated in index order during coloring, so any
+ * change to the sequence will alter which register each interval
+ * receives and produce a different assembly output.  Keeping this
+ * order fixed is a hard requirement for the self-host determinism
+ * gate (zcc2.s must be byte-identical to zcc3.s).
+ */
 static const PhysReg gpr_colors[7] = {PREG_RBX, PREG_R12, PREG_R13, PREG_R14, PREG_R15, PREG_R10, PREG_R11};
 static const PhysReg xmm_colors[8] = {PREG_XMM0, PREG_XMM1, PREG_XMM2, PREG_XMM3, PREG_XMM4, PREG_XMM5, PREG_XMM6, PREG_XMM7};
 

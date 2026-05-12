@@ -67,5 +67,6 @@
 #define ZCC_ND_INIT_LIST 63
 #define ZCC_ND_ASM 64
 #define ZCC_ND_NOP 65
+#define ZCC_ND_DESIGNATED_INIT 66
 
 #endif /* ZCC_AST_BRIDGE_CONSTANTS_H */

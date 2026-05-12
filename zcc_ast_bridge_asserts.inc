@@ -64,3 +64,4 @@ typedef char zcc_static_assert_ND_COMPOUND_ASSIGN[ (ND_COMPOUND_ASSIGN == ZCC_ND
 typedef char zcc_static_assert_ND_INIT_LIST[ (ND_INIT_LIST == ZCC_ND_INIT_LIST) ? 1 : -1 ];
 typedef char zcc_static_assert_ND_ASM[ (ND_ASM == ZCC_ND_ASM) ? 1 : -1 ];
 typedef char zcc_static_assert_ND_NOP[ (ND_NOP == ZCC_ND_NOP) ? 1 : -1 ];
+typedef char zcc_static_assert_ND_DESIGNATED_INIT[ (ND_DESIGNATED_INIT == ZCC_ND_DESIGNATED_INIT) ? 1 : -1 ];

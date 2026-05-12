@@ -22,7 +22,7 @@
 #include "ir_symbolic_cfg.h"
 #include "ir_dominance.h"
 
-#define SSA_ENABLED 0   // flip to 1 after we stabilize
+#define SSA_ENABLED 1   // flip to 1 after we stabilize
 
 /* ── Globals referenced by zcc.c (part5.c declares these extern) ──────── */
 int  g_manifold_enabled    = 0;
@@ -801,6 +801,8 @@ static ir_pass_result_t ir_pass_gvn(void *fn_ptr) {
     s_gvn_scope_top = 0;
     s_gvn_modified = 0;
 
+    extern ir_pass_result_t ir_pass_dominance(void *fn_ptr);
+    ir_pass_dominance(fn);
     cfg = dom_get_cfg();
 
     if (cfg && cfg->block_count > 0 && cfg->fn == fn) {

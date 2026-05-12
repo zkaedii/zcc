@@ -105,7 +105,8 @@ enum {
     ND_COMPOUND_ASSIGN,
     ND_INIT_LIST,
     ND_ASM,
-    ND_NOP
+    ND_NOP,
+    ND_DESIGNATED_INIT   /* hook for intelligent/Rust backend lowering */
 };
 
 /* ================================================================ */
@@ -692,5 +693,16 @@ int rust_backend_bridge_compile_file(const char *filename, const char *source, i
 int rust_resolve_names(RustResolveContext *ctx);
 int rust_typecheck(RustTypecheckContext *ctx);
 int rust_lower_to_ir(RustLowerContext *ctx);
+
+/* ── Codegen plugin interface (Rust/intelligent backend bridge) ─────── */
+typedef struct ZccCodegenPlugin {
+    const char *name;
+    int version;
+    void (*destroy)(struct ZccCodegenPlugin *self);
+    void (*emit_function)(Compiler *cc, Node *n);
+    int  (*can_handle)(Node *n);
+    void (*emit_global)(Compiler *cc, Node *n);
+    void (*optimize_pass)(Compiler *cc, Node *prog);
+} ZccCodegenPlugin;
 
 /* ZKAEDI FORCE RENDER CACHE INVALIDATION */

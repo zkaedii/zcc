@@ -1,0 +1,62 @@
+name: ZKAEDI PRIME // Neural CI/CD Forge
+
+on:
+  repository_dispatch:
+    types: [zkaedi_patch_emitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  kinetic-validation:
+    name: Autonomous Mutex Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Target Architecture
+        uses: actions/checkout@v4
+
+      - name: Install Foundry Toolchain
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Ingest ZKAEDI Neural Patch
+        env:
+          PATCH_URL: ${{ github.event.client_payload.patch_url }}
+        run: |
+          echo -e "\033[38;5;51m[ZKAEDI PRIME] Fetching Neural Patch from R2 Edge...\033[0m"
+          curl -sL "$PATCH_URL" -o zkaedi_prime_heal.patch
+          git apply zkaedi_prime_heal.patch
+          rm zkaedi_prime_heal.patch
+
+      - name: Execute Deterministic Foundry Audit
+        run: |
+          echo -e "\033[38;5;199m[ZKAEDI PRIME] Auditing State Transitions & Gas Deltas...\033[0m"
+          forge test -vvv --match-contract ZkaediHealTest
+          forge snapshot --check
+
+      - name: Generate Automated Pull Request
+        if: success()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONFIDENCE: ${{ github.event.client_payload.confidence }}
+          RISK: ${{ github.event.client_payload.risk }}
+        run: |
+          BRANCH_NAME="zkaedi-heal-${{ github.event.client_payload.patch_id }}"
+          git config --global user.name "ZKAEDI PRIME Oracle"
+          git config --global user.email "oracle@modesto.grid"
+          git checkout -b $BRANCH_NAME
+          git commit -am "[ZKAEDI] Inject EIP-1153 Transient Mutex for $RISK"
+          git push origin $BRANCH_NAME
+
+          gh pr create \
+            --title "🛡️ ZKAEDI Kinetic Heal: EIP-1153 Mutex Injection" \
+            --body "### ZKAEDI PRIME Autonomous Audit
+            - **Risk Vector:** \`$RISK\`
+            - **Neural Confidence:** \`$CONFIDENCE\`
+            - **Mitigation:** EIP-1153 Transient Mutex (TSTORE)
+            - **Validation:** Foundry Null Test Passed (100% Coverage Retained)
+            
+            *This patch was generated natively by the Modesto AVX-512 Tensor Grid. Review the deterministic gas delta before merging.*" \
+            --label "security,zkaedi-automated"

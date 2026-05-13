@@ -1,7 +1,8 @@
 CC = gcc
 CFLAGS = -O0 -w -fno-asynchronous-unwind-tables -g0
-LDFLAGS = -lm -Wl,-s
+LDFLAGS = -lm
 FAST_CFLAGS = -O2 -DNDEBUG -w -fno-asynchronous-unwind-tables -g0
+STRIP ?=
 FORTIFY_PACK_DIR ?= fortify_zcc_clean
 
 PARTS = part1.c part0_pp.c part2.c part3.c ir.h ir_emit_dispatch.h ir_bridge.h part4.c part5.c part7_rust.c part6_arm.c ir.c ir_to_x86.c regalloc.c ir_telemetry_stub.c forgezero_receipt_stub.c
@@ -43,19 +44,19 @@ zcc: zcc.c $(PASSES)
 	  rm -f .zcc_parts_check.tmp; \
 	fi
 	$(CC) $(CFLAGS) -o zcc zcc.c $(PASSES) $(LDFLAGS)
-	strip --strip-all zcc
+	@if [ -n "$(STRIP)" ]; then $(STRIP) --strip-all zcc; fi
 
 zcc_fast: zcc.c $(PASSES)
 	$(CC) $(FAST_CFLAGS) -o zcc_fast zcc.c $(PASSES) $(LDFLAGS)
-	strip --strip-all zcc_fast
+	@if [ -n "$(STRIP)" ]; then $(STRIP) --strip-all zcc_fast; fi
 
 selfhost: zcc
 	@echo "=== Stage 1: zcc compiles itself -> zcc2 ==="
 	./zcc zcc.c -o zcc2
-	strip --strip-all zcc2
+	@if [ -n "$(STRIP)" ]; then $(STRIP) --strip-all zcc2; fi
 	@echo "=== Stage 2: zcc2 compiles itself -> zcc3 ==="
 	./zcc2 zcc.c -o zcc3
-	strip --strip-all zcc3
+	@if [ -n "$(STRIP)" ]; then $(STRIP) --strip-all zcc3; fi
 	@echo "=== Verify: zcc2.s == zcc3.s (codegen parity) ==="
 	./zcc  zcc.c -o zcc2.s
 	./zcc2 zcc.c -o zcc3.s
@@ -64,10 +65,10 @@ selfhost: zcc
 selfhost-fast: zcc_fast
 	@echo "=== FAST Stage 1: zcc_fast compiles itself -> zcc2_fast ==="
 	./zcc_fast zcc.c -o zcc2_fast
-	strip --strip-all zcc2_fast
+	@if [ -n "$(STRIP)" ]; then $(STRIP) --strip-all zcc2_fast; fi
 	@echo "=== FAST Stage 2: zcc2_fast compiles itself -> zcc3_fast ==="
 	./zcc2_fast zcc.c -o zcc3_fast
-	strip --strip-all zcc3_fast
+	@if [ -n "$(STRIP)" ]; then $(STRIP) --strip-all zcc3_fast; fi
 	@echo "=== FAST Verify: zcc2_fast.s == zcc3_fast.s ==="
 	./zcc_fast  zcc.c -o zcc2_fast.s
 	./zcc2_fast zcc.c -o zcc3_fast.s

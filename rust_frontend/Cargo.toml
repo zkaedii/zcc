@@ -24,9 +24,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Memory",
 ] }
 
-[[bin]]
-name = "zcc-native-host"
-path = "src/native_host.rs"
 
 [dependencies.rayon]
 version = "1.8"

@@ -140,17 +140,6 @@ typedef struct StringEntry StringEntry;
 typedef struct StructField StructField;
 typedef struct RustAst RustAst;
 typedef struct RustDiag RustDiag;
-typedef struct ZccCodegenPlugin ZccCodegenPlugin;
-
-struct ZccCodegenPlugin {
-    const char *name;
-    const char *version;
-    int (*can_handle)(Node *n);
-    void (*emit_function)(Compiler *cc, Node *n);
-    void (*emit_global)(Compiler *cc, Node *n);
-    void (*optimize_pass)(Compiler *cc, Node *prog);
-    void (*destroy)(ZccCodegenPlugin *plugin);
-};
 
 
 /* ================================================================ */

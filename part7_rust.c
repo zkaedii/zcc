@@ -2215,24 +2215,7 @@ int rust_lower_to_ir(RustLowerContext *ctx) {
     if (!ctx || !ctx->ast) return 1;
     ctx->had_error = 0;
 
-    if (ctx->dump_ir) {
-        int pi;
-        printf("RustIR v1\n");
-        fn = ctx->ast->functions;
-        while (fn) {
-            printf("fn %s(", fn->name);
-            for (pi = 0; pi < fn->num_params; pi++) {
-                if (pi) printf(", ");
-                printf("%s:%s",
-                       fn->param_names[pi],
-                       fn->param_types[pi][0] ? fn->param_types[pi] : "i32");
-            }
-            printf(") -> %s {\n", fn->ret_type[0] ? fn->ret_type : "i32");
-            rust_lower_dump_stmt_list(ctx, fn->body_head, 2);
-            printf("}\n");
-            fn = fn->next;
-        }
-    }
+
 
     /* Initialize the global IR module if it hasn't been */
     if (!g_ir_module) {

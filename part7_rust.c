@@ -2211,11 +2211,8 @@ static void rust_lower_stmt_list_ir(RustLowerContext *ctx, ir_func_t *ir_fn, Rus
 }
 
 int rust_lower_to_ir(RustLowerContext *ctx) {
-    RustFunction *fn;
     if (!ctx || !ctx->ast) return 1;
     ctx->had_error = 0;
-
-
 
     /* Initialize the global IR module if it hasn't been */
     if (!g_ir_module) {
@@ -2226,7 +2223,7 @@ int rust_lower_to_ir(RustLowerContext *ctx) {
     memset(rust_sym_vregs, 0, sizeof(rust_sym_vregs));
     memset(rust_sym_is_mut, 0, sizeof(rust_sym_is_mut));
 
-    fn = ctx->ast->functions;
+    RustFunction *fn = ctx->ast->functions;
     while (fn) {
         ir_type_t ret_ty = (strcmp(fn->ret_type, "i32") == 0) ? IR_TY_I32 : IR_TY_VOID;
         ir_func_t *ir_fn = ir_func_create(g_ir_module, fn->name, ret_ty, fn->num_params);
@@ -2237,14 +2234,14 @@ int rust_lower_to_ir(RustLowerContext *ctx) {
             char param_vreg[IR_NAME_MAX];
             snprintf(param_vreg, IR_NAME_MAX, "p%d", pi);
             strncpy(ir_fn->param_names[pi], param_vreg, IR_NAME_MAX);
-
+            
             /* Parameters in our subset are immutable */
             strncpy(rust_sym_vregs[fn->param_symbol_ids[pi]], param_vreg, IR_NAME_MAX);
             rust_sym_is_mut[fn->param_symbol_ids[pi]] = 0;
         }
 
         rust_lower_stmt_list_ir(ctx, ir_fn, fn->body_head);
-
+        
         fn = fn->next;
     }
 
